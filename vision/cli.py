@@ -12,14 +12,15 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
+from rich.padding import Padding
 from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
 from vision import __version__
-from vision.ui import MODEL_CHOICES, InputBox, ReplyView, pick, short_path, show_header, show_user
+from vision.ui import MODEL_CHOICES, USER_BG, ChatScreen, ReplyView, header_renderable, pick, short_path, show_header, show_user
 from vision.config import (
     CONFIG_PATH,
     KOKORO_MODEL_URL,
@@ -123,8 +124,8 @@ def _bar(pct: float) -> str:
     return f"[{colour}]{'█' * n}[/{colour}][dim]{'░' * (20 - n)}[/dim]"
 
 
-def _render_usage_text(text: str, full: bool = False) -> None:
-    """Render Claude Code's /usage report (session, week, per-model such as Fable) as bars."""
+def _usage_renderable(text: str, full: bool = False):
+    """Claude Code's /usage report (session, week, per-model such as Fable) as bars."""
     t = Table(title="Claude subscription usage", header_style=ACCENT, show_edge=False)
     t.add_column("window"), t.add_column("used", justify="right"), t.add_column("resets")
     rest = []
@@ -135,20 +136,23 @@ def _render_usage_text(text: str, full: bool = False) -> None:
             t.add_row(m.group("label"), f"{_bar(pct)} {pct:4.0f}%", (m.group("reset") or "").replace(" (America/New_York)", ""))
         else:
             rest.append(line)
-    console.print(t)
     if full:
-        console.print(Text("\n".join(l for l in rest if l.strip() and not l.startswith("You are currently")), style="dim"))
+        tail = Text("\n".join(l for l in rest if l.strip() and not l.startswith("You are currently")), style="dim")
     else:
-        console.print("[dim]`vision usage --full` shows what has been contributing to these numbers.[/dim]")
+        tail = Text("`vision usage --full` (or /usage full) shows what has been contributing to these numbers.", style="dim")
+    return Group(t, tail)
 
 
-def _render_usage(usage: dict | None, refreshed: bool):
-    """Fallback renderer using the rate-limit event attached to the last reply."""
+def _render_usage_text(text: str, full: bool = False) -> None:
+    console.print(_usage_renderable(text, full))
+
+
+def _usage_fallback_renderable(usage: dict | None):
+    """Fallback using the rate-limit event attached to the last reply."""
     from datetime import datetime
 
     if not usage:
-        console.print("[yellow]No usage data yet.[/yellow] Ask Vision something first, or run `vision usage`.")
-        return
+        return Text("No usage data yet. Ask Vision something first, or run `vision usage`.", style="yellow")
     info, at = usage.get("info", {}), usage.get("at", 0)
     wins = info.get("unifiedWindows") or {}
     t = Table(title="Claude subscription usage", header_style=ACCENT, show_edge=False)
@@ -159,18 +163,23 @@ def _render_usage(usage: dict | None, refreshed: bool):
         reset = w.get("resetsAt")
         when = datetime.fromtimestamp(reset).strftime("%b %d, %H:%M") if reset else "?"
         t.add_row(labels.get(key, key), f"{_bar(pct)} {pct:4.0f}%", when)
-    console.print(t)
     stamp = datetime.fromtimestamp(at).strftime("%H:%M:%S") if at else "?"
-    console.print(f"[dim]from the last reply's rate-limit event at {stamp}[/dim]")
+    return Group(t, Text(f"from the last reply's rate-limit event at {stamp}", style="dim"))
+
+
+def _render_usage(usage: dict | None, refreshed: bool):
+    console.print(_usage_fallback_renderable(usage))
+
+
+def _usage_for(brain, full: bool = False):
+    text = brain.usage_report()
+    return _usage_renderable(text, full) if text else _usage_fallback_renderable(brain.last_usage or brain.cached_usage())
 
 
 def _show_usage(brain, full: bool = False) -> None:
     with console.status("[dim]asking Claude Code for usage…[/dim]"):
-        text = brain.usage_report()
-    if text:
-        _render_usage_text(text, full)
-    else:
-        _render_usage(brain.last_usage or brain.cached_usage(), False)
+        r = _usage_for(brain, full)
+    console.print(r)
 
 
 @app.command()
@@ -205,113 +214,197 @@ def _model_label(alias: str) -> str:
     return next((label for v, label, _ in MODEL_CHOICES if v == alias), alias or "default")
 
 
+HELP_TEXT = (
+    "[bold]/model[/bold] pick a model (or /model sonnet) · [bold]/speak[/bold] toggle spoken replies · "
+    "[bold]/voice <name>[/bold] change voice\n"
+    "[bold]/listen[/bold] say one turn with the mic · [bold]/talk[/bold] switch to voice conversation · "
+    "[bold]/say <text>[/bold] speak text\n"
+    "[bold]/new[/bold] fresh conversation · [bold]/usage[/bold] subscription usage (add 'full' for detail) · "
+    "[bold]/clear[/bold] clear the screen · [bold]/quit[/bold]\n"
+    "[dim]Enter sends · Ctrl-J newline · PgUp/PgDn scroll · Esc cancels a reply · Ctrl-D quits[/dim]"
+)
+
+
+def _user_band(text: str):
+    return Padding(Text.assemble(("you › ", "bold yellow"), (text, "bold")), (0, 1), style=USER_BG, expand=True)
+
+
+def _banner(cfg: Config, brain, speak: bool):
+    return header_renderable(
+        f"model {_model_label(cfg.brain.model)} · speech {'on' if speak else 'off'} · {short_path(brain.workdir)}"
+        + (" · resumed" if brain.session_id else ""),
+        f"tools: {', '.join(cfg.brain.allowed_tools) or 'none'}",
+        "/help for commands · Esc cancels a reply · Ctrl-D or /quit exits",
+    )
+
+
 def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Optional[str], cont: bool):
     from vision.config import STATE_DIR
 
     cfg = _cfg(model, voice, effort)
     brain = _brain(cfg, voice_mode=False, cont=cont, new=False)
-    speaker = None
+    state = {"speak": speak, "speaker": None, "mic": None, "stt": None, "ss": None}
     if speak:
-        speaker = _speaker(cfg)
-        threading.Thread(target=speaker._load, daemon=True).start()
-    mic = None
-    stt = None
-    state = {"speak": speak}
-
-    show_header(
-        console,
-        f"model {_model_label(cfg.brain.model)} · speech {'on' if speak else 'off'}"
-        + (" · resumed" if brain.session_id else "")
-        + f" · {short_path(brain.workdir)}",
-        "/help for commands · Ctrl-C cancels a reply · Ctrl-D or /quit exits",
-    )
+        state["speaker"] = _speaker(cfg)
+        threading.Thread(target=state["speaker"]._load, daemon=True).start()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    def speaker():
+        if state["speaker"] is None:
+            state["speaker"] = _speaker(cfg)
+        return state["speaker"]
 
     def status_line() -> str:
         return (
             f"model {_model_label(cfg.brain.model)}  ·  speech {'on' if state['speak'] else 'off'}  ·  "
-            f"{short_path(brain.workdir)}  ·  Enter send · Ctrl-J newline · /help"
+            f"{short_path(brain.workdir)}  ·  /help"
         )
 
-    box = InputBox(str(STATE_DIR / "history"), status_line)
+    screen = ChatScreen(str(STATE_DIR / "history"), status_line)
+    screen.add(_banner(cfg, brain, speak))
 
-    while True:
+    def note(msg: str, style: str = "dim"):
+        screen.add(Text.from_markup(msg) if "[" in msg else Text(msg, style=style))
+
+    # ---- one reply, run on a worker thread so the UI keeps drawing
+    def run_turn(text: str):
+        ss = None
+        if state["speak"]:
+            from vision.tts import StreamingSpeaker
+
+            ss = StreamingSpeaker(speaker())
+        state["ss"] = ss
+        entry = screen.start_reply(markdown=True)
+
+        def on_text(d):
+            screen.update_reply(entry, delta=d)
+            if ss:
+                ss.feed(d)
+
+        def on_status(tool):
+            screen.update_reply(entry, status=f"using {tool}…", force=True)
+
         try:
-            text = box.read().strip()
-        except (EOFError, KeyboardInterrupt):
-            console.print(f"{NAME} [dim]signing off.[/dim]")
-            break
-        if not text:
-            continue
+            turn = brain.ask(text, on_text=on_text, on_status=on_status)
+            if turn.is_error and not turn.text:
+                msg = "*(cancelled)*" if turn.error == "cancelled" else f"**Vision could not answer:** {turn.error}"
+                screen.update_reply(entry, delta=msg, force=True)
+        except Exception as e:  # noqa: BLE001
+            screen.update_reply(entry, delta=f"**Error:** {e}", force=True)
+        finally:
+            screen.end_reply(entry)
+            if ss:
+                try:
+                    ss.finish()
+                except Exception:
+                    pass
+            state["ss"] = None
+
+    def cancel():
+        brain.cancel()
+        if state["ss"]:
+            state["ss"].stop()
+        elif state["speaker"]:
+            state["speaker"].stop()
+
+    def background(fn, *args):
+        threading.Thread(target=fn, args=args, daemon=True).start()
+
+    # ---- slash commands
+    def command(cmd: str, arg: str):
+        if cmd in ("quit", "exit", "q"):
+            screen.exit(("quit",))
+        elif cmd == "help":
+            note(HELP_TEXT)
+        elif cmd == "clear":
+            with screen._lock:
+                screen.entries.clear()
+            screen.add(_banner(cfg, brain, state["speak"]))
+        elif cmd == "model":
+            def set_model(choice):
+                cfg.brain.model = "" if choice in ("default", "reset") else choice
+                note(f"model → {_model_label(cfg.brain.model)}")
+            if arg:
+                set_model(arg)
+            else:
+                screen.open_picker("Choose a model", MODEL_CHOICES, cfg.brain.model, set_model)
+        elif cmd == "usage":
+            screen.busy, screen.busy_label = True, "asking Claude Code for usage…"
+
+            def go():
+                try:
+                    screen.add(_usage_for(brain, full=arg == "full"))
+                finally:
+                    screen.busy = False
+            background(go)
+        elif cmd == "new":
+            brain.new_session()
+            note("new conversation")
+        elif cmd == "speak":
+            if state["speaker"] is None:
+                speaker()
+                state["speak"] = True
+            else:
+                state["speak"] = not state["speak"]
+            note(f"speech {'on' if state['speak'] else 'off'}")
+        elif cmd == "voice":
+            def go():
+                try:
+                    speaker().set_voice(arg or cfg.voice.voice)
+                    note(f"voice → {speaker().voice}")
+                except Exception as e:
+                    note(f"[red]{e}[/red]")
+            background(go)
+        elif cmd == "say":
+            background(lambda: speaker().say(arg))
+        elif cmd == "talk":
+            screen.exit(("talk",))
+        elif cmd == "listen":
+            screen.exit(("listen",))
+        else:
+            note(f"[red]unknown command /{cmd}[/red]")
+
+    def submit(text: str):
+        text = text.strip()
         if text.startswith("/"):
             cmd, _, arg = text[1:].partition(" ")
-            cmd, arg = cmd.lower(), arg.strip()
-            if cmd in ("quit", "exit", "q"):
-                break
-            elif cmd == "help":
-                console.print(
-                    "[bold]/model[/bold] pick a model (or /model sonnet) · [bold]/speak[/bold] toggle spoken replies · "
-                    "[bold]/voice <name>[/bold] change voice\n"
-                    "[bold]/listen[/bold] say one turn with the mic · [bold]/talk[/bold] switch to voice conversation · "
-                    "[bold]/say <text>[/bold] speak text\n"
-                    "[bold]/new[/bold] fresh conversation · [bold]/usage[/bold] subscription usage (add 'full' for detail) · [bold]/quit[/bold]"
-                )
-            elif cmd == "model":
-                if arg:
-                    cfg.brain.model = "" if arg in ("default", "reset") else arg
-                    console.print(f"[dim]model → {_model_label(cfg.brain.model)}[/dim]")
-                else:
-                    choice = pick("Choose a model", MODEL_CHOICES, current=cfg.brain.model)
-                    if choice is not None:
-                        cfg.brain.model = choice
-                        console.print(f"[dim]model → {_model_label(cfg.brain.model)}[/dim]")
-            elif cmd == "usage":
-                _show_usage(brain, full=arg == "full")
-            elif cmd == "new":
-                brain.new_session()
-                console.print("[dim]new conversation[/dim]")
-            elif cmd == "speak":
-                if speaker is None:
-                    speaker = _speaker(cfg)
-                    state["speak"] = True
-                else:
-                    state["speak"] = not state["speak"]
-                console.print(f"[dim]speech {'on' if state['speak'] else 'off'}[/dim]")
-            elif cmd == "voice":
-                if speaker is None:
-                    speaker = _speaker(cfg)
-                try:
-                    speaker.set_voice(arg or cfg.voice.voice)
-                    console.print(f"[dim]voice → {speaker.voice}[/dim]")
-                except Exception as e:
-                    console.print(f"[red]{e}[/red]")
-            elif cmd == "say":
-                if speaker is None:
-                    speaker = _speaker(cfg)
-                try:
-                    speaker.say(arg)
-                except KeyboardInterrupt:
-                    speaker.stop()
-            elif cmd == "talk":
-                _talk_loop(cfg, brain, speaker or _speaker(cfg), ptt=False, echo=True)
-                brain.voice_mode = False
-            elif cmd == "listen":
-                if mic is None:
-                    from vision.audio import Microphone
-                    from vision.stt import Transcriber
+            command(cmd.lower(), arg.strip())
+            return
+        screen.add(_user_band(text), gap_before=True)
+        background(run_turn, text)
 
-                    mic, stt = Microphone(cfg.listen), Transcriber(cfg.listen)
-                    with console.status("[dim]loading speech recognition…[/dim]"):
-                        stt.warm_up()
-                heard = _listen_once(cfg, mic, stt)
-                if heard:
-                    show_user(console, heard)
-                    _run_turn(brain, heard, speaker if state["speak"] else None)
+    screen.on_submit = submit
+    screen.on_cancel = cancel
+
+    # ---- outer loop: the screen exits only for voice modes or quitting
+    while True:
+        try:
+            result = screen.run()
+        except (EOFError, KeyboardInterrupt):
+            result = ("quit",)
+        kind = result[0] if result else "quit"
+        if kind == "quit":
+            cancel()
+            console.print(f"{NAME} [dim]signing off.[/dim]")
+            break
+        if kind == "talk":
+            _talk_loop(cfg, brain, speaker(), ptt=False, echo=True)
+            brain.voice_mode = False
+            screen.add(Text("back from voice conversation", style="dim"))
+        elif kind == "listen":
+            if state["mic"] is None:
+                from vision.audio import Microphone
+                from vision.stt import Transcriber
+
+                state["mic"], state["stt"] = Microphone(cfg.listen), Transcriber(cfg.listen)
+                with console.status("[dim]loading speech recognition…[/dim]"):
+                    state["stt"].warm_up()
+            heard = _listen_once(cfg, state["mic"], state["stt"])
+            if heard:
+                screen.add(_user_band(heard), gap_before=True)
+                background(run_turn, heard)
             else:
-                console.print(f"[red]unknown command /{cmd}[/red]")
-            continue
-        show_user(console, text)
-        _run_turn(brain, text, speaker if state["speak"] else None)
+                screen.add(Text("didn't catch that", style="dim"))
 
 
 # ---------------------------------------------------------------- talk (speech to speech)

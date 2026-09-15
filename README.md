@@ -30,8 +30,10 @@ vision config --edit  # edit ~/.config/vision/config.toml
 ```
 
 In `vision talk` you can also type a message and press Enter at any time instead of speaking.
-The chat has a framed message box at the bottom (Enter sends, Ctrl-J adds a line, Up/Down recall
-history), your messages appear as highlighted bands, and replies stream beside a `Vision ›` prefix.
+The chat is a full-screen view like Claude Code's: the conversation scrolls at the top and a framed
+message box stays pinned to the bottom (Enter sends, Ctrl-J adds a line, Up/Down recall history,
+PgUp/PgDn scroll the transcript, Esc cancels a reply in progress). Your messages appear as highlighted
+bands, and replies stream beside a `Vision ›` prefix. `/clear` wipes the screen.
 `/model` on its own opens an arrow-key picker (default, Fable, Opus, Sonnet, Haiku); `/model sonnet`
 sets one directly. Inside chat: `/speak` toggles voice, `/talk` switches to a spoken conversation, `/listen` speaks one
 turn, `/voice bf_emma` changes the voice, `/new` starts a fresh conversation, `/model opus` swaps model.
