@@ -28,6 +28,7 @@ vision doctor         # check login, models, GPU, audio devices
 vision config --edit  # edit ~/.config/vision/config.toml
 ```
 
+In `vision talk` you can also type a message and press Enter at any time instead of speaking.
 Inside chat: `/speak` toggles voice, `/talk` switches to a spoken conversation, `/listen` speaks one
 turn, `/voice bf_emma` changes the voice, `/new` starts a fresh conversation, `/model opus` swaps model.
 `vision -c` / `vision talk -c` continues the last conversation.

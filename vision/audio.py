@@ -86,17 +86,18 @@ class Microphone:
         audio = np.frombuffer(b"".join(frames), dtype=np.int16).astype(np.float32) / 32768.0
         return audio
 
-    def record_until_enter(self, prompt: str = "") -> np.ndarray:
-        """Push-to-talk: record until the user presses Enter."""
-        stop = threading.Event()
+    def record_until_enter(self, stop: threading.Event | None = None) -> np.ndarray:
+        """Push-to-talk: record until `stop` is set (or, if none given, until Enter is pressed)."""
+        if stop is None:
+            stop = threading.Event()
 
-        def waiter():
-            try:
-                sys.stdin.readline()
-            finally:
-                stop.set()
+            def waiter():
+                try:
+                    sys.stdin.readline()
+                finally:
+                    stop.set()
 
-        threading.Thread(target=waiter, daemon=True).start()
+            threading.Thread(target=waiter, daemon=True).start()
         frames: list[bytes] = []
         with self._stream() as stream:
             while not stop.is_set():

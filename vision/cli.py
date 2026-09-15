@@ -266,9 +266,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
 
 # ---------------------------------------------------------------- talk (speech to speech)
 def _listen_once(cfg: Config, mic, stt, ptt: bool = False, cancel: threading.Event | None = None) -> str:
-    from vision.tts import chime
-
+    """Single spoken turn with a spinner (used by chat's /listen and `vision listen`)."""
     from vision.config import resolve_device
+    from vision.tts import chime
 
     out_dev = resolve_device(cfg.voice.output_device, "output")
     if ptt:
@@ -279,6 +279,85 @@ def _listen_once(cfg: Config, mic, stt, ptt: bool = False, cancel: threading.Eve
             chime("listen", out_dev)
         with console.status(f"[{ACCENT}]listening…[/{ACCENT}]", spinner="dots") as st:
             audio = mic.record_utterance(on_speech_start=lambda: st.update(f"[{ACCENT}]hearing you…[/{ACCENT}]"), cancel=cancel)
+    if audio is None or audio.size == 0:
+        return ""
+    with console.status("[dim]transcribing…[/dim]", spinner="dots"):
+        return stt.transcribe(audio)
+
+
+class _Keyboard:
+    """Background stdin reader so you can type to Vision while it is listening."""
+
+    def __init__(self):
+        import queue
+
+        self.q: queue.Queue[str | None] = queue.Queue()
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        try:
+            for line in sys.stdin:
+                self.q.put(line.rstrip("\n"))
+        except Exception:
+            pass
+        self.q.put(None)  # EOF
+
+    def poll(self, timeout: float = 0.1):
+        """Returns a typed line, None on EOF, or raises queue.Empty if nothing yet."""
+        return self.q.get(timeout=timeout)
+
+
+def _next_input(cfg: Config, mic, stt, kb: _Keyboard, ptt: bool) -> str | None:
+    """Wait for either a spoken utterance or a typed line. Returns text, or None on EOF."""
+    import queue
+
+    from vision.config import resolve_device
+    from vision.tts import chime
+
+    out_dev = resolve_device(cfg.voice.output_device, "output")
+
+    if ptt:
+        console.print("[dim]press Enter to talk, or type a message ›[/dim] ", end="")
+        line = kb.q.get()
+        if line is None:
+            return None
+        if line.strip():
+            return line.strip()
+        stop = threading.Event()
+        console.print(f"[{ACCENT}]recording… press Enter to stop[/{ACCENT}]")
+        threading.Thread(target=lambda: (kb.q.get(), stop.set()), daemon=True).start()
+        audio = mic.record_until_enter(stop)
+    else:
+        if cfg.listen.chime:
+            chime("listen", out_dev)
+        console.print(f"[{ACCENT}]listening…[/{ACCENT}] [dim](or type a message and press Enter)[/dim]")
+        cancel = threading.Event()
+        result: dict = {}
+
+        def capture():
+            result["audio"] = mic.record_utterance(
+                on_speech_start=lambda: console.print(f"[{ACCENT}]hearing you…[/{ACCENT}]"), cancel=cancel
+            )
+
+        worker = threading.Thread(target=capture, daemon=True)
+        worker.start()
+        typed = None
+        while worker.is_alive():
+            try:
+                typed = kb.poll(0.1)
+            except queue.Empty:
+                continue
+            cancel.set()
+            worker.join()
+            break
+        if typed is not None or (not worker.is_alive() and cancel.is_set()):
+            if typed is None:
+                return None  # EOF (Ctrl-D)
+            if typed.strip():
+                return typed.strip()
+            return ""  # empty Enter: just restart listening
+        audio = result.get("audio")
+
     if audio is None or audio.size == 0:
         return ""
     with console.status("[dim]transcribing…[/dim]", spinner="dots"):
@@ -302,20 +381,20 @@ def _talk_loop(cfg: Config, brain, speaker, ptt: bool, echo: bool):
             f"{NAME} is listening.  [dim]ears:[/dim] {stt.device}   [dim]voice:[/dim] {speaker.voice} on {speaker.device}   "
             f"[dim]model:[/dim] {cfg.brain.model or 'default'}\n"
             + ("[dim]Push-to-talk: press Enter to start and stop recording.[/dim]\n" if ptt else "[dim]Hands-free: just speak; pause to send.[/dim]\n")
-            + "[dim]Ctrl-C while Vision is talking interrupts it · Ctrl-C while listening exits · say “goodbye” to exit[/dim]",
+            + "[dim]You can also type a message and press Enter at any time.\n"
+            + "Ctrl-C while Vision is talking interrupts it · Ctrl-C while listening exits · say or type “goodbye” to exit[/dim]",
             border_style=ACCENT,
         )
     )
+    kb = _Keyboard()
     while True:
         try:
-            if ptt:
-                try:
-                    input("press Enter to talk › ")
-                except EOFError:
-                    break
-            heard = _listen_once(cfg, mic, stt, ptt=ptt)
+            heard = _next_input(cfg, mic, stt, kb, ptt)
         except KeyboardInterrupt:
             console.print(f"\n{NAME} [dim]signing off.[/dim]")
+            break
+        if heard is None:
+            console.print(f"{NAME} [dim]signing off.[/dim]")
             break
         if not heard:
             continue
