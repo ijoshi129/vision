@@ -81,6 +81,7 @@ class Speaker:
         self._style = None
         self._lang = "en-gb"
         self._voice_desc = cfg.voice
+        self.device = "?"
         self._out_device = resolve_device(cfg.output_device, "output")
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -98,11 +99,39 @@ class Speaker:
             import logging
 
             logging.getLogger("kokoro_onnx").setLevel(logging.WARNING)
+            import onnxruntime as rt
             from kokoro_onnx import Kokoro
 
             m, v = model_files()
-            self._kokoro = Kokoro(str(m), str(v))
+            self._kokoro = Kokoro.from_session(self._session(rt, m), str(v))
             self.set_voice(self.cfg.voice)
+            # First inference on CUDA compiles kernels; do it now, not on the first reply.
+            self._kokoro.create("Ready.", voice=self._style, speed=1.0, lang=self._lang)
+
+    def _session(self, rt, model_path):
+        """Build an ONNX Runtime session on the GPU when possible, else CPU."""
+        rt.set_default_logger_severity(3)  # silence benign ScatterND / conv warnings
+        so = rt.SessionOptions()
+        so.log_severity_level = 3
+        want = self.cfg.device or "auto"
+        if want in ("auto", "cuda") and "CUDAExecutionProvider" in rt.get_available_providers():
+            try:
+                from vision.cuda import preload
+
+                preload()
+                # HEURISTIC avoids cuDNN's exhaustive autotune (40 s warm-up on first run).
+                sess = rt.InferenceSession(
+                    str(model_path), so,
+                    providers=[("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}), "CPUExecutionProvider"],
+                )
+                if sess.get_providers()[0] == "CUDAExecutionProvider":
+                    self.device = "cuda"
+                    return sess
+            except Exception:  # noqa: BLE001
+                if want == "cuda":
+                    raise
+        self.device = "cpu"
+        return rt.InferenceSession(str(model_path), so, providers=["CPUExecutionProvider"])
 
     @property
     def voice(self) -> str:

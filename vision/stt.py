@@ -1,9 +1,7 @@
 """Speech-to-text with faster-whisper (CTranslate2), CUDA when available."""
 from __future__ import annotations
 
-import ctypes
 import os
-import site
 import threading
 import time
 
@@ -19,21 +17,7 @@ _HALLUCINATIONS = {
 }
 
 
-def _preload_cuda_libs() -> None:
-    """CTranslate2 looks for libcublas/libcudnn on the loader path; pip's nvidia-* wheels
-    put them under site-packages/nvidia/*/lib. Load them globally before importing."""
-    roots = list(site.getsitepackages())
-    if site.getusersitepackages():
-        roots.append(site.getusersitepackages())
-    names = ["cublas/lib/libcublasLt.so.12", "cublas/lib/libcublas.so.12", "cudnn/lib/libcudnn.so.9"]
-    for root in roots:
-        for n in names:
-            p = os.path.join(root, "nvidia", n)
-            if os.path.exists(p):
-                try:
-                    ctypes.CDLL(p, mode=ctypes.RTLD_GLOBAL)
-                except OSError:
-                    pass
+from vision.cuda import preload as _preload_cuda_libs
 
 
 class Transcriber:

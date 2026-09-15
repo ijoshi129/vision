@@ -38,6 +38,8 @@ address_user_as = "boss"
 # Run `vision voices --preview` to audition them. British female voices start with "bf_".
 voice = "friday"
 speed = 1.0
+# Where Kokoro runs: "auto" tries the GPU (CUDA) then falls back to CPU. Or force "cuda" / "cpu".
+device = "auto"
 # Output device index or name substring. Empty = system default.
 output_device = ""
 
@@ -85,6 +87,7 @@ class BrainConfig:
 class VoiceConfig:
     voice: str = "friday"
     speed: float = 1.0
+    device: str = "auto"
     output_device: str = ""
 
 

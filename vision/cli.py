@@ -299,7 +299,7 @@ def _talk_loop(cfg: Config, brain, speaker, ptt: bool, echo: bool):
         t_load.join()
     console.print(
         Panel.fit(
-            f"{NAME} is listening.  [dim]ears:[/dim] {stt.device}   [dim]voice:[/dim] {speaker.voice}   "
+            f"{NAME} is listening.  [dim]ears:[/dim] {stt.device}   [dim]voice:[/dim] {speaker.voice} on {speaker.device}   "
             f"[dim]model:[/dim] {cfg.brain.model or 'default'}\n"
             + ("[dim]Push-to-talk: press Enter to start and stop recording.[/dim]\n" if ptt else "[dim]Hands-free: just speak; pause to send.[/dim]\n")
             + "[dim]Ctrl-C while Vision is talking interrupts it · Ctrl-C while listening exits · say “goodbye” to exit[/dim]",
@@ -560,7 +560,7 @@ def doctor():
 
         sp = Speaker(cfg.voice)
         sp._load()
-        console.print(f"{ok} voice '{cfg.voice.voice}' loads ({sp.voice})")
+        console.print(f"{ok} voice '{cfg.voice.voice}' loads on {sp.device} ({sp.voice})")
     except Exception as e:
         console.print(f"{bad} voice failed: {e}")
     console.print(f"[dim]config: {CONFIG_PATH}[/dim]")

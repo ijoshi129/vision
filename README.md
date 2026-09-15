@@ -82,7 +82,8 @@ Requires `espeak-ng` (`sudo dnf install espeak-ng`) for Kokoro's phonemizer fall
 
 ## Notes
 
-- Kokoro deliberately runs on the CPU. `onnxruntime-gpu` 1.30 needs the CUDA 13 runtime libraries
-  (about 2 GB extra) for a gain of a few hundred milliseconds per sentence; not worth the disk on this laptop.
+- Kokoro runs on the GPU through `onnxruntime-gpu` 1.22 (the CUDA 12 build, sharing the pip `nvidia-*-cu12`
+  libraries with Whisper). A 7-second reply synthesises in about 0.2 s; CPU fallback is automatic
+  (`[voice] device = "cpu"` forces it). Newer `onnxruntime-gpu` releases need CUDA 13 libraries instead.
 - Hands-free mode listens only after Vision has finished speaking, so laptop speakers work, but a headset
   gives cleaner end-pointing.
