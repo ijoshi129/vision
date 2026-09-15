@@ -232,6 +232,26 @@ class Brain:
         except (OSError, json.JSONDecodeError):
             return None
 
+    def usage_report(self) -> str | None:
+        """Claude Code's own /usage text (session, week, per-model windows). No model call is made."""
+        env = dict(os.environ)
+        env.pop("CLAUDECODE", None)
+        cmd = [self.claude, "-p", "/usage", "--output-format", "json", "--no-session-persistence", "--tools", ""]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, cwd=self.workdir, env=env, timeout=60)
+            data = json.loads(r.stdout.strip().splitlines()[-1])
+        except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
+            return None
+        text = data.get("result") or ""
+        if data.get("is_error") or "used" not in text:
+            return None
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            (STATE_DIR / "usage.txt").write_text(text)
+        except OSError:
+            pass
+        return text
+
     def ping_usage(self) -> dict | None:
         """Make the cheapest possible Claude call just to read the current rate-limit windows."""
         env = dict(os.environ)

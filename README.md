@@ -30,7 +30,10 @@ vision config --edit  # edit ~/.config/vision/config.toml
 ```
 
 In `vision talk` you can also type a message and press Enter at any time instead of speaking.
-Inside chat: `/speak` toggles voice, `/talk` switches to a spoken conversation, `/listen` speaks one
+The chat has a framed message box at the bottom (Enter sends, Ctrl-J adds a line, Up/Down recall
+history), your messages appear as highlighted bands, and replies stream beside a `Vision ›` prefix.
+`/model` on its own opens an arrow-key picker (default, Fable, Opus, Sonnet, Haiku); `/model sonnet`
+sets one directly. Inside chat: `/speak` toggles voice, `/talk` switches to a spoken conversation, `/listen` speaks one
 turn, `/voice bf_emma` changes the voice, `/new` starts a fresh conversation, `/model opus` swaps model.
 `vision -c` / `vision talk -c` continues the last conversation.
 
@@ -59,8 +62,9 @@ create and change files, and web search/fetch. Headless mode cannot ask for perm
 run without prompts; `[brain].denied_tools` blocks patterns such as `sudo`, `rm -rf /`, `mkfs` and `dd`.
 Remove `"Bash"`, `"Write"` and `"Edit"` from `allowed_tools` for a read-only assistant.
 
-`vision usage` (or `/usage` inside chat and talk) shows your subscription's 5-hour and 7-day rate-limit
-windows, read from the usage events Claude Code reports on every reply.
+`vision usage` (or `/usage` inside chat and talk) runs Claude Code's own `/usage` report headlessly and
+shows the session window, the weekly all-models window, and per-model windows such as Fable, as bars.
+`--full` (or `/usage full`) adds Claude Code's breakdown of what has been contributing.
 
 ## Layout
 
@@ -70,6 +74,7 @@ vision/tts.py      Kokoro TTS, markdown→speech cleanup, streaming sentence pla
 vision/stt.py      faster-whisper (CUDA with CPU fallback), hallucination filtering
 vision/audio.py    mic capture with WebRTC VAD end-pointing / push-to-talk
 vision/cli.py      Typer CLI
+vision/ui.py       input box, model picker, message rendering (prompt_toolkit + rich)
 vision/persona.py  Vision's system prompt (text vs voice output rules)
 vision/config.py   config + paths
 ```
