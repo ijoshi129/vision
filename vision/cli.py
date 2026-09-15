@@ -147,6 +147,50 @@ def _run_turn(brain, text: str, speaker=None, markdown: bool = True):
     return turn
 
 
+# ---------------------------------------------------------------- usage
+def _render_usage(usage: dict | None, refreshed: bool):
+    from datetime import datetime
+
+    if not usage:
+        console.print("[yellow]No usage data yet.[/yellow] Ask Vision something first, or run `vision usage --refresh`.")
+        return
+    info, at = usage.get("info", {}), usage.get("at", 0)
+    wins = info.get("unifiedWindows") or {}
+    t = Table(title="Claude subscription usage", header_style=ACCENT, show_edge=False)
+    t.add_column("window"), t.add_column("used", justify="right"), t.add_column("resets")
+    labels = {"five_hour": "5-hour window", "seven_day": "7-day window", "seven_day_opus": "7-day (Opus)", "seven_day_sonnet": "7-day (Sonnet)"}
+    for key, w in wins.items():
+        pct = float(w.get("utilization") or 0) * 100
+        bar_n = int(round(pct / 5))
+        colour = "green" if pct < 60 else ("yellow" if pct < 85 else "red")
+        bar = f"[{colour}]{'█' * bar_n}[/{colour}][dim]{'░' * (20 - bar_n)}[/dim]"
+        reset = w.get("resetsAt")
+        when = datetime.fromtimestamp(reset).strftime("%a %H:%M" if key == "five_hour" else "%a %b %d %H:%M") if reset else "?"
+        t.add_row(labels.get(key, key), f"{bar} {pct:4.0f}%", when)
+    console.print(t)
+    status = info.get("status", "?")
+    overage = {"rejected": "off", "allowed": "on"}.get(info.get("overageStatus"), info.get("overageStatus"))
+    stamp = datetime.fromtimestamp(at).strftime("%H:%M:%S") if at else "?"
+    console.print(
+        f"[dim]status:[/dim] {status}   [dim]extra usage:[/dim] {overage or 'n/a'}   "
+        f"[dim]{'refreshed' if refreshed else 'as of last reply'} {stamp}[/dim]"
+    )
+
+
+@app.command()
+def usage(refresh: bool = typer.Option(False, "--refresh", "-r", help="Make a tiny request to fetch fresh numbers.")):
+    """Show how much of your Claude subscription's rate-limit windows Vision has used."""
+    from vision.brain import Brain
+
+    data = Brain.cached_usage()
+    if refresh or not data:
+        cfg = load_config()
+        with console.status("[dim]checking with Claude…[/dim]"):
+            data = Brain(cfg.brain).ping_usage() or data
+        refresh = True
+    _render_usage(data, refresh)
+
+
 # ---------------------------------------------------------------- default: chat
 @app.callback(invoke_without_command=True)
 def root(
@@ -187,6 +231,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         Panel.fit(
             f"{NAME} online.  [dim]model:[/dim] {cfg.brain.model or 'default'}   [dim]speech:[/dim] {'on' if speak else 'off'}"
             + ("   [dim]resumed[/dim]" if brain.session_id else "")
+            + f"\n[dim]working in:[/dim] {brain.workdir}   [dim]tools:[/dim] {', '.join(cfg.brain.allowed_tools) or 'none'}"
             + "\n[dim]/help for commands · Ctrl-C cancels a reply · Ctrl-D or /quit exits[/dim]",
             border_style=ACCENT,
         )
@@ -213,8 +258,16 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                     "[bold]/speak[/bold] toggle spoken replies · [bold]/voice <name>[/bold] change voice · "
                     "[bold]/listen[/bold] say one turn with the mic · [bold]/talk[/bold] switch to voice conversation\n"
                     "[bold]/new[/bold] fresh conversation · [bold]/model <name>[/bold] switch model · "
-                    "[bold]/say <text>[/bold] speak text · [bold]/quit[/bold]"
+                    "[bold]/say <text>[/bold] speak text · [bold]/usage[/bold] subscription usage · [bold]/quit[/bold]"
                 )
+            elif cmd == "usage":
+                data = brain.last_usage or brain.last_usage
+                if arg.strip() == "refresh" or not data:
+                    with console.status("[dim]checking with Claude…[/dim]"):
+                        data = brain.ping_usage() or brain.cached_usage()
+                    _render_usage(data, True)
+                else:
+                    _render_usage(data, False)
             elif cmd == "new":
                 brain.new_session()
                 console.print("[dim]new conversation[/dim]")
@@ -380,6 +433,7 @@ def _talk_loop(cfg: Config, brain, speaker, ptt: bool, echo: bool):
         Panel.fit(
             f"{NAME} is listening.  [dim]ears:[/dim] {stt.device}   [dim]voice:[/dim] {speaker.voice} on {speaker.device}   "
             f"[dim]model:[/dim] {cfg.brain.model or 'default'}\n"
+            + f"[dim]working in:[/dim] {brain.workdir}   [dim]tools:[/dim] {', '.join(cfg.brain.allowed_tools) or 'none'}\n"
             + ("[dim]Push-to-talk: press Enter to start and stop recording.[/dim]\n" if ptt else "[dim]Hands-free: just speak; pause to send.[/dim]\n")
             + "[dim]You can also type a message and press Enter at any time.\n"
             + "Ctrl-C while Vision is talking interrupts it · Ctrl-C while listening exits · say or type “goodbye” to exit[/dim]",
@@ -397,6 +451,10 @@ def _talk_loop(cfg: Config, brain, speaker, ptt: bool, echo: bool):
             console.print(f"{NAME} [dim]signing off.[/dim]")
             break
         if not heard:
+            continue
+        if heard.startswith("/usage"):
+            data = brain.last_usage or brain.cached_usage()
+            _render_usage(data, False)
             continue
         console.print(f"[bold yellow]you ›[/bold yellow] {heard}")
         if heard.lower().strip(" .!?,") in _EXIT_PHRASES:

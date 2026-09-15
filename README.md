@@ -24,6 +24,7 @@ vision say --out hello.wav "Saved to a file."
 vision listen         # transcribe one utterance from the mic
 vision listen -f clip.wav
 vision voices --preview   # audition the English voices
+vision usage          # subscription rate-limit windows used
 vision doctor         # check login, models, GPU, audio devices
 vision config --edit  # edit ~/.config/vision/config.toml
 ```
@@ -52,9 +53,14 @@ still writing, so the first words arrive within a second or so of the reply star
 Each turn runs `claude -p --output-format stream-json --resume <session>` inside
 `~/.local/share/vision/workspace`, passing Vision's persona via `--append-system-prompt`. Conversation
 memory is Claude Code's own session store, so you can even pick a Vision session up with `claude --resume`.
-Tools are limited to what `[brain].allowed_tools` lists (web search/fetch and read-only file tools by
-default); anything else is denied automatically. Add `"Bash"` there only if you want Vision to run
-commands for you.
+Vision works in the directory you launch it from (or `[brain].workdir`). By default it has the full
+toolset: Bash for shell commands (including deleting files), Read/Glob/Grep to read, Write/Edit to
+create and change files, and web search/fetch. Headless mode cannot ask for permission, so listed tools
+run without prompts; `[brain].denied_tools` blocks patterns such as `sudo`, `rm -rf /`, `mkfs` and `dd`.
+Remove `"Bash"`, `"Write"` and `"Edit"` from `allowed_tools` for a read-only assistant.
+
+`vision usage` (or `/usage` inside chat and talk) shows your subscription's 5-hour and 7-day rate-limit
+windows, read from the usage events Claude Code reports on every reply.
 
 ## Layout
 

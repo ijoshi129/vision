@@ -27,9 +27,14 @@ DEFAULT_CONFIG = '''# Vision configuration. Edit freely; run `vision config` to 
 model = ""
 # Effort level passed to Claude Code ("low", "medium", "high"). Empty = default.
 effort = ""
-# Tools Vision may use without prompting. Anything else is denied automatically.
-# Add "Bash" here only if you want Vision to run shell commands on your behalf.
-allowed_tools = ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]
+# Tools Vision may use without prompting (headless mode cannot ask, so anything not listed is denied).
+# Bash = shell commands, Read/Glob/Grep = read files, Write/Edit = create and change files.
+# Deleting files happens through Bash (rm). Remove "Bash" for a read-only assistant.
+allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"]
+# Command patterns Vision may never run, even with Bash allowed. Syntax: Bash(prefix:*)
+denied_tools = ["Bash(sudo:*)", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(mkfs:*)", "Bash(dd:*)", "Bash(shutdown:*)", "Bash(reboot:*)"]
+# Directory Vision works in. Empty = the directory you launch `vision` from.
+workdir = ""
 # How you'd like Vision to address you (e.g. "boss", your first name). Empty = nothing special.
 address_user_as = "boss"
 
@@ -79,7 +84,13 @@ VOICE_PRESETS = {
 class BrainConfig:
     model: str = ""
     effort: str = ""
-    allowed_tools: list[str] = field(default_factory=lambda: ["WebSearch", "WebFetch", "Read", "Glob", "Grep"])
+    allowed_tools: list[str] = field(
+        default_factory=lambda: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"]
+    )
+    denied_tools: list[str] = field(
+        default_factory=lambda: ["Bash(sudo:*)", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(mkfs:*)", "Bash(dd:*)", "Bash(shutdown:*)", "Bash(reboot:*)"]
+    )
+    workdir: str = ""
     address_user_as: str = "boss"
 
 

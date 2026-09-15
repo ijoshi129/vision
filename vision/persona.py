@@ -5,7 +5,28 @@ import platform
 from datetime import datetime
 
 
-def system_prompt(voice_mode: bool, address_user_as: str = "") -> str:
+def _tool_notes(tools: list[str], workdir: str) -> str:
+    lines = []
+    if workdir:
+        lines.append(f"Your working directory is {workdir}. Relative paths the user gives are relative to it.")
+    if "Bash" in tools:
+        lines.append(
+            "You can run shell commands with Bash: use it for anything the user asks that a terminal can do, "
+            "including deleting files (rm) and moving them. Say in one short line what you are about to do before "
+            "commands that delete, overwrite or change system state; for bulk or irreversible deletions, ask first. "
+            "You have no sudo; if a step needs root, give the user the exact command to run."
+        )
+    if "Write" in tools or "Edit" in tools:
+        lines.append("You can create and edit files directly with Write and Edit; do so rather than pasting content for the user to copy.")
+    if "Read" in tools:
+        lines.append("You can read files with Read, find them with Glob, and search their contents with Grep.")
+    if not tools:
+        lines.append("You have no tools in this session; say so if asked to act on files or the system.")
+    return "\n".join(lines)
+
+
+def system_prompt(voice_mode: bool, address_user_as: str = "", workdir: str = "", tools: list[str] | None = None) -> str:
+    tools = tools or []
     addr = (
         f'You may occasionally address the user as "{address_user_as}", sparingly and naturally, never every reply.'
         if address_user_as
@@ -23,7 +44,8 @@ If you need a clarifying detail, ask one short question.
 
 You are a general-purpose assistant, not only a coding tool: conversation, research, planning,
 explanations, writing, math, and everyday questions are all in scope. Use the web tools when a
-question depends on current facts. You cannot run shell commands unless a tool for that is offered to you.
+question depends on current facts.
+{_tool_notes(tools, workdir)}
 Today is {datetime.now().strftime('%A, %B %d, %Y')}.
 """.strip()
 

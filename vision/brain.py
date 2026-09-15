@@ -18,6 +18,7 @@ from vision.config import STATE_DIR, WORKSPACE_DIR, BrainConfig
 from vision.persona import system_prompt
 
 LAST_SESSION_FILE = STATE_DIR / "last_session"
+USAGE_FILE = STATE_DIR / "usage.json"
 
 
 class BrainError(RuntimeError):
@@ -53,6 +54,8 @@ class Brain:
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self.claude = find_claude()
+        self.workdir = os.path.abspath(os.path.expanduser(cfg.workdir)) if cfg.workdir else os.getcwd()
+        self.last_usage: dict | None = None
         WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
     # -- session helpers -------------------------------------------------
@@ -80,7 +83,8 @@ class Brain:
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
-            "--append-system-prompt", system_prompt(self.voice_mode, self.cfg.address_user_as),
+            "--append-system-prompt",
+            system_prompt(self.voice_mode, self.cfg.address_user_as, self.workdir, self.cfg.allowed_tools),
         ]
         if self.cfg.model:
             cmd += ["--model", self.cfg.model]
@@ -89,7 +93,9 @@ class Brain:
         # --tools limits which tools exist at all; --allowedTools pre-approves them so
         # headless mode never has to prompt (anything unapproved is denied automatically).
         tools = ",".join(self.cfg.allowed_tools)
-        cmd += ["--tools", tools or '""', "--allowedTools", tools] if tools else ["--tools", ""]
+        cmd += ["--tools", tools, "--allowedTools", tools] if tools else ["--tools", ""]
+        if self.cfg.denied_tools:
+            cmd += ["--disallowedTools", ",".join(self.cfg.denied_tools)]
         if self.session_id:
             cmd += ["--resume", self.session_id]
         return cmd
@@ -117,7 +123,7 @@ class Brain:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd=str(WORKSPACE_DIR),
+                cwd=self.workdir,
                 env=env,
                 text=True,
                 bufsize=1,
@@ -160,6 +166,8 @@ class Brain:
                             streamed.append("\n\n")
                             if on_text:
                                 on_text("\n\n")
+                elif t == "rate_limit_event":
+                    self._record_usage(ev.get("rate_limit_info"))
                 elif t == "assistant":
                     # Fallback source of text when partial messages are unavailable.
                     for block in ev.get("message", {}).get("content", []):
@@ -203,6 +211,45 @@ class Brain:
             self.session_id = turn.session_id
             self._remember_session()
         return turn
+
+    # -- subscription usage ---------------------------------------------
+    def _record_usage(self, info: dict | None) -> None:
+        if not info:
+            return
+        import time
+
+        self.last_usage = {"info": info, "at": time.time()}
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            USAGE_FILE.write_text(json.dumps(self.last_usage))
+        except OSError:
+            pass
+
+    @staticmethod
+    def cached_usage() -> dict | None:
+        try:
+            return json.loads(USAGE_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def ping_usage(self) -> dict | None:
+        """Make the cheapest possible Claude call just to read the current rate-limit windows."""
+        env = dict(os.environ)
+        env.pop("CLAUDECODE", None)
+        cmd = [self.claude, "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
+               "--model", "haiku", "--tools", "", "--max-turns", "1"]
+        try:
+            r = subprocess.run(cmd, input="Reply with OK.", capture_output=True, text=True, cwd=self.workdir, env=env, timeout=120)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        for line in r.stdout.splitlines():
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") == "rate_limit_event":
+                self._record_usage(ev.get("rate_limit_info"))
+        return self.last_usage
 
     def cancel(self) -> None:
         with self._lock:
