@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Vision launcher: runs the project's virtualenv python.
+exec "$HOME/Repos/vision/.venv/bin/python" -m vision "$@"
