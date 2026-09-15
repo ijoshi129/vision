@@ -79,3 +79,10 @@ install -m755 bin/vision ~/.local/bin/vision
 vision setup && vision doctor
 ```
 Requires `espeak-ng` (`sudo dnf install espeak-ng`) for Kokoro's phonemizer fallback.
+
+## Notes
+
+- Kokoro deliberately runs on the CPU. `onnxruntime-gpu` 1.30 needs the CUDA 13 runtime libraries
+  (about 2 GB extra) for a gain of a few hundred milliseconds per sentence; not worth the disk on this laptop.
+- Hands-free mode listens only after Vision has finished speaking, so laptop speakers work, but a headset
+  gives cleaner end-pointing.
