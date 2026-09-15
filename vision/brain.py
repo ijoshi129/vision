@@ -86,8 +86,10 @@ class Brain:
             cmd += ["--model", self.cfg.model]
         if self.cfg.effort:
             cmd += ["--effort", self.cfg.effort]
-        if self.cfg.allowed_tools:
-            cmd += ["--allowedTools", ",".join(self.cfg.allowed_tools)]
+        # --tools limits which tools exist at all; --allowedTools pre-approves them so
+        # headless mode never has to prompt (anything unapproved is denied automatically).
+        tools = ",".join(self.cfg.allowed_tools)
+        cmd += ["--tools", tools or '""', "--allowedTools", tools] if tools else ["--tools", ""]
         if self.session_id:
             cmd += ["--resume", self.session_id]
         return cmd

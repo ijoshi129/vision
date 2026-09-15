@@ -161,20 +161,30 @@ class Speaker:
     def is_playing(self) -> bool:
         return self._playing.is_set()
 
-    def play(self, audio: np.ndarray) -> None:
-        """Blocking playback that honours stop()."""
+    def open_stream(self):
         import sounddevice as sd
 
+        return sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", device=self._out_device)
+
+    def play(self, audio: np.ndarray, stream=None) -> None:
+        """Blocking playback that honours stop(). Pass an open stream to avoid per-chunk gaps."""
         if audio.size == 0:
             return
         self._playing.set()
         try:
-            with sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", device=self._out_device) as stream:
-                step = 2400  # 100 ms
-                for i in range(0, len(audio), step):
-                    if self._stop.is_set():
-                        break
-                    stream.write(audio[i : i + step].reshape(-1, 1))
+            own = stream is None
+            if own:
+                stream = self.open_stream()
+                stream.start()
+            step = 2400  # 100 ms
+            for i in range(0, len(audio), step):
+                if self._stop.is_set():
+                    stream.abort()
+                    break
+                stream.write(audio[i : i + step].reshape(-1, 1))
+            if own:
+                stream.stop()
+                stream.close()
         finally:
             self._playing.clear()
 
@@ -255,13 +265,25 @@ class StreamingSpeaker:
                 self._audio_q.put(np.concatenate([audio, pad]))
 
     def _play_loop(self) -> None:
-        while True:
-            audio = self._audio_q.get()
-            if audio is None:
-                return
-            if self.speaker._stop.is_set():
-                continue
-            self.speaker.play(audio)
+        stream = None
+        try:
+            while True:
+                audio = self._audio_q.get()
+                if audio is None:
+                    return
+                if self.speaker._stop.is_set():
+                    continue
+                if stream is None:
+                    stream = self.speaker.open_stream()
+                    stream.start()
+                self.speaker.play(audio, stream)
+        finally:
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
 
     def finish(self) -> None:
         """Flush remaining text and wait until playback completes (or stop() was called)."""
