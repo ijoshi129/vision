@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Vision's local model: Qwen 3.6 35B-A3B (Unsloth UD-Q3_K_XL, MTP build) served by llama.cpp
+       for both the voice/typed conversation and Codex coding. One model, always resident.
+       llama.cpp is the official macOS arm64 release tarball under ~/.local/llama.cpp (no Homebrew, no sudo).
+       Installed by setup.sh into ~/Library/LaunchAgents; logs in ~/Library/Logs/llama-server.log. -->
+  <key>Label</key><string>com.vision.llama-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/llama.cpp/llama-server</string>
+    <string>-m</string><string>__HOME__/Library/Caches/llama.cpp/Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf</string>
+    <string>--alias</string><string>qwen3.6</string>
+    <string>-ngl</string><string>99</string>
+    <!-- 128k context (the model does 256k): KV is only 20 KB/token at q8 (10 full-attention layers, 2 KV heads),
+         but with the MTP draft context the server wires ~20.4 GiB, so this needs the wired limit raised by
+         com.vision.wired-limit (21.5 GB). Under the stock 18 GB cap the ceiling is about 48k. -->
+    <string>-c</string><string>131072</string>
+    <string>-fa</string><string>on</string>
+    <string>-ctk</string><string>q8_0</string>
+    <string>-ctv</string><string>q8_0</string>
+    <!-- MTP speculative decoding (~1.5-2x generation); it only supports one slot. -->
+    <string>-np</string><string>1</string>
+    <string>--spec-type</string><string>draft-mtp</string>
+    <string>--spec-draft-n-max</string><string>2</string>
+    <string>--jinja</string>
+    <string>--reasoning-format</string><string>auto</string>
+    <!-- -1 = thinking on (best coding). 0 = off (fastest voice turns). -->
+    <string>--reasoning-budget</string><string>-1</string>
+    <string>--cache-reuse</string><string>256</string>
+    <string>--host</string><string>0.0.0.0</string>
+    <string>--port</string><string>8080</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>__HOME__/Library/Logs/llama-server.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/llama-server.log</string>
+</dict>
+</plist>

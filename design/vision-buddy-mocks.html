@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vision Buddy Design Board</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html {
+      background: #0a0e27;
+      color: #c9d1d9;
+      font-family: 'Adwaita Mono', 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    body {
+      padding: 2rem;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+
+    header {
+      margin-bottom: 3rem;
+      border-bottom: 1px solid #30363d;
+      padding-bottom: 2rem;
+    }
+    h1 {
+      font-size: 2rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: #58a6ff;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      color: #8b949e;
+      font-size: 0.9rem;
+      margin: 0.25rem 0;
+    }
+
+    .controls {
+      background: #161b22;
+      border: 1px solid #30363d;
+      padding: 1.5rem;
+      margin-bottom: 3rem;
+      display: flex;
+      gap: 2rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .control-group {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+    .control-label {
+      color: #8b949e;
+      font-size: 0.85rem;
+      font-weight: 500;
+    }
+    button.concept-btn {
+      background: #30363d;
+      color: #8b949e;
+      border: 1px solid #30363d;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      font-family: inherit;
+      transition: all 0.2s;
+    }
+    button.concept-btn:hover { background: #21262d; }
+    button.concept-btn[aria-pressed="true"] {
+      background: #238636;
+      color: #fff;
+      border-color: #238636;
+    }
+
+    select {
+      background: #0d1117;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 0.5rem 0.75rem;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+
+    button.toggle-anim {
+      background: #30363d;
+      color: #8b949e;
+      border: 1px solid #30363d;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      font-family: inherit;
+      transition: all 0.2s;
+    }
+    button.toggle-anim:hover { background: #21262d; }
+    button.toggle-anim[aria-pressed="true"] {
+      background: #238636;
+      border-color: #238636;
+      color: #fff;
+    }
+
+    .preview-section {
+      background: #161b22;
+      border: 1px solid #30363d;
+      padding: 3rem 2rem;
+      margin-bottom: 3rem;
+      text-align: center;
+    }
+    .preview-title {
+      font-size: 0.85rem;
+      color: #8b949e;
+      margin-bottom: 2rem;
+    }
+    .large-sprite {
+      font-size: 32px;
+      line-height: 1.25;
+      white-space: pre;
+      margin: 0 auto 1.5rem;
+      letter-spacing: 0;
+      font-family: 'Adwaita Mono', 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      min-height: 6em;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #58a6ff;
+    }
+    .terminal-sprite {
+      display: inline-block;
+      font-size: 11pt;
+      line-height: 1.25;
+      white-space: pre;
+      letter-spacing: 0;
+      text-align: left;
+      margin-bottom: 1.5rem;
+    }
+    .preview-label {
+      color: #58a6ff;
+      font-weight: 600;
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+    }
+    .preview-caption {
+      color: #8b949e;
+      font-size: 0.9rem;
+      min-height: 1.2em;
+      font-weight: 500;
+    }
+
+    .workshop {
+      background: #161b22;
+      border: 1px solid #30363d;
+      padding: 2rem;
+      margin-bottom: 3rem;
+    }
+    .workshop-title {
+      font-size: 0.9rem;
+      color: #8b949e;
+      margin-bottom: 2rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid #30363d;
+    }
+
+    .concept-row {
+      margin-bottom: 3rem;
+      padding-bottom: 3rem;
+      border-bottom: 1px solid #21262d;
+    }
+    .concept-row:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .concept-header {
+      margin-bottom: 1.5rem;
+    }
+    .concept-name {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #58a6ff;
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .concept-name.recommended {
+      color: #238636;
+    }
+    .rec-badge {
+      font-size: 0.7rem;
+      background: #238636;
+      color: #fff;
+      padding: 0.25rem 0.6rem;
+      border-radius: 2px;
+      text-transform: uppercase;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+    }
+    .concept-purpose {
+      color: #8b949e;
+      font-size: 0.9rem;
+      max-width: 650px;
+      line-height: 1.5;
+      margin-bottom: 1.5rem;
+    }
+
+    .states-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .state-cell {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      padding: 0.75rem 0.5rem;
+      text-align: center;
+      border-radius: 4px;
+    }
+    .state-sprite {
+      font-family: 'Adwaita Mono', 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      font-size: 16px;
+      line-height: 1.25;
+      white-space: pre;
+      margin-bottom: 0.5rem;
+      height: 4.2em;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      letter-spacing: 0;
+      color: #58a6ff;
+    }
+    .state-label {
+      color: #8b949e;
+      font-size: 0.7rem;
+    }
+
+    .glyph-rows {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      padding: 1rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      color: #79c0ff;
+      overflow-x: auto;
+      margin-bottom: 1rem;
+      line-height: 1.7;
+    }
+    .glyph-state {
+      margin-bottom: 0.5rem;
+      display: block;
+      font-family: monospace;
+    }
+    .glyph-state:last-child { margin-bottom: 0; }
+    .glyph-state-name {
+      color: #8b949e;
+      margin-right: 1rem;
+      font-weight: 500;
+      display: inline-block;
+      min-width: 80px;
+    }
+    .glyph-state-code {
+      color: #79c0ff;
+      font-family: monospace;
+      display: inline;
+    }
+
+    .concept-specs {
+      font-size: 0.85rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1.5rem;
+    }
+    .spec-item {
+      color: #8b949e;
+    }
+    .spec-label {
+      color: #6e7681;
+      font-size: 0.8rem;
+      margin-bottom: 0.5rem;
+    }
+    .spec-value {
+      color: #79c0ff;
+      font-weight: 500;
+      line-height: 1.4;
+    }
+
+    .terminal-section {
+      background: #161b22;
+      border: 1px solid #30363d;
+      padding: 2rem;
+      margin-bottom: 3rem;
+    }
+    .terminal-title {
+      font-size: 0.9rem;
+      color: #8b949e;
+      margin-bottom: 2rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid #30363d;
+    }
+
+    .terminal-demo {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      padding: 1.25rem;
+      border-radius: 4px;
+      font-size: 11px;
+      line-height: 1.5;
+      color: #8b949e;
+      font-family: 'Adwaita Mono', 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      margin-bottom: 2rem;
+      overflow-x: auto;
+      white-space: pre;
+    }
+    .terminal-demo:last-child { margin-bottom: 0; }
+    .demo-label {
+      color: #8b949e;
+      font-size: 0.8rem;
+      margin-bottom: 0.75rem;
+      display: block;
+    }
+    .terminal-prompt { color: #58a6ff; }
+    .terminal-input { color: #a6e3a1; }
+    .terminal-vision { color: #58a6ff; font-weight: bold; }
+    .terminal-status { color: #8b949e; font-style: italic; }
+
+    footer {
+      border-top: 1px solid #30363d;
+      padding-top: 2rem;
+      color: #8b949e;
+      font-size: 0.85rem;
+      line-height: 1.6;
+    }
+    footer strong {
+      color: #c9d1d9;
+    }
+    footer ul {
+      list-style: none;
+      margin-left: 0;
+      margin-top: 1rem;
+    }
+    footer li {
+      margin-bottom: 0.75rem;
+    }
+
+    @media (max-width: 768px) {
+      body { padding: 1rem; }
+      .controls { flex-direction: column; align-items: flex-start; }
+      .states-row { grid-template-columns: repeat(2, 1fr); }
+      .large-sprite { font-size: 24px; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Vision Buddy Design Board</h1>
+  <p class="subtitle">Three terminal-native companions for a calm, warm, precise AI assistant</p>
+  <p class="subtitle" style="color: #6e7681; margin-top: 1rem;">12 columns × 4 rows (3 sprite + 1 caption) · 7 states · ANSI flat color · live interactive preview</p>
+</header>
+
+<div class="controls">
+  <div class="control-group">
+    <span class="control-label">Character</span>
+    <button class="concept-btn" data-concept="pip" aria-pressed="true">Pip</button>
+    <button class="concept-btn" data-concept="twig" aria-pressed="false">Twig</button>
+    <button class="concept-btn" data-concept="spark" aria-pressed="false">Spark</button>
+  </div>
+  <div class="control-group">
+    <span class="control-label">State</span>
+    <select id="state-select" aria-label="Character state">
+      <option value="idle">idle</option>
+      <option value="thinking">thinking</option>
+      <option value="tool">tool (bash)</option>
+      <option value="listening">listening</option>
+      <option value="speaking">speaking</option>
+      <option value="error">error</option>
+      <option value="asleep">asleep</option>
+    </select>
+  </div>
+  <button class="toggle-anim" id="toggle-anim" aria-pressed="false">Animate</button>
+</div>
+
+<div class="preview-section">
+  <div class="preview-title">Terminal font size · Adwaita Mono 11 pt at 100% browser zoom</div>
+  <div class="terminal-sprite" id="terminal-sprite"></div>
+  <div class="preview-title">Live preview · actual glyph geometry enlarged</div>
+  <div class="large-sprite" id="preview-sprite"></div>
+  <div class="preview-label" id="preview-name">Pip</div>
+  <div class="preview-caption" id="preview-caption" role="status" aria-live="polite"></div>
+</div>
+
+<div class="workshop">
+  <div class="workshop-title">Character Workshop</div>
+
+  <!-- PIP -->
+  <div class="concept-row">
+    <div class="concept-header">
+      <div class="concept-name recommended">
+        <span>Pip</span>
+        <span class="rec-badge">Recommended</span>
+      </div>
+      <div class="concept-purpose">
+        A soft pocket robot with a screen-shaped head. Spaced eyes and a full-size smile carry the warmth; the closed outline stays composed beside a scrolling transcript.
+      </div>
+    </div>
+    <div class="states-row" id="pip-states"></div>
+    <div class="glyph-rows">
+      <div class="glyph-state"><span class="glyph-state-name">idle:</span><span class="glyph-state-code">╭───────╮ / │ • ◡ • │ / ╰───────╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">thinking:</span><span class="glyph-state-code">╭───────╮ / │ • _ ◦ │ / ╰───────╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">tool:</span><span class="glyph-state-code">╭───────╮ / │ › _ ‹ │ / ╰───────╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">listening:</span><span class="glyph-state-code">╭───────╮ / ◖│ • ◡ • │◗ / ╰───────╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">speaking:</span><span class="glyph-state-code">╭───────╮ / │ • o • │ / ╰───────╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">error:</span><span class="glyph-state-code">╭───────╮ / │ × ⌢ × │ / ╰───────╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">asleep:</span><span class="glyph-state-code">╭───────╮z / │ ─ o ─ │ / ╰───────╯</span></div>
+    </div>
+    <div class="concept-specs">
+      <div class="spec-item">
+        <div class="spec-label">Dimensions</div>
+        <div class="spec-value">9-column head · 12-column gutter × 3 rows</div>
+      </div>
+      <div class="spec-item">
+        <div class="spec-label">Silhouette</div>
+        <div class="spec-value">Rounded CRT head; one continuous enclosure</div>
+      </div>
+      <div class="spec-item">
+        <div class="spec-label">Colors</div>
+        <div class="spec-value">Teal body (#5ec7d7), bright cyan eyes (#58a6ff), yellow/orange when thinking (#f0ad4e)</div>
+      </div>
+      <div class="spec-item">
+        <div class="spec-label">Personality</div>
+        <div class="spec-value">Warm, present, quietly encouraging</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TWIG -->
+  <div class="concept-row">
+    <div class="concept-header">
+      <div class="concept-name">Twig</div>
+      <div class="concept-purpose">
+        A tiny night owl with a peaked crown, binocular eyes, a beak, and a balanced perch. Thoughtful and watchful rather than robotic.
+      </div>
+    </div>
+    <div class="states-row" id="twig-states"></div>
+    <div class="glyph-rows">
+      <div class="glyph-state"><span class="glyph-state-name">idle:</span><span class="glyph-state-code">╱╲╱╲ / ╭◉ v ◉╮ / ╰─╨─╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">thinking:</span><span class="glyph-state-code">╱╲╱╲ / ╭◉ v ◦╮ / ╰─╨─╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">tool:</span><span class="glyph-state-code">╱╲╱╲ / ╭◈ v ◈╮ / ╰─╨─╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">listening:</span><span class="glyph-state-code">╱╲╱╲ / ╭● v ●╮ / ╰─╨─╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">speaking:</span><span class="glyph-state-code">╱╲╱╲ / ╭◉ o ◉╮ / ╰─╨─╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">error:</span><span class="glyph-state-code">╱╲╱╲ / ╭x v x╮ / ╰─╨─╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">asleep:</span><span class="glyph-state-code">╱╲╱╲ / ╭─ v ─╮ / ╰─╨─╯</span></div>
+    </div>
+    <div class="concept-specs">
+      <div class="spec-item">
+        <div class="spec-label">Dimensions</div>
+        <div class="spec-value">9 cells wide × 3 rows</div>
+      </div>
+      <div class="spec-item">
+        <div class="spec-label">Silhouette</div>
+        <div class="spec-value">Peaked owl crown, enclosed face, tiny perch</div>
+      </div>
+      <div class="spec-item">
+        <div class="spec-label">Colors</div>
+        <div class="spec-value">Green body (#238636), cyan eyes (#58a6ff), blue when thinking (#79c0ff)</div>
+      </div>
+      <div class="spec-item">
+        <div class="spec-label">Personality</div>
+        <div class="spec-value">Bookish, perceptive, gently curious</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SPARK -->
+  <div class="concept-row">
+    <div class="concept-header">
+      <div class="concept-name">Spark</div>
+      <div class="concept-purpose">
+        A compact antenna droid with an angular brow. Its single receiver gives it a crisp silhouette and a little more energy than Pip.
+      </div>
+    </div>
+    <div class="states-row" id="spark-states"></div>
+    <div class="glyph-rows">
+      <div class="glyph-state"><span class="glyph-state-name">idle:</span><span class="glyph-state-code">╷ / ╭─┴─╮ / ╰•ᴗ•╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">thinking:</span><span class="glyph-state-code">╷ / ╭─┴─╮ / ╰•·◦╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">tool:</span><span class="glyph-state-code">╷ / ╭─┴─╮ / ╰›_‹╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">listening:</span><span class="glyph-state-code">·╷· / ╭─┴─╮ / ╰●ᴗ●╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">speaking:</span><span class="glyph-state-code">╷ / ╭─┴─╮ / ╰•o•╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">error:</span><span class="glyph-state-code">! / ╭─┴─╮ / ╰x^x╯</span></div>
+      <div class="glyph-state"><span class="glyph-state-name">asleep:</span><span class="glyph-state-code">╷ z / ╭─┴─╮ / ╰─_─╯</span></div>
+    </div>
+    <div class="concept-specs">
+      <div class="spec-item">
+        <div class="spec-label">Dimensions</div>
+        <div class="spec-value">9 cells wide × 3 rows</div>
+      </div>
+      <div class="spec-item">
+        <div class="spec-label">Silhouette</div>
+        <div class="spec-value">Single antenna, angular brow, compact face</div>
+      </div>
+      <div class="spec-item">
+        <div class="spec-label">Colors</div>
+        <div class="spec-value">Gold body (#d29922), bright cyan eyes (#58a6ff), bright orange when speaking (#f0883e)</div>
+      </div>
+      <div class="spec-item">
+        <div class="spec-label">Personality</div>
+        <div class="spec-value">Bright, alert, optimistic</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="terminal-section">
+  <div class="terminal-title">Terminal Context</div>
+  <div class="terminal-demo"><span class="demo-label">Wide terminal (80+ columns)</span><span class="terminal-prompt">$</span> vision talk
+<span class="terminal-vision">Vision ›</span> Let's dive in. What's the challenge?
+
+<span class="terminal-prompt">›</span> <span class="terminal-input">explain merkle trees</span>
+
+<span class="terminal-vision">Vision ›</span> A Merkle tree is a hash tree where each leaf...
+(transcript scrolls)
+                                          <span class="terminal-status">thinking…</span>
+                                             <span id="wide-buddy">   ◉ ◉
+                                             ◡ ◡
+                                             ◜◝</span>
+
+<span class="terminal-status">⏵⏵ auto · Opus 5 · high</span>                    <span id="wide-caption">thinking</span></div>
+
+  <div class="terminal-demo"><span class="demo-label">Narrow terminal (&lt;72 columns)</span><span class="terminal-prompt">$</span> vision talk
+<span class="terminal-vision">Vision ›</span> Ready to help.
+
+<span class="terminal-prompt">›</span> <span class="terminal-input">test the build</span>
+
+<span class="terminal-status">⏵⏵ auto · Opus 5        <span id="narrow-buddy">[• •]</span></span></div>
+</div>
+
+<footer>
+  <strong>Critique and recommendation</strong>
+  <ul>
+    <li><strong>Recommended: Pip.</strong> The little screen-head belongs beside a command line, the continuous outline survives at normal size, and its expression feels warm without demanding attention.</li>
+    <li><strong>Alternatives:</strong> Twig is the quieter, more observant choice. Spark is sharper and more energetic.</li>
+    <li><strong>Measured geometry:</strong> Pip has a 9-column head with a blank cell between each eye and mouth, inside a 12-column strip. The other concepts use 9-column sprite rows.</li>
+    <li><strong>Motion:</strong> The preview changes only eyes or mouth. Reduced-motion disables it entirely.</li>
+  </ul>
+</footer>
+
+<script>
+  const buddies = {
+    pip: {
+      color: "#5ec7d7",
+      states: {
+        idle: [" ╭───────╮  ", " │ • ◡ • │  ", " ╰───────╯  "],
+        thinking: [" ╭───────╮  ", " │ • _ ◦ │  ", " ╰───────╯  "],
+        tool: [" ╭───────╮  ", " │ › _ ‹ │  ", " ╰───────╯  "],
+        listening: [" ╭───────╮  ", "◖│ • ◡ • │◗ ", " ╰───────╯  "],
+        speaking: [" ╭───────╮  ", " │ • o • │  ", " ╰───────╯  "],
+        error: [" ╭───────╮  ", " │ × ⌢ × │  ", " ╰───────╯  "],
+        asleep: [" ╭───────╮z ", " │ ─ o ─ │  ", " ╰───────╯  "]
+      },
+      alternates: {
+        idle: [" ╭───────╮  ", " │ ─ ◡ ─ │  ", " ╰───────╯  "],
+        thinking: [" ╭───────╮  ", " │ ◦ _ • │  ", " ╰───────╯  "],
+        tool: [" ╭───────╮  ", " │ ›   ‹ │  ", " ╰───────╯  "],
+        listening: [" ╭───────╮  ", "‹│ • ◡ • │› ", " ╰───────╯  "],
+        speaking: [" ╭───────╮  ", " │ • O • │  ", " ╰───────╯  "],
+        asleep: [" ╭───────╮Z ", " │ ─ o ─ │  ", " ╰───────╯  "]
+      },
+      inline: {"idle": "• ◡ •", "thinking": "• _ ◦", "tool": "› _ ‹", "listening": "◖• ◡ •◗", "speaking": "• o •", "error": "× ⌢ ×", "asleep": "─ o ─ z"},
+      inlineAlternates: {"tool": "›   ‹", "listening": "‹• ◡ •›"}
+    },
+    twig: {
+      color: "#b9a8f4",
+      states: {
+        idle: ["  ╱╲╱╲   ", " ╭◉ v ◉╮ ", "  ╰─╨─╯  "],
+        thinking: ["  ╱╲╱╲   ", " ╭◉ v ◦╮ ", "  ╰─╨─╯  "],
+        tool: ["  ╱╲╱╲   ", " ╭◈ v ◈╮ ", "  ╰─╨─╯  "],
+        listening: ["  ╱╲╱╲   ", " ╭● v ●╮ ", "  ╰─╨─╯  "],
+        speaking: ["  ╱╲╱╲   ", " ╭◉ o ◉╮ ", "  ╰─╨─╯  "],
+        error: ["  ╱╲╱╲   ", " ╭x v x╮ ", "  ╰─╨─╯  "],
+        asleep: ["  ╱╲╱╲   ", " ╭─ v ─╮ ", "  ╰─╨─╯  "]
+      },
+      alternates: {
+        idle: ["  ╱╲╱╲   ", " ╭─ v ─╮ ", "  ╰─╨─╯  "],
+        thinking: ["  ╱╲╱╲   ", " ╭◦ v ◉╮ ", "  ╰─╨─╯  "],
+        tool: ["  ╱╲╱╲   ", " ╭◈   ◈╮ ", "  ╰─╨─╯  "],
+        speaking: ["  ╱╲╱╲   ", " ╭◉ O ◉╮ ", "  ╰─╨─╯  "]
+      },
+      inline: { idle: "◉v◉", thinking: "◉v◦", tool: "◈v◈", listening: "●v●", speaking: "◉o◉", error: "xvx", asleep: "─v─" },
+      inlineAlternates: { tool: "◈ ◈" }
+    },
+    spark: {
+      color: "#e9b454",
+      states: {
+        idle: ["    ╷    ", "  ╭─┴─╮  ", "  ╰•ᴗ•╯  "],
+        thinking: ["    ╷    ", "  ╭─┴─╮  ", "  ╰•·◦╯  "],
+        tool: ["    ╷    ", "  ╭─┴─╮  ", "  ╰›_‹╯  "],
+        listening: ["   ·╷·   ", "  ╭─┴─╮  ", "  ╰●ᴗ●╯  "],
+        speaking: ["    ╷    ", "  ╭─┴─╮  ", "  ╰•o•╯  "],
+        error: ["    !    ", "  ╭─┴─╮  ", "  ╰x^x╯  "],
+        asleep: ["    ╷ z  ", "  ╭─┴─╮  ", "  ╰─_─╯  "]
+      },
+      alternates: {
+        idle: ["    ╷    ", "  ╭─┴─╮  ", "  ╰─ᴗ─╯  "],
+        thinking: ["    ╷    ", "  ╭─┴─╮  ", "  ╰◦·•╯  "],
+        tool: ["    ╷    ", "  ╭─┴─╮  ", "  ╰› ‹╯  "],
+        speaking: ["    ╷    ", "  ╭─┴─╮  ", "  ╰•O•╯  "]
+      },
+      inline: { idle: "•ᴗ•", thinking: "•·◦", tool: "›_‹", listening: "●ᴗ●", speaking: "•o•", error: "x^x", asleep: "─_─" },
+      inlineAlternates: { tool: "› ‹" }
+    }
+  };
+
+  const captions = { idle: "", thinking: "thinking", tool: "› bash", listening: "listening", speaking: "speaking", error: "error", asleep: "zz" };
+  const stateColors = { thinking: "#f0ad4e", listening: "#75d69c", speaking: "#8be3ee", error: "#f27d86", asleep: "#6e7681" };
+  let currentBuddy = "pip";
+  let currentState = "idle";
+  let animateOn = false;
+  let alternateOn = false;
+  let animationTimer = null;
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  function rowsFor(buddy, state) {
+    if (animateOn && alternateOn && buddy.alternates[state]) return buddy.alternates[state];
+    return buddy.states[state];
+  }
+
+  function updatePreview() {
+    const buddy = buddies[currentBuddy];
+    const rows = rowsFor(buddy, currentState);
+    const sprite = rows.join("\n");
+    const caption = captions[currentState];
+    const color = stateColors[currentState] || buddy.color;
+    const preview = document.getElementById("preview-sprite");
+    preview.textContent = sprite;
+    preview.style.color = color;
+    const terminalPreview = document.getElementById("terminal-sprite");
+    terminalPreview.textContent = sprite;
+    terminalPreview.style.color = color;
+    document.getElementById("preview-name").textContent = currentBuddy.charAt(0).toUpperCase() + currentBuddy.slice(1);
+    document.getElementById("preview-caption").textContent = caption || "idle";
+    document.getElementById("wide-buddy").textContent = sprite;
+    document.getElementById("wide-buddy").style.color = color;
+    document.getElementById("wide-caption").textContent = caption;
+    const inline = document.getElementById("narrow-buddy");
+    const inlineFace = animateOn && alternateOn && buddy.inlineAlternates[currentState]
+      ? buddy.inlineAlternates[currentState]
+      : buddy.inline[currentState];
+    inline.textContent = `[${inlineFace}]${caption ? ` ${caption}` : ""}`;
+    inline.style.color = color;
+  }
+
+  function updateStatesGrid() {
+    Object.keys(buddies).forEach(key => {
+      const container = document.getElementById(`${key}-states`);
+      container.replaceChildren();
+      Object.keys(captions).forEach(state => {
+        const div = document.createElement("div");
+        div.className = "state-cell";
+        const sprite = document.createElement("div");
+        sprite.className = "state-sprite";
+        sprite.textContent = buddies[key].states[state].join("\n");
+        sprite.style.color = stateColors[state] || buddies[key].color;
+        const label = document.createElement("div");
+        label.className = "state-label";
+        label.textContent = state === "tool" ? "tool · bash" : state;
+        div.append(sprite, label);
+        container.append(div);
+      });
+    });
+  }
+
+  function restartAnimation() {
+    if (animationTimer) clearTimeout(animationTimer);
+    animationTimer = null;
+    alternateOn = false;
+    if (animateOn && !reducedMotion.matches) {
+      const advanceFrame = () => {
+        alternateOn = !alternateOn;
+        updatePreview();
+        const delay = currentState === "idle"
+          ? (alternateOn ? 140 : 4000)
+          : 480;
+        animationTimer = setTimeout(advanceFrame, delay);
+      };
+      animationTimer = setTimeout(advanceFrame, currentState === "idle" ? 4000 : 480);
+    }
+    updatePreview();
+  }
+
+  document.querySelectorAll(".concept-btn").forEach(btn => btn.addEventListener("click", () => {
+    currentBuddy = btn.dataset.concept;
+    document.querySelectorAll(".concept-btn").forEach(button => button.setAttribute("aria-pressed", "false"));
+    btn.setAttribute("aria-pressed", "true");
+    restartAnimation();
+  }));
+  document.getElementById("state-select").addEventListener("change", event => {
+    currentState = event.target.value;
+    restartAnimation();
+  });
+  document.getElementById("toggle-anim").addEventListener("click", event => {
+    animateOn = !animateOn;
+    event.target.setAttribute("aria-pressed", String(animateOn));
+    restartAnimation();
+  });
+
+  function applyMotionPreference() {
+    const button = document.getElementById("toggle-anim");
+    if (reducedMotion.matches) {
+      animateOn = false;
+      button.disabled = true;
+      button.textContent = "Motion reduced";
+    } else {
+      button.disabled = false;
+      button.textContent = "Animate";
+    }
+    button.setAttribute("aria-pressed", String(animateOn));
+    restartAnimation();
+  }
+
+  reducedMotion.addEventListener?.("change", applyMotionPreference);
+  updateStatesGrid();
+  applyMotionPreference();
+</script>
+
+</body>
+</html>

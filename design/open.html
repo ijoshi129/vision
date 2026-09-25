@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vision — On open</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f3f2ed;
+      --ink: #222622;
+      --muted: #6d756e;
+      --rule: #d9dcd3;
+      --mono: "Adwaita Mono", ui-monospace, monospace;
+      --sans: "Adwaita Sans", "Noto Sans", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--sans);
+      -webkit-font-smoothing: antialiased;
+    }
+    button { font: inherit; cursor: pointer; }
+    button:focus-visible, a:focus-visible { outline: 2px solid #50866c; outline-offset: 5px; }
+    .page { max-width: 1400px; padding: 0 64px; margin: auto; }
+    .masthead {
+      height: 90px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--rule);
+    }
+    .brand { display: flex; align-items: center; gap: 13px; font-size: 17px; letter-spacing: -.6px; font-weight: 650; }
+    .brand-mark { display: inline-flex; gap: 4px; align-items: center; width: 23px; height: 25px; }
+    .brand-mark i { display: block; background: #35453c; width: 4px; height: 15px; border-radius: 2px; transform: rotate(25deg); }
+    .brand-mark i:nth-child(2) { height: 23px; }
+    .eyebrow { font: 10px/1.5 var(--mono); letter-spacing: 1.8px; text-transform: uppercase; color: var(--muted); }
+    header { padding: 52px 0 38px; display: flex; justify-content: space-between; align-items: flex-end; gap: 40px; }
+    header .eyebrow { color: #63766a; margin: 0 0 15px; }
+    h1 { font-size: clamp(36px, 4.2vw, 59px); font-weight: 450; letter-spacing: -2.7px; line-height: 1.07; margin: 0; }
+    header p { max-width: 360px; font-size: 14px; color: var(--muted); line-height: 1.75; margin: 0; }
+    .section-heading { margin: 8px 0 17px; display: flex; justify-content: space-between; align-items: baseline; gap: 15px; }
+    .section-heading h3 { font-weight: 500; font-size: 15px; letter-spacing: -.2px; margin: 0; }
+    .section-heading span { color: var(--muted); font: 10px var(--mono); }
+    .refs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 48px; }
+    .term {
+      background: #141917;
+      color: #c4ccc4;
+      border-radius: 8px;
+      overflow: hidden;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .term-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid #2b342e;
+      font: 10px var(--mono);
+      color: #89958b;
+    }
+    .dots { display: flex; gap: 5px; }
+    .dots i { display: block; width: 6px; height: 6px; border-radius: 50%; background: #4d5a50; }
+    .term-body { padding: 16px 16px 14px; font: 11.5px/1.55 var(--mono); flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .term pre {
+      margin: 0;
+      font: inherit;
+      line-height: 1.28;
+      white-space: pre;
+      overflow: hidden;
+      font-variant-ligatures: none;
+    }
+    .dim { color: #8a968c; }
+    .text { color: #d5ddd5; }
+    .accent { color: #7ed0c8; font-weight: 600; }
+    .claude { color: #da7756; }
+    .codex { color: #e8eaed; font-weight: 600; }
+    .hint { color: #6a9a96; }
+    .box { color: #4d6f6a; }
+    .claude-box { color: #c06a4a; }
+    .codex-box { color: #5c6560; }
+    .leave { opacity: .55; }
+    .workbench { border: 1px solid #252d28; border-radius: 12px; overflow: hidden; background: #111714; color: #e4e8e0; margin-bottom: 42px; }
+    .bench-top {
+      min-height: 61px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 25px;
+      gap: 18px;
+      border-bottom: 1px solid #2a322c;
+    }
+    .bench-top .eyebrow { color: #a6b4a9; letter-spacing: 1.1px; }
+    .motion-controls, .toggles { display: flex; gap: 7px; flex-wrap: wrap; }
+    .quiet-button {
+      border: 1px solid #3b453e;
+      color: #bbc6bc;
+      background: transparent;
+      padding: 8px 12px;
+      font: 11px var(--mono);
+      border-radius: 5px;
+    }
+    .quiet-button:hover { background: #26322a; }
+    .quiet-button[aria-pressed="true"] { color: #d0ebd6; border-color: #74957c; background: #26372d; }
+    .stage { display: grid; grid-template-columns: 1.7fr 320px; min-height: 520px; }
+    .hero { min-width: 0; padding: 18px 18px 16px; display: flex; }
+    .live { flex: 1; min-height: 480px; }
+    .live .term-body { min-height: 430px; }
+    .scroll { flex: 1; min-height: 220px; }
+    .composer { display: flex; align-items: flex-end; gap: 0; margin-top: 18px; }
+    .gutter { flex: none; width: 16ch; }
+    .gutter .sprite { margin: 0; font: 12px/1.3 var(--mono); white-space: pre; }
+    .gutter-caption { text-align: center; color: #9caaa0; font: 10px var(--mono); height: 14px; margin-top: 2px; padding-right: 1ch; }
+    .input {
+      flex: 1;
+      border: 1px solid #4aa8a4;
+      border-radius: 5px;
+      padding: 16px 13px;
+      font-size: 12px;
+      color: #a2afa5;
+      min-width: 0;
+    }
+    .status {
+      margin-top: 10px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 10px;
+      color: #93a498;
+    }
+    .status .auto { color: #e3c56b; font-weight: 650; }
+    .annotation { padding: 36px 28px 32px 8px; display: flex; flex-direction: column; justify-content: center; }
+    .concept-number { color: #789180; font: 11px var(--mono); margin: 0 0 13px; }
+    h2 { margin: 0; font-size: 29px; letter-spacing: -.9px; font-weight: 450; }
+    .annotation p { color: #9aa79c; font-size: 13px; line-height: 1.8; margin: 14px 0 0; }
+    .swatches { display: flex; gap: 6px; margin-top: 22px; }
+    .swatches i { width: 22px; height: 5px; border-radius: 1px; }
+    .state-controls { display: flex; padding: 16px 22px; gap: 7px; flex-wrap: wrap; border-top: 1px solid #2a322c; align-items: center; }
+    .state-controls > span { font: 10px var(--mono); color: #8c9f90; margin-right: 13px; }
+    .state-button {
+      border: 1px solid transparent;
+      background: transparent;
+      color: #a3b0a6;
+      font: 11px var(--mono);
+      border-radius: 5px;
+      padding: 8px 11px;
+    }
+    .state-button:hover { background: #243029; }
+    .state-button[aria-pressed="true"] { background: #d2dfce; border-color: #d2dfce; color: #24332a; }
+    .directions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+    .direction {
+      background: transparent;
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 0;
+      text-align: left;
+      overflow: hidden;
+      color: var(--ink);
+    }
+    .direction[aria-pressed="true"] { border-color: #617d68; box-shadow: 0 0 0 1px #617d68; }
+    .mini { height: 148px; background: #e5e7df; display: flex; align-items: center; justify-content: center; padding: 14px; }
+    .mini-today, .mini-card, .mini-pip {
+      background: #141917;
+      color: #c4ccc4;
+      border-radius: 6px;
+      padding: 14px 16px;
+      font: 11px/1.55 var(--mono);
+      width: 100%;
+      font-variant-ligatures: none;
+    }
+    .mini-card {
+      border: 1px solid #4d6f6a;
+      padding: 12px 14px 11px;
+    }
+    .mini-card .title { color: #7ed0c8; font-weight: 600; margin-bottom: 8px; }
+    .mini-card .row, .mini-today { color: #8a968c; }
+    .mini-card .row b { font-weight: 400; color: #d5ddd5; }
+    .mini-pip { display: grid; grid-template-columns: 16ch 1fr; gap: 10px; align-items: center; }
+    .mini-pip .sprite { margin: 0; font: 10px/1.3 var(--mono); }
+    .mini-pip .facts { font-size: 11px; line-height: 1.55; }
+    .mini-pip .facts .accent { display: block; margin-bottom: 2px; }
+    .direction-meta { padding: 16px 18px 17px; }
+    .direction-title { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 7px; }
+    .direction-title .index { font: 10px var(--mono); color: #6d796e; }
+    .direction-desc { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .notes { border-top: 1px solid var(--rule); display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; padding: 26px 0 35px; }
+    .notes h4 { font-size: 12px; font-weight: 550; margin: 0 0 8px; }
+    .notes p { font-size: 12px; line-height: 1.7; color: var(--muted); margin: 0; }
+    footer {
+      border-top: 1px solid var(--rule);
+      padding: 20px 0 30px;
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      color: var(--muted);
+      font: 10px/1.6 var(--mono);
+    }
+    footer a { color: inherit; text-underline-offset: 3px; }
+    .user { background: #2a312c; color: #e8eee8; font-weight: 650; padding: 0 8px; margin: 14px -8px 0; }
+    .pick { font: 9px var(--mono); letter-spacing: 1px; text-transform: uppercase; color: #617d68; }
+    .sprite span { display: inline-block; width: 1ch; height: 1lh; vertical-align: top; }
+    @media (max-width: 1100px) {
+      .page { padding: 0 30px; }
+      .refs, .directions, .notes { grid-template-columns: 1fr; }
+      .stage { grid-template-columns: 1fr; }
+      .annotation { padding: 8px 22px 28px; }
+      header { display: block; }
+      header p { margin-top: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="masthead">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>vision</div>
+      <span class="eyebrow">Session chrome / 01</span>
+    </div>
+    <header>
+      <div>
+        <p class="eyebrow">Claude and Codex, on open. Then us.</p>
+        <h1>They sit you down.<br>We print a line.</h1>
+      </div>
+      <p>Both of them open into a small session card: who you are, which model, which directory. Vision currently prints one dim header because Claude’s tall welcome was too much for something you open twenty times a day. The thing worth taking is Codex’s five-row card, not the tips panel.</p>
+    </header>
+
+    <div class="section-heading">
+      <h3>Same moment, three products.</h3>
+      <span>Empty chat · first paint</span>
+    </div>
+    <section class="refs" aria-label="Claude, Codex, and Vision today">
+      <article class="term">
+        <div class="term-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>claude</span><span>the look</span></div>
+        <div class="term-body"><pre id="ref-claude"></pre></div>
+      </article>
+      <article class="term">
+        <div class="term-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>codex</span><span>the look</span></div>
+        <div class="term-body"><pre id="ref-codex"></pre></div>
+      </article>
+      <article class="term">
+        <div class="term-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>vision · today</span><span>1 row</span></div>
+        <div class="term-body"><pre id="ref-today"></pre></div>
+      </article>
+    </section>
+
+    <section class="workbench" aria-label="Interactive open-screen preview">
+      <div class="bench-top">
+        <span class="eyebrow" id="bench-label">Vision / Card · recommended</span>
+        <div class="toggles">
+          <button class="quiet-button" data-flag="resumed" aria-pressed="false">Resumed</button>
+          <button class="quiet-button" data-flag="speech" aria-pressed="false">Speech on</button>
+          <button class="quiet-button" data-flag="turn" aria-pressed="false">First turn</button>
+        </div>
+      </div>
+      <div class="stage">
+        <div class="hero">
+          <article class="term live">
+            <div class="term-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>vision — ~/Repos/vision</span><span>80 col</span></div>
+            <div class="term-body">
+              <div class="scroll" id="scroll"></div>
+              <div class="composer">
+                <div class="gutter">
+                  <pre class="sprite" id="pip" aria-hidden="true"></pre>
+                  <div class="gutter-caption" id="pip-caption"></div>
+                </div>
+                <div class="input">Message Vision…</div>
+              </div>
+              <div class="status">
+                <span><span class="auto">⏵⏵ auto</span>  ·  <span id="status-mid">Opus 5 high  ·  ~/Repos/vision</span></span>
+                <span id="status-right">⏎ send · ⌃J newline · / commands  ·  wake off</span>
+              </div>
+            </div>
+          </article>
+        </div>
+        <div class="annotation">
+          <div class="concept-number" id="concept-number">01 / CARD</div>
+          <h2 id="concept-name">Codex’s trick, our facts.</h2>
+          <p id="concept-description"></p>
+          <div class="swatches" aria-hidden="true">
+            <i style="background:#7ed0c8"></i>
+            <i style="background:#c1ebd1"></i>
+            <i style="background:#899a90"></i>
+            <i style="background:#4aa8a4"></i>
+          </div>
+        </div>
+      </div>
+      <div class="state-controls" role="group" aria-label="Brain">
+        <span>BRAIN</span>
+        <button class="state-button" data-brain="opus" aria-pressed="true">Opus 5</button>
+        <button class="state-button" data-brain="sol" aria-pressed="false">Sol</button>
+        <button class="state-button" data-brain="grok" aria-pressed="false">Grok</button>
+      </div>
+    </section>
+
+    <div class="section-heading">
+      <h3>Three ways to sit down.</h3>
+      <span>Same composer. Only the empty transcript changes.</span>
+    </div>
+    <section class="directions" aria-label="Open-screen directions"></section>
+
+    <section class="notes" aria-label="What to take, what to leave">
+      <div>
+        <h4>01 / Steal the card, not the lecture</h4>
+        <p>Codex is five rows, left-aligned, labeled. Claude’s boxed welcome adds tips and recent activity and eats a third of the screen. That was the right no. The card is the yes.</p>
+      </div>
+      <div>
+        <h4>02 / Pip is the logo</h4>
+        <p>Idle face on the left of the card, same glyphs as the gutter. On open he is how you know you sat down. Once you type, he is still in the composer doing the real job.</p>
+      </div>
+      <div>
+        <h4>03 / Voice is the extra row</h4>
+        <p>They have model and directory. We have those plus whether it’s going to talk. Mode and wake stay on the status row; they already live there. Don’t duplicate them.</p>
+      </div>
+      <div>
+        <h4>04 / It scrolls like theirs</h4>
+        <p>Not a splash. First block in an empty transcript; /clear puts it back. A resumed thread shows the history instead. Talk and serve use the same card with their extra lines under it.</p>
+      </div>
+    </section>
+    <footer>
+      <span>Open card · Pip + labeled fields · no /model to change</span>
+      <span><a href="pip-studio.html">Pip motion ↗</a> · <a href="output-area.md">Output area notes ↗</a></span>
+    </footer>
+  </main>
+  <script>
+    const INNER = 50;
+    const brains = {
+      opus: { model: "Opus 5 · high", status: "Opus 5 high" },
+      sol:  { model: "GPT-5.6 Sol · high", status: "Sol high" },
+      grok: { model: "grok-4.6 · high", status: "Grok 4.6 high" },
+    };
+    const copy = {
+      today: {
+        number: "00 / TODAY",
+        name: "A line you stop seeing.",
+        label: "Vision / Today",
+        pick: false,
+        blurb: "One dim row, blank either side. You know the name. You don’t feel like you sat down. Fine as a title. Thin as a room.",
+      },
+      card: {
+        number: "01 / CARD",
+        name: "Codex’s trick, our face.",
+        label: "Vision / Card · pick",
+        pick: true,
+        blurb: "A left-aligned box, Pip on the left, facts on the right. Model, directory, voice. Same cyan as the composer. He still sits in the gutter once you start talking. Tips stay out.",
+      },
+      compact: {
+        number: "02 / COMPACT",
+        name: "Claude’s compact, our face.",
+        label: "Vision / Compact Pip",
+        pick: false,
+        blurb: "Four rows, Pip as the logo, facts hanging off him. It’s the nicest empty screen — and then you see him again in the composer. Two faces on first paint is the cost.",
+      },
+    };
+    const state = { dir: "card", brain: "opus", resumed: false, speech: false, turn: false, blink: false };
+
+    const vis = s => s.replace(/<[^>]+>/g, "").length;
+    function framed(lines, inner, boxClass) {
+      const bar = "─".repeat(inner + 2);
+      const row = (left, right = "") => {
+        const fill = inner - vis(left) - vis(right);
+        return `<span class="${boxClass}">│</span> ${left}${" ".repeat(Math.max(0, fill))}${right} <span class="${boxClass}">│</span>`;
+      };
+      return [
+        `<span class="${boxClass}">╭${bar}╮</span>`,
+        ...lines.map(line => Array.isArray(line) ? row(line[0], line[1] || "") : row(line)),
+        `<span class="${boxClass}">╰${bar}╯</span>`,
+      ].join("\n");
+    }
+    const field = (name, value) =>
+      `<span class="dim">${(name + ":").padEnd(12)}</span><span class="text">${value}</span>`;
+
+    function card(s) {
+      const pip = pipGlyphs(s.blink);
+      const model = brains[s.brain].model;
+      const voice = s.speech ? "jarvis" : "off";
+      const facts = [
+        `<span class="accent">◆ Vision</span>${s.resumed ? `   <span class="dim">resumed</span>` : ""}`,
+        field("model", model),
+        field("directory", "~/Repos/vision"),
+        field("voice", voice),
+      ];
+      const lines = pip.map((line, i) => line + "  " + facts[i]);
+      return framed(lines, Math.max(...lines.map(vis)), "box");
+    }
+
+    function pipGlyphs(blink) {
+      const eye = blink ? "─" : "▰";
+      const rows = [
+        Array.from("   ▄▄▄▄▄▄▄▄▄    "),
+        Array.from("  ▐         ▌   "),
+        Array.from("  ▐         ▌   "),
+        Array.from("   ▀▀▀▀▀▀▀▀▀    "),
+      ];
+      const colors = rows.map((row, y) => row.map(() => y === 3 ? "#4c6054" : "#899a90"));
+      const put = (y, x, ch, c) => { rows[y][x] = ch; colors[y][x] = c; };
+      put(1, 5, eye, "#c1ebd1");
+      put(1, 9, eye, "#c1ebd1");
+      put(2, 7, "━", "#c1ebd1");
+      return rows.map((row, y) =>
+        row.map((ch, x) => {
+          const face = y >= 1 && y <= 2 && x >= 3 && x <= 11;
+          const bg = face ? "background:#202d26;" : "";
+          return `<span style="color:${colors[y][x]};${bg}">${ch}</span>`;
+        }).join("")
+      );
+    }
+
+    function compact(s) {
+      const pip = pipGlyphs(s.blink);
+      const facts = [
+        `<span class="accent">Vision</span>${s.resumed ? `  <span class="dim">resumed</span>` : ""}`,
+        `<span class="text">${brains[s.brain].model}</span>`,
+        `<span class="dim">~/Repos/vision</span>`,
+        `<span class="dim">voice ${s.speech ? "jarvis" : "off"}</span>`,
+      ];
+      return pip.map((line, i) => line + "  " + facts[i]).join("\n");
+    }
+
+    function today(s) {
+      const voice = s.speech ? "speech on" : "";
+      const bits = [brains[s.brain].model, "~/Repos/vision", voice, s.resumed ? "resumed" : ""].filter(Boolean);
+      return `\n<span class="accent">◆ Vision</span>   <span class="dim">${bits.join(" · ")}</span>\n`;
+    }
+
+    function renderScroll() {
+      const html = { today, card, compact }[state.dir](state);
+      const turn = state.turn
+        ? `\n<div class="user">› what's eating the disk in ~/Downloads?</div>`
+        : "";
+      document.getElementById("scroll").innerHTML = `<pre>${html}</pre>${turn}`;
+    }
+
+    function paintPip() {
+      document.getElementById("pip").innerHTML = pipGlyphs(state.blink).join("\n");
+    }
+
+    function render() {
+      const meta = copy[state.dir];
+      document.getElementById("bench-label").textContent = meta.label;
+      document.getElementById("concept-number").textContent = meta.number;
+      document.getElementById("concept-name").textContent = meta.name;
+      document.getElementById("concept-description").textContent = meta.blurb;
+      const speechBit = state.speech ? "  ·  speech on" : "";
+      document.getElementById("status-mid").textContent =
+        `${brains[state.brain].status}  ·  ~/Repos/vision${speechBit}`;
+      renderScroll();
+      paintPip();
+      document.querySelectorAll("[data-dir]").forEach(btn => {
+        btn.setAttribute("aria-pressed", String(btn.dataset.dir === state.dir));
+      });
+      document.querySelectorAll("[data-brain]").forEach(btn => {
+        btn.setAttribute("aria-pressed", String(btn.dataset.brain === state.brain));
+      });
+      document.querySelectorAll("[data-flag]").forEach(btn => {
+        btn.setAttribute("aria-pressed", String(state[btn.dataset.flag]));
+      });
+    }
+
+    const directionMount = document.querySelector(".directions");
+    const thumbs = {
+      today: `<div class="mini-today"><span class="accent">◆ Vision</span>   Opus 5 · high · ~/Repos/vision</div>`,
+      card: `<div class="mini-pip mini-card"><pre class="sprite">${pipGlyphs(false).join("\n")}</pre><div class="facts"><span class="accent">◆ Vision</span><div class="row">model      <b>Opus 5 · high</b></div><div class="row">directory  <b>~/Repos/vision</b></div><div class="row">voice      <b>off</b></div></div></div>`,
+      compact: `<div class="mini-pip"><pre class="sprite">${pipGlyphs(false).join("\n")}</pre><div class="facts"><span class="accent">Vision</span><span class="text">Opus 5 · high</span><br><span class="dim">~/Repos/vision</span><br><span class="dim">voice off</span></div></div>`,
+    };
+    [
+      ["today", "Today", "00", "The one-liner. Honest, and a bit nothing."],
+      ["card", "Card", "01", "Pip on the left. Labeled. Pick."],
+      ["compact", "Compact Pip", "02", "A face as the logo. He then appears twice."],
+    ].forEach(([id, title, index, desc]) => {
+      const btn = document.createElement("button");
+      btn.className = "direction";
+      btn.dataset.dir = id;
+      btn.setAttribute("aria-pressed", String(id === "card"));
+      btn.innerHTML = `<div class="mini">${thumbs[id]}</div>
+        <div class="direction-meta"><div class="direction-title">${title}<span class="index">${index}${id === "card" ? " · pick" : ""}</span></div>
+        <div class="direction-desc">${desc}</div></div>`;
+      btn.addEventListener("click", () => { state.dir = id; render(); });
+      directionMount.appendChild(btn);
+    });
+
+    document.querySelectorAll("[data-brain]").forEach(btn => {
+      btn.addEventListener("click", () => { state.brain = btn.dataset.brain; render(); });
+    });
+    document.querySelectorAll("[data-flag]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        state[btn.dataset.flag] = !state[btn.dataset.flag];
+        render();
+      });
+    });
+
+    document.getElementById("ref-claude").innerHTML = framed([
+      [`<span class="claude">Claude Code</span> <span class="dim">v2.1.278</span>`, ""],
+      [`<span class="text">Welcome back</span>`, ""],
+      "",
+      field("model", "Opus 5 · Max"),
+      field("directory", "~/Repos/vision"),
+    ], 40, "claude-box");
+
+    document.getElementById("ref-codex").innerHTML = framed([
+      [`<span class="codex">>_ OpenAI Codex</span> <span class="dim">(v0.155.1)</span>`, ""],
+      "",
+      [field("model", "Sol medium"), `<span class="hint">/model to change</span>`],
+      field("directory", "~/Repos/vision"),
+    ], 42, "codex-box");
+
+    document.getElementById("ref-today").innerHTML =
+`\n<span class="accent">◆ Vision</span>   <span class="dim">Opus 5 · high · ~/Repos/vision</span>\n\n\n<span class="dim">one row, then the empty room, then the box</span>`;
+
+    render();
+    setInterval(() => {
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+      state.blink = true;
+      paintPip();
+      if (state.dir === "compact") renderScroll();
+      setTimeout(() => {
+        state.blink = false;
+        paintPip();
+        if (state.dir === "compact") renderScroll();
+      }, 140);
+    }, 4000);
+  </script>
+</body>
+</html>

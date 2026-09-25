@@ -1,10 +1,9 @@
 [project]
 name = "vision"
 version = "0.1.0"
-description = "Vision: a local voice + text AI assistant driven by your Claude Code subscription"
+description = "Vision: a local voice + text AI assistant driven by Claude Code, OpenAI Codex, or Grok"
 requires-python = ">=3.11"
 dependencies = [
-  "kokoro-onnx>=0.4",
   "onnxruntime-gpu==1.22.0",  # CUDA 12 build; shares the nvidia-*-cu12 libs with CTranslate2. Works on CPU too.
   "faster-whisper>=1.1",
   "nvidia-cublas-cu12",
@@ -20,6 +19,13 @@ dependencies = [
   "rich>=13",
   "prompt_toolkit>=3.0",
   "webrtcvad-wheels",
+  # `vision serve` (the iOS remote): HTTP + WebSocket server and the pairing QR code
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+  "python-multipart>=0.0.9",
+  "qrcode>=7",
+  "qwen-tts>=0.1.1",
+  "cryptography>=42",  # ES256 signing of Apple WeatherKit tokens (vision/weather.py)
 ]
 
 [project.scripts]
@@ -28,6 +34,12 @@ vision = "vision.cli:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.uv]
+# faster-whisper depends on the CPU-only `onnxruntime`, which unpacks into the same package directory
+# as onnxruntime-gpu and silently puts the SNAC decoder and Silero VAD back on the CPU after every `uv sync`.
+# The marker never matches, so the CPU wheel drops out of resolution; onnxruntime-gpu provides the import.
+override-dependencies = ["onnxruntime; sys_platform == 'never'"]
 
 [tool.setuptools]
 packages = ["vision"]

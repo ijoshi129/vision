@@ -1,0 +1,496 @@
+{
+  "baseline": {
+    "transport": "one-shot",
+    "rows": [
+      {
+        "category": "chat",
+        "cold": true,
+        "seconds": 2.967,
+        "events": []
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 3.677,
+        "events": []
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 4.006,
+        "events": []
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 3.17,
+        "events": []
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 3.99,
+        "events": []
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 3.371,
+        "events": []
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 4.508,
+        "events": []
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 3.385,
+        "events": []
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 3.374,
+        "events": []
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 3.695,
+        "events": []
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 3.991,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": true,
+        "seconds": 11.265,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 7.957,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 11.494,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 9.823,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 8.609,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 6.176,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 8.877,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 9.216,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 9.847,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 9.507,
+        "events": []
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 10.758,
+        "events": []
+      }
+    ]
+  },
+  "persistent": {
+    "transport": "persistent",
+    "rows": [
+      {
+        "category": "chat",
+        "cold": true,
+        "seconds": 5.674,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 2.8,
+            "cold": true
+          }
+        ]
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 2.447,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.14,
+            "cold": false
+          }
+        ]
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 2.163,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.13,
+            "cold": false
+          }
+        ]
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 2.453,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.13,
+            "cold": false
+          }
+        ]
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 1.942,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.14,
+            "cold": false
+          }
+        ]
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 2.358,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.15,
+            "cold": false
+          }
+        ]
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 2.15,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.35,
+            "cold": false
+          }
+        ]
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 2.142,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.2,
+            "cold": false
+          }
+        ]
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 2.181,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.19,
+            "cold": false
+          }
+        ]
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 2.425,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.18,
+            "cold": false
+          }
+        ]
+      },
+      {
+        "category": "chat",
+        "cold": false,
+        "seconds": 2.477,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.12,
+            "cold": false
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": true,
+        "seconds": 9.868,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.96,
+            "cold": true
+          },
+          {
+            "stage": "web_start",
+            "ms": 3209.49
+          },
+          {
+            "stage": "web_end",
+            "ms": 7577.53
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 8.004,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.12,
+            "cold": false
+          },
+          {
+            "stage": "web_start",
+            "ms": 1250.13
+          },
+          {
+            "stage": "web_end",
+            "ms": 5841.76
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 7.765,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.12,
+            "cold": false
+          },
+          {
+            "stage": "web_start",
+            "ms": 1305.11
+          },
+          {
+            "stage": "web_end",
+            "ms": 5202.39
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 9.371,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.41,
+            "cold": false
+          },
+          {
+            "stage": "web_start",
+            "ms": 1330.08
+          },
+          {
+            "stage": "web_end",
+            "ms": 6961.89
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 12.401,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.13,
+            "cold": false
+          },
+          {
+            "stage": "web_start",
+            "ms": 2198.39
+          },
+          {
+            "stage": "web_end",
+            "ms": 10158.99
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 11.426,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.28,
+            "cold": false
+          },
+          {
+            "stage": "web_start",
+            "ms": 1368.5
+          },
+          {
+            "stage": "web_end",
+            "ms": 5482.12
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 7.818,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.23,
+            "cold": false
+          },
+          {
+            "stage": "web_start",
+            "ms": 1404.28
+          },
+          {
+            "stage": "web_end",
+            "ms": 5414.12
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 19.415,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.17,
+            "cold": false
+          },
+          {
+            "stage": "web_start",
+            "ms": 11410.43
+          },
+          {
+            "stage": "web_end",
+            "ms": 16590.34
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 22.719,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.2,
+            "cold": false
+          },
+          {
+            "stage": "web_start",
+            "ms": 2102.73
+          },
+          {
+            "stage": "web_end",
+            "ms": 10421.68
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 9.73,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.2,
+            "cold": false
+          },
+          {
+            "stage": "web_start",
+            "ms": 1524.58
+          },
+          {
+            "stage": "web_end",
+            "ms": 6345.31
+          }
+        ]
+      },
+      {
+        "category": "web",
+        "cold": false,
+        "seconds": 10.032,
+        "events": [
+          {
+            "stage": "conversation_sent",
+            "ms": 0.29,
+            "cold": false
+          },
+          {
+            "stage": "web_start",
+            "ms": 1623.88
+          },
+          {
+            "stage": "web_end",
+            "ms": 7516.92
+          }
+        ]
+      }
+    ]
+  }
+}
