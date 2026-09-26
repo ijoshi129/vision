@@ -108,11 +108,9 @@ Ported, but not tested on real installs:
   - `vision setup` loads Whisper right after designing a voice, while that model still holds VRAM, so setup may report "Whisper ready on cpu/small.en".
   - A normal session loads Whisper on CUDA. Close other GPU-heavy apps if the voice falls back to the CPU.
 - **`vision doctor` without the voice extra** exits with an install hint at the voice checks (as on Linux).
-- **Test suite on Windows.** 480 of 517 pass in a real console. The rest are tests that assume Linux:
-  - fake CLIs written as `#!` scripts, `/tmp`, `chmod 0600`, `/proc`, Unix sockets;
-  - optional extras that weren't installed (`serve`, `weather`, pytest);
-  - the auto-mode default.
-  - With mode forced to auto, the local-model, Grok, Codex app-server and memory tests pass.
-  - On Linux the suite gives identical results before and after the Windows changes.
+- **Test suite on Windows.** It passes, with 6 tests skipped for Linux-only features (the Unix-socket
+  link, the process title, file mode bits, serve's `/tmp` route).
+  - Run it from a real console, not a piped shell such as the Git Bash window: the chat-screen tests need a Windows console.
+  - It needs the `all` extra plus pytest and httpx2.
 - **Quiet speech.** Very quiet speech can lose its first word to the voice detector. Speak at normal volume,
   or pick a closer microphone with `/mic` or `[listen] input_device`.
