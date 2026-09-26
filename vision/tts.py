@@ -452,6 +452,9 @@ def _quiet():
     would land in the middle of the transcript."""
     sys.stdout.flush()
     sys.stderr.flush()
+    if sys.platform == "win32":
+        yield from _quiet_windows()
+        return
     saved = [os.dup(fd) for fd in (1, 2)]
     devnull = os.open(os.devnull, os.O_WRONLY)
     try:
@@ -465,6 +468,32 @@ def _quiet():
             os.dup2(keep, fd)
             os.close(keep)
         os.close(devnull)
+
+
+def _quiet_windows():
+    """_quiet for Windows. There dup2 over fd 1/2 closes the console handle that sys.stdout (a console
+    stream) keeps writing to, so every print after the block failed with WinError 1: a `vision serve`
+    whose voice had loaded dropped each WebSocket at its "phone connected" log line. Swap the Python
+    streams, and the standard handles child processes inherit, instead; the console is never touched."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetStdHandle.restype = wintypes.HANDLE
+    kernel32.GetStdHandle.argtypes = (wintypes.DWORD,)
+    kernel32.SetStdHandle.argtypes = (wintypes.DWORD, wintypes.HANDLE)
+    handles = (wintypes.DWORD(-11).value, wintypes.DWORD(-12).value)  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+    saved = [kernel32.GetStdHandle(h) for h in handles]
+    with open(os.devnull, "w", encoding="utf-8") as null:
+        for h in handles:
+            kernel32.SetStdHandle(h, msvcrt.get_osfhandle(null.fileno()))
+        try:
+            with contextlib.redirect_stdout(null), contextlib.redirect_stderr(null):
+                yield
+        finally:
+            for h, old in zip(handles, saved):
+                kernel32.SetStdHandle(h, old)
 
 
 def _import_qwen():
