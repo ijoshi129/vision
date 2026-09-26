@@ -225,6 +225,10 @@ def _claude_login() -> tuple[str, str | None] | None:
     import json
     import os
 
+    from vision.config import cli_logins_allowed
+
+    if not cli_logins_allowed():
+        return None
     home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     try:
         with open(os.path.join(home, ".credentials.json"), encoding="utf-8") as f:
@@ -405,6 +409,10 @@ def use_claude_reset(grant_id: str | None = None, timeout: float = 35) -> dict:
     import urllib.request
     import uuid
 
+    from vision.config import cli_logins_allowed
+
+    if not cli_logins_allowed():
+        return {"ok": False, "outcome": "unsupported", "message": "Using a Claude reset needs read_cli_logins = true under [brain]."}
     login = _claude_login()
     if not login:
         return {"ok": False, "outcome": "auth_error", "message": "Claude's login has lapsed. Send Claude a message so it refreshes, then try again."}
@@ -539,6 +547,10 @@ def _codex_data(brain) -> dict:
 def _grok_data() -> dict:
     from vision.grok import fetch_subscription
 
+    from vision.config import cli_logins_allowed
+
+    if not cli_logins_allowed():
+        return {"windows": [], "error": "Grok usage is off: it needs read_cli_logins = true under [brain]."}
     sub = fetch_subscription()
     if not sub:
         return {"windows": [], "error": "Grok usage unavailable: needs a live grok.com login (run `grok login`)."}

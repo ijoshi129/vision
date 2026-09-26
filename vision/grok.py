@@ -92,6 +92,10 @@ def find_grok() -> str:
 
 
 def _auth_entry() -> dict | None:
+    from vision.config import cli_logins_allowed
+
+    if not cli_logins_allowed():
+        return None
     try:
         data = json.loads(open(GROK_AUTH_FILE, encoding="utf-8").read())
     except (OSError, json.JSONDecodeError):
