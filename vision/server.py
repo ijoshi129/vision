@@ -13,9 +13,9 @@ a phone → laptop frame without one goes to the most recently active chat.
                    new · close {chat} · resume {session_id, provider?} · model {chat, model, effort} · ping
                    open_terminal {chat} (a terminal window here running `vision --join <chat>`)
   laptop → phone   hello {version, workdir, chats: [chat…]}
-                   chat {chat, title, model, effort, session_id, busy, waiting, partial, user_text, …}
+                   chat {chat, title, model, effort, session_id, busy, waiting, questions, partial, user_text, …}
                      (sent whenever a chat's state changes; `opened: true` on the reply to new/resume)
-                   chat_closed {chat} · start {text, speak} · delta {text} · status {tool}
+                   chat_closed {chat, moved_to?} · start {text, speak} · delta {text} · status {tool}
                    agent {id, kind, label, done, tools, step?, status?}
                    audio {seq, wav} (base64 WAV per sentence) · audio_end
                    question {questions} · done {text, error, session_id, duration_ms} · note {text}
@@ -57,7 +57,8 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, 
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from vision import __version__
-from vision.brain import cache_figure, context_figure
+from vision import agentlog
+from vision.brain import agent_frame, cache_figure, context_figure
 from vision.config import CONFIG_DIR, Config, save_brain_defaults, saved_brain_defaults
 from vision.sessions import claude_history
 from vision.reply import status_label
@@ -302,12 +303,18 @@ class Chat:
         self.partial = ""
         self.user_text = ""
         self._question: Future | None = None
+        self._questions: list[dict] = []
         self._wire: WireSpeaker | None = None
         self._lock = threading.Lock()
         # A remote transcript includes typed and spoken turns, never the private worker's JSON.
         # Kept for the lifetime of the chat so reconnecting phones recover voice-only turns too.
         self._transcript: list[dict] | None = None
         self.history_id = secrets.token_hex(12)
+        # This turn's subagent rows as agent frames (with `at`, where in the reply each started): in the
+        # summary while busy, so a phone that (re)connects mid-turn rebuilds them with their real timers.
+        self.agents: dict[str, dict] = {}
+        self._steers: list[tuple] = []  # (reply chars so far, text, agent rows so far) of messages sent into this turn
+        self._driver = None  # what answers this turn (the brain, or the conversation model on a call)
 
     # -- the bits of the brain the hub reads (LinkedChat has the same, from the terminal's summary)
     source = "server"
@@ -355,8 +362,10 @@ class Chat:
             "history_id": self.history_id,
             "busy": self.busy,
             "waiting": self._question is not None and not self._question.done(),
+            "questions": self._questions if self._question is not None and not self._question.done() else [],
             "partial": self.partial if self.busy else "",
             "user_text": self.user_text if self.busy else "",
+            "agents": list(self.agents.values()) if self.busy else [],
             "created": self.created,
             "updated": self.updated,
         }
@@ -398,6 +407,22 @@ class Chat:
         fut = self._question
         if fut is not None and not fut.done():
             fut.set_result(answers if isinstance(answers, dict) and answers else None)
+
+    def steer(self, text: str) -> bool:
+        """Send `text` into the running turn now instead of after it (Claude takes it at its next step).
+        A copy still waiting in the queue is taken out. False when this turn's brain can't take one
+        (Codex, Grok, a local model, nothing running): the message stays queued."""
+        steer = getattr(self._driver, "steer", None)
+        if not self.busy or steer is None or not steer(text):
+            return False
+        for i, item in enumerate(self._pending):
+            if item[0] == text:
+                del self._pending[i]
+                break
+        self._steers.append((len(self.partial), text, len(self.agents)))
+        self.log(f"» {text[:80]}{'…' if len(text) > 80 else ''}")
+        self.post({"type": "steered", "text": text})
+        return True
 
     def cancel(self) -> None:
         fut = self._question
@@ -457,6 +482,7 @@ class Chat:
     async def _run_one_turn(self, text: str, speak: bool, voice: bool, talk: bool = False) -> None:
         loop = asyncio.get_running_loop()
         self.busy, self.partial, self.user_text = True, "", text
+        self.agents, self._steers = {}, []
         self.updated = time.time()
         if not self.title:
             self.title = _title_from(text)
@@ -488,13 +514,10 @@ class Chat:
 
         def on_agent(run) -> None:
             # One frame per change; `step` is the newest tool call (absent when it just started or finished).
-            frame = {"type": "agent", "id": run.id, "kind": run.kind, "label": run.label, "done": run.done, "tools": len(run.steps),
-                     "model": run.model, "effort": run.effort}
-            if run.done:
-                frame.update({"status": run.status, "failed": run.failed, "cut_off": run.cut_off, "details": list(run.details)})
-            elif run.steps:
-                frame["step"] = {"tool": run.steps[-1][0], "detail": run.steps[-1][1]}
-            self.post(frame)
+            frame = agent_frame(run)
+            frame["at"] = self.agents.get(run.id, {}).get("at", len(self.partial))
+            self.agents[run.id] = frame
+            self.post(dict(frame))
 
         def on_tool(call) -> None:
             # The main conversation's tool calls, for a terminal following this chat (the phone shows `status`).
@@ -503,20 +526,25 @@ class Chat:
 
         def on_question(questions: list[dict]) -> dict[str, str] | None:
             fut: Future = Future()
+            self._questions = questions
             self._question = fut
             self.post({"type": "question", "questions": questions})
             self.hub.post(self.summary())
+            answers = None
             try:
-                return fut.result(timeout=QUESTION_TIMEOUT_S)
+                answers = fut.result(timeout=QUESTION_TIMEOUT_S)
+                return answers
             except Exception:  # noqa: BLE001  (timeout → the model carries on without answers)
                 return None
             finally:
                 self._question = None
+                self._questions = []
+                self.post({"type": "answered", "questions": questions, "answers": answers})
                 self.hub.post(self.summary())
 
         from vision.cli import _turn_brain
 
-        driver = _turn_brain(self.brain, self.conversation, voice, text, talk=talk)
+        driver = self._driver = _turn_brain(self.brain, self.conversation, voice, text, talk=talk)
         try:
             turn = await loop.run_in_executor(
                 None, lambda: driver.ask(text, on_text=on_text, on_status=on_status, on_question=on_question, on_agent=on_agent, on_tool=on_tool)
@@ -532,11 +560,14 @@ class Chat:
                 pass
             self.post({"type": "audio_end"})
         self._wire = None
+        self._driver = None
+        entries = _turn_entries(text, reply, error, self.partial, list(self.agents.values()), self._steers)
         with self._lock:
             if self._transcript is None:
                 self._transcript = []
-            self._transcript.extend([{"role": "user", "text": text}, _assistant_entry(reply, error)])
+            self._transcript.extend(entries)
             self._transcript = self._transcript[-200:]
+        _record_agents(self.brain.provider, session_id or self.brain.session_id, entries)
         self.updated = time.time()
         self.post({
             "type": "done",
@@ -551,13 +582,9 @@ class Chat:
         self.log(f"  {'✗ ' + error if error else '✓'} {time.time() - started:.1f} s")
 
 
-def _assistant_entry(reply: str, error: str) -> dict:
-    """A transcript row that keeps a failed turn's error, so a /history refetch (the phone does one
-    right after `done`) does not replace the failure bubble with an empty reply."""
-    entry = {"role": "assistant", "text": reply}
-    if error and error != "cancelled":
-        entry["error"] = error
-    return entry
+_assistant_entry = agentlog.assistant_entry
+_turn_entries = agentlog.turn_entries
+_record_agents = agentlog.record_turn
 
 
 def _title_from(text: str, limit: int = 60) -> str:
@@ -587,6 +614,7 @@ class LinkedChat:
         self.busy = False
         self.partial = ""
         self.user_text = ""
+        self._questions: list[dict] = []
         self.history_id = secrets.token_hex(12)
         self._transcript: list[dict] | None = None
         self._lock = threading.Lock()
@@ -594,6 +622,8 @@ class LinkedChat:
         self._speak: deque[bool] = deque()  # speak flag per message this end sent, in order
         self._started = 0.0
         self.link = None
+        self.agents: dict[str, dict] = {}  # this turn's agent rows, as Chat.agents (from the terminal's frames)
+        self._steers: list[tuple] = []
 
     # -- what the hub reads
     @property
@@ -629,7 +659,9 @@ class LinkedChat:
             "title": self.title or s.get("title", ""),
             "history_id": self.history_id,
             "busy": self.busy,
+            "agents": list(self.agents.values()) if self.busy else [],
             "waiting": self.waiting,
+            "questions": self._questions if self.waiting else [],
             "partial": self.partial if self.busy else "",
             "user_text": self.user_text if self.busy else "",
             "created": self.created,
@@ -669,6 +701,13 @@ class LinkedChat:
     def answer(self, answers) -> None:
         self.link.send({"type": "answer", "answers": answers if isinstance(answers, dict) and answers else None})
 
+    def steer(self, text: str) -> bool:
+        """The terminal runs the turn: it sends the message in (and says `steered`) or leaves it queued."""
+        if not self.link:
+            return False
+        self.link.send({"type": "steer", "text": text})
+        return True
+
     def cancel(self) -> None:
         if self._wire:
             self._wire.stop()
@@ -701,10 +740,17 @@ class LinkedChat:
             if ev.get("title"):
                 self.title = ev["title"]
             self.busy = bool(ev.get("busy"))
+            self._questions = ev.get("questions") or []
             self.hub.post(self.summary())
+            self.hub.dedupe()
             return
+        if kind == "question":
+            self._questions = ev.get("questions") or []
+        elif kind == "answered":
+            self._questions = []
         if kind == "start":
             self.busy, self.partial, self.user_text = True, "", ev.get("text", "")
+            self.agents, self._steers = {}, []
             self.updated = self._started = time.time()
             if not self.title and self.user_text:
                 self.title = _title_from(self.user_text)
@@ -741,10 +787,12 @@ class LinkedChat:
                     pass
                 self.post({"type": "audio_end"})
             reply = ev.get("text") or self.partial
+            # (the terminal keeps the agent rows with the conversation itself: vision.agentlog)
+            entries = _turn_entries(self.user_text, reply, ev.get("error") or "", self.partial, list(self.agents.values()), self._steers)
             with self._lock:
                 if self._transcript is None:
                     self._transcript = []
-                self._transcript.extend([{"role": "user", "text": self.user_text}, _assistant_entry(reply, ev.get("error") or "")])
+                self._transcript.extend(entries)
                 self._transcript = self._transcript[-200:]
             self.updated = time.time()
             self.busy = bool(ev.get("busy"))
@@ -754,7 +802,13 @@ class LinkedChat:
             self.log(f"  {'✗ ' + ev['error'] if ev.get('error') else '✓'} {(time.time() - self._started):.1f} s")
             self.hub.post(self.summary())
             return
-        self.post(ev)  # agent, question, note, error: straight through
+        if kind == "agent" and ev.get("id"):
+            frame = {k: v for k, v in ev.items() if k != "chat"}
+            frame["at"] = self.agents.get(ev["id"], {}).get("at", frame.get("at", len(self.partial)))
+            self.agents[ev["id"]] = frame
+        elif kind == "steered":
+            self._steers.append((len(self.partial), ev.get("text") or "", len(self.agents)))
+        self.post(ev)  # agent, steered, question, note, error: straight through
 
     def _seed(self) -> None:
         try:
@@ -782,6 +836,7 @@ class Hub:
         self._lock = threading.Lock()
         self.chats: dict[str, Chat | LinkedChat] = {}
         self.links: dict[int, LinkedChat] = {}  # terminal chats by pid (see link.py)
+        self._dedupe_lock = threading.Lock()
         from vision.scheduled import Schedule
 
         self.schedule = Schedule()
@@ -858,6 +913,26 @@ class Hub:
         for pid in list(self.links):
             if pid not in seen:
                 self.links[pid].detach()  # descriptor gone: the terminal is closing
+        self.dedupe()  # a copy that was mid-turn when its terminal showed up closes once idle
+
+    def dedupe(self) -> None:
+        """One conversation, one chat. When a terminal holds the same session as a chat this server
+        runs (the one `vision serve` continued at start-up, or one resumed on both sides), the terminal
+        keeps it and the server's copy closes as soon as it is idle; phones follow to the terminal row."""
+        owners = {(c.provider, c.session_id): c for c in list(self.links.values()) if c.session_id}
+        if not owners:
+            return
+        with self._dedupe_lock:  # runs on link threads and the sweep
+            for chat in list(self.chats.values()):
+                if chat.source != "server":
+                    continue
+                owner = owners.get((chat.provider, chat.session_id))
+                asking = chat._question is not None and not chat._question.done()
+                if owner is None or chat.busy or chat._pending or asking:
+                    continue
+                self.close_chat(chat)
+                self.post({"type": "chat_closed", "chat": chat.id, "moved_to": owner.id})
+                self.log(f"[{chat.id[:4]}] closed: its conversation is open in a terminal (pid {owner.pid})")
 
     async def _watch_links(self) -> None:
         loop = asyncio.get_running_loop()
@@ -999,8 +1074,14 @@ class Hub:
             return
         if kind == "message":
             text = with_attachments((msg.get("text") or "").strip(), msg.get("images"))
-            if text:
+            # `now`: send it into the running turn (Claude takes it at its next step); else it queues.
+            if text and not (msg.get("now") and chat.busy and chat.steer(text)):
                 chat.queue(text, bool(msg.get("speak")), bool(msg.get("voice")), bool(msg.get("talk")))
+        elif kind == "steer":
+            # A queued message the phone wants sent into the running turn now.
+            text = with_attachments((msg.get("text") or "").strip(), msg.get("images"))  # as it was queued
+            if text and not chat.steer(text):
+                await ws.send_json({"type": "toast", "text": "This model can't take a message mid-reply, so it stays queued."})
         elif kind == "answer":
             chat.answer(msg.get("answers"))
         elif kind == "cancel":

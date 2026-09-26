@@ -19,7 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from vision import __version__
-from vision.brain import BrainError, cache_figure, context_figure
+from vision.brain import BrainError, agent_frame, cache_figure, context_figure
 from vision.buddy import Buddy
 from vision.warmup import WarmupProgress, warm_voice
 from vision import usage as usage_ui
@@ -692,7 +692,8 @@ HELP_TEXT = (
     "[bold]/voicemodel [model] [save][/bold] the voice for Codex and Grok chats (a Claude, or a Local model on the llama-server; "
     "a Claude or Local chat talks through its own /model; /voicemodel qwen3.6 save keeps it as the default)\n"
     "[dim]Type / for the command menu (↑/↓ choose · Enter runs · Tab fills in · Esc hides) · "
-    "Enter sends · Ctrl-J newline · PgUp/PgDn or Shift-↑/↓ scroll (Alt-End follows again) · "
+    "Enter sends (mid-reply it queues) · Ctrl-X sends it into the running reply now (empty box: the queued ones) · "
+    "Ctrl-J newline · PgUp/PgDn or Shift-↑/↓ scroll (Alt-End follows again) · "
     "Esc cancels a reply · Ctrl-O unfolds the last reply's tool calls · Ctrl-D quits[/dim]"
 )
 
@@ -801,6 +802,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
     import queue
 
     state.update({"turn_queue": queue.Queue(), "turn_lock": threading.Lock(), "turn_active": False, "turn_thread": None})
+    # The running turn's driver and its `steered(text)` (splits the reply where a Ctrl-X message went
+    # in), and the transcript rows of messages typed meanwhile that still wait in the queue.
+    state.update({"driver": None, "steered": None, "queued_rows": []})
     # `vision serve` finds this chat through its socket (link.py) and shows it on the phone as a
     # terminal chat: messages from there run here, and every turn here streams there.
     state["link"] = None
@@ -923,6 +927,30 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 screen.add(user_grid(turn["text"]), gap_before=True)
             else:
                 screen.add(reply_grid(turn["text"]))
+                if turn.get("agents"):
+                    screen.add(past_agents(turn["agents"]))
+
+    def past_agents(frames: list[dict]):
+        """A past reply's subagents (kept by vision.agentlog): their rows, or one summary line for a
+        batch of more than three, as the phone folds them."""
+        from rich.text import Text
+
+        from vision.brain import run_from_frame
+        from vision.remote import RemoteAgentRun
+        from vision.ui import agent_activity, tool_summary
+
+        runs = []
+        for f in frames:
+            run = run_from_frame({**f, "done": True}, RemoteAgentRun(f.get("id", ""), "agent", ""))
+            run.failed, run.cut_off = bool(f.get("failed")), bool(f.get("cut_off"))
+            run.status_text = f.get("status") or ""
+            runs.append(run)
+        if len(runs) <= 3:
+            return agent_activity(runs)
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append("⏺ ", style="red" if any(r.failed for r in runs) else "green")
+        line.append(tool_summary(runs), style="dim")
+        return line
 
     if brain.session_id:  # --continue: the picked-up conversation is on screen from the start
         show_history(brain.provider, brain.session_id)
@@ -943,6 +971,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         link_post = link.post if link else (lambda ev: None)
         driver = brain if follow else _turn_brain(brain, conversation, from_voice or voice_remote, text,
                                                         talk=(state["talk"] and not state["once"]) or talk_remote)
+        state["driver"] = driver
         ss = None
         if state["speak"] or (state["talk"] and not state["once"]):  # a voice conversation always talks back
             from vision.tts import StreamingSpeaker
@@ -960,11 +989,29 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         if link:
             link.post_summary(force=True)
 
+        streamed = []  # the reply as it streamed (where steered messages split it, what agents keep)
+        homes = {}  # agent id → the reply entry its row lives in (a steered message splits the reply)
+        agent_frames = {}
+        steers = []
+
         def on_text(d):
+            streamed.append(d)
             screen.update_reply(entry, delta=d)
             if ss:
                 ss.feed(d)  # sentence by sentence; a voice reply streams in as the model writes it
             link_post({"type": "delta", "text": d})
+
+        def steered(t):
+            # A message went into the running turn (Ctrl-X here, or from the phone): it sits in the
+            # transcript where it went in, and the rest of the reply follows it (as Claude Code shows it).
+            nonlocal entry
+            steers.append((len("".join(streamed)), t, len(agent_frames)))
+            entry = screen.split_reply(entry, user_grid(t))
+            if ss:
+                ss.flush()
+            link_post({"type": "steered", "text": t})
+
+        state["steered"] = steered
 
         def on_status(tool):
             if ss and tool:
@@ -985,6 +1032,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                     link.post_summary(force=True)
 
             answers = screen.ask_questions(questions, on_open=opened)  # answered here or on the phone, whichever is first
+            link_post({"type": "answered", "questions": questions, "answers": answers})  # the phone shows it in the reply
             if link:
                 link.post_summary(force=True)
             # What was chosen goes into the transcript as a block of its own (as in Claude Code), and
@@ -996,15 +1044,16 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             return answers
 
         def on_agent(run):
-            screen.update_reply(entry, agent=run)
-            if link:
-                frame = {"type": "agent", "id": run.id, "kind": run.kind, "label": run.label, "done": run.done, "tools": len(run.steps),
-                         "model": run.model, "effort": run.effort}
-                if run.done:
-                    frame["status"] = run.status
-                elif run.steps:
-                    frame["step"] = {"tool": run.steps[-1][0], "detail": run.steps[-1][1]}
-                link_post(frame)
+            home = homes.setdefault(run.id, entry)
+            if home is entry:
+                screen.update_reply(entry, agent=run)
+            else:  # it started before a steered message split the reply: its row stays up there
+                home.invalidate()
+                screen.app.invalidate()
+            frame = agent_frame(run)
+            frame["at"] = agent_frames.get(run.id, {}).get("at", len("".join(streamed)))
+            agent_frames[run.id] = frame
+            link_post(dict(frame))
 
         def on_tool(call):
             screen.update_reply(entry, tool=call)
@@ -1030,6 +1079,17 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             if buddy:
                 buddy.fail()
         finally:
+            state["driver"] = state["steered"] = None
+            if agent_frames and not joined():
+                # The rows stay with the conversation (the server keeps a joined chat's itself).
+                from vision import agentlog
+
+                reply = (turn.text if turn is not None else "") or ""
+                try:
+                    agentlog.record_turn(brain.provider, (turn.session_id if turn is not None else None) or brain.session_id,
+                                         agentlog.turn_entries(text, reply, "", "".join(streamed), list(agent_frames.values()), steers))
+                except Exception:  # noqa: BLE001  (a history nicety must never break a turn)
+                    pass
             link_post({
                 "type": "done",
                 "text": (turn.text if turn is not None else "") or "",
@@ -1092,6 +1152,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                     state["turn_active"] = False
                     state["turn_thread"] = None
                     return
+                state["queued_rows"] = [(t, row) for t, row in state["queued_rows"] if t != text]
             run_turn(text, speak_remote=speak_remote, follow=follow, voice_remote=voice, talk_remote=talk)
         with state["turn_lock"]:
             state["turn_active"] = False
@@ -1199,6 +1260,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             on_foreign_turn=foreign_turn, on_note=on_note,
             on_answered=lambda: screen.answer_questions(None),
             on_closed=lambda reason: detach(reason),
+            on_steered=lambda t: state["steered"](t) if state["steered"] else None,
         )
         try:
             remote.connect()
@@ -2058,13 +2120,77 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             note(f"[red]unknown command /{cmd}[/red]")
 
     def send(text: str):
-        screen.add(user_grid(text), gap_before=True)
+        row = screen.add(user_grid(text), gap_before=True)
         if state["talk"]:
             state["typed"].put(text)
             if state["cancel"]:
                 state["cancel"].set()
             return
+        if state["turn_active"]:
+            state["queued_rows"].append((text, row))
+            if getattr(state["driver"], "steer", None):
+                screen.notice("queued · Ctrl-X sends it in now", 4)
         enqueue_turn(text)
+
+    def take_queued(only: str | None = None) -> list[str]:
+        """Queued typed messages out of the turn queue (all, or the one reading `only`), their rows
+        out of the transcript: they are about to go into the running turn instead."""
+        taken, keep = [], []
+        with state["turn_lock"]:
+            pending = state["turn_queue"]
+            while True:
+                try:
+                    item = pending.get_nowait()
+                except queue.Empty:
+                    break
+                follow = item[2]
+                (taken if not follow and (only is None or item[0] == only) and not (only and taken) else keep).append(item)
+            for item in keep:
+                pending.put(item)
+        texts = [item[0] for item in taken]
+        for t in texts:
+            for i, (qt, row) in enumerate(state["queued_rows"]):
+                if qt == t:
+                    screen.remove_entry(row)
+                    del state["queued_rows"][i]
+                    break
+        return texts
+
+    def steer_now(text: str, from_phone: bool = False):
+        """Ctrl-X, or Send now on the phone: into the running turn rather than after it; Claude takes
+        it at its next step. "" = everything queued. A brain that can't take one mid-reply (Codex,
+        Grok, a local model) leaves it queued. `from_phone`: the text may already sit in the queue
+        (sent earlier, now pushed) or not (sent with `now`); either way it must get through."""
+        running = screen.busy and state["turn_active"]
+        if not running:
+            if text and (not from_phone or not any(t == text for t, _ in state["queued_rows"])):
+                if from_phone:
+                    screen.add(user_grid(text), gap_before=True)
+                    enqueue_turn(text)
+                else:
+                    send(text)
+            return
+        if text:
+            texts = [text]
+            if from_phone:
+                take_queued(text)
+        else:
+            texts = take_queued()
+            if not texts:
+                screen.notice("nothing queued", 2)
+                return
+        driver, split = state["driver"], state["steered"]
+        for t in texts:
+            if joined():
+                brain.steer(t)  # the server sends it in or queues it; its `steered` splits the reply here
+            elif getattr(driver, "steer", None) and driver.steer(t):
+                if split:
+                    split(t)
+            else:
+                note("this model can't take a message mid-reply, so it's queued")
+                row = screen.add(user_grid(t), gap_before=True)
+                state["queued_rows"].append((t, row))
+                enqueue_turn(t)
 
     def submit(text: str):
         text = text.strip()
@@ -2075,6 +2201,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         send(text)
 
     screen.on_submit = submit
+    screen.on_steer = steer_now
     screen.on_cancel = cancel_reply
     screen.on_toggle_mode = lambda: command("mode", "")
     screen.on_interrupt = stop_listening  # Esc / Ctrl-C while idle: leave the voice conversation
@@ -2100,6 +2227,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             "workdir": brain.workdir,
             "busy": screen.busy or state["turn_active"],
             "waiting": screen.form_open,
+            "questions": screen.pending_questions,
         }
 
     def link_frame(frame: dict):
@@ -2108,14 +2236,20 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             text = (frame.get("text") or "").strip()
             if not text:
                 return
-            screen.add(user_grid(text), gap_before=True)
+            row = screen.add(user_grid(text), gap_before=True)
             note("from the phone")
+            if state["turn_active"] and not state["talk"]:
+                state["queued_rows"].append((text, row))
             if state["talk"]:
                 state["typed"].put(text)
                 if state["cancel"]:
                     state["cancel"].set()
             else:
                 enqueue_turn(text, speak_remote=bool(frame.get("speak")), voice=bool(frame.get("voice")), talk=bool(frame.get("talk")))
+        elif kind == "steer":
+            text = (frame.get("text") or "").strip()
+            if text:
+                steer_now(text, from_phone=True)
         elif kind == "answer":
             screen.answer_questions(frame.get("answers"))
         elif kind == "cancel":

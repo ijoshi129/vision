@@ -3,17 +3,18 @@ from __future__ import annotations
 import io
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from vision.brain import Brain, create_brain
+from vision.brain import Brain, agent_frame, create_brain
 from vision.codex import CodexBrain
 from vision.models import ModelInfo
 from vision.config import BrainConfig, CodexConfig, GrokConfig, load_config, save_brain_defaults, save_input_device, save_wake_enabled
 from vision.grok import GrokBrain, fetch_subscription
-from vision.models import coerce_effort, effort_choices, provider_for
+from vision.models import coerce_effort, effort_choices, model_label, provider_for
 
 
 class _Input:
@@ -180,7 +181,14 @@ class ConfigTests(unittest.TestCase):
 
 
 class CodexProtocolTests(unittest.TestCase):
+    """The `codex exec` transport ([codex].transport = "exec"); the app-server one is in test_codex_app."""
+
     thread_id = "12345678-1234-1234-1234-123456789abc"
+
+    def setUp(self):
+        p = patch.object(CodexBrain, "_transport", lambda self: "exec")
+        p.start()
+        self.addCleanup(p.stop)
 
     def _events(self, text, tokens):
         return [
@@ -969,6 +977,111 @@ class SubagentTests(unittest.TestCase):
         turn, _, _ = self._run(events)  # the brain runs opus at BrainConfig's default effort, high
         self.assertEqual([(r.label, r.model, r.effort) for r in turn.agents], [("Named model", "sonnet", "high"), ("Inherited model", "opus", "high")])
 
+    def test_workflow_agents_get_rows_from_task_progress(self):
+        # Ultracode: a Workflow runs its agents in the background, so none of their messages reach the
+        # stream; Claude Code reports them as task_progress events on the Workflow call instead.
+        W = "toolu_wf"
+        script = "export const meta = {\n  name: 'review',\n  description: 'Review the diff',\n}\n"
+        def progress(*agents):
+            return {"type": "system", "subtype": "task_progress", "task_id": "w1", "tool_use_id": W, "description": "Review",
+                    "workflow_progress": [{"type": "workflow_phase", "index": 1, "title": "Review"}, *agents]}
+        a0 = {"type": "workflow_agent", "index": 0, "label": "review:bugs", "phaseTitle": "Review", "state": "start"}
+        a1 = {"type": "workflow_agent", "index": 1, "label": "review:perf", "phaseTitle": "Review", "state": "start"}
+        events = [
+            {"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-x"},
+            self._tool_start(W, "Workflow"),
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": W, "name": "Workflow", "input": {"script": script}}]}, "parent_tool_use_id": None},
+            {"type": "system", "subtype": "task_started", "task_id": "w1", "tool_use_id": W, "description": "Review the diff", "task_type": "local_workflow"},
+            self._tool_result(W, text="Workflow launched in background."),
+            progress(a0, a1),
+            progress({**a0, "state": "progress", "toolCalls": 1, "lastToolName": "Read", "lastToolSummary": "vision/brain.py"}, a1),
+            progress({**a0, "state": "done", "toolCalls": 2, "startedAt": 1000, "lastProgressAt": 3500, "resultPreview": "2 bugs"}, a1),
+            progress({**a0, "state": "done", "toolCalls": 2, "startedAt": 1000, "lastProgressAt": 3500, "resultPreview": "2 bugs"}, a1),  # nothing new
+            {"type": "system", "subtype": "task_notification", "task_id": "w1", "tool_use_id": W, "status": "failed", "summary": "Review failed"},
+            {"type": "result", "subtype": "success", "session_id": "s1", "result": "Found two bugs."},
+        ]
+        turn, _, updates = self._run(events)
+        self.assertEqual([c.detail for c in turn.tools], ["Review the diff"])
+        self.assertEqual([(r.kind, r.label) for r in turn.agents], [("Review", "review:bugs"), ("Review", "review:perf")])
+        bugs, perf = turn.agents
+        self.assertEqual((bugs.done, bugs.failed, bugs.status, bugs.summary, bugs.steps), (True, False, "2 tools · 2.5s", "2 bugs", [("Read", "vision/brain.py")]))
+        self.assertEqual((perf.done, perf.failed, perf.cut_off), (True, True, True))  # never reported done: the workflow's end closes it
+        self.assertEqual(updates, [("Review", 0, False), ("Review", 0, False), ("Review", 1, False), ("Review", 1, True), ("Review", 0, True)])
+
+    @staticmethod
+    def _text(text):
+        return [
+            {"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}, "parent_tool_use_id": None},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}, "parent_tool_use_id": None},
+        ]
+
+    def test_a_turn_is_held_open_while_its_workflow_runs(self):
+        # The reply ends (a `result`) while the workflow still runs in the background. Closing stdin then
+        # would end claude and kill the workflow, so the turn waits for its task_notification and for
+        # Claude's answer to it, and only closes stdin after that second `result`.
+        W = "toolu_wf"
+        now_ms = time.time() * 1000
+        a0 = {"type": "workflow_agent", "index": 0, "label": "probe:codex", "phaseTitle": "Probe", "model": "claude-fable-5-1",
+              "state": "progress", "startedAt": now_ms - 90_000, "toolCalls": 3, "tokens": 1200}
+        progress = lambda a: {"type": "system", "subtype": "task_progress", "task_id": "w1", "tool_use_id": W, "workflow_progress": [a]}
+        events = [
+            {"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-x"},
+            self._tool_start(W, "Workflow"),
+            {"type": "system", "subtype": "task_started", "task_id": "w1", "tool_use_id": W, "description": "Probe", "task_type": "local_workflow"},
+            self._tool_result(W, text="Workflow launched in background."),
+            *self._text("It's running."),
+            {"type": "result", "subtype": "success", "session_id": "s1", "result": "It's running.", "usage": {"output_tokens": 10}, "total_cost_usd": 0.5},
+            progress(a0),
+            progress({**a0, "state": "done", "toolCalls": 18, "tokens": 70212, "durationMs": 381720}),
+            {"type": "system", "subtype": "task_notification", "task_id": "w1", "tool_use_id": W, "status": "completed"},
+            {"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-x"},
+            *self._text("All done."),
+            {"type": "result", "subtype": "success", "session_id": "s1", "result": "All done.", "usage": {"output_tokens": 5}, "total_cost_usd": 0.25},
+        ]
+        proc = _Process(events)
+        closed_at = []
+        proc.stdin.close = lambda: closed_at.append(proc.stdout.tell())
+        brain = self._brain()
+        statuses, frames = [], []
+        with patch("subprocess.Popen", return_value=proc), patch("vision.brain.Brain._remember_session"):
+            turn = brain.ask("go", on_status=statuses.append, on_agent=lambda r: frames.append(agent_frame(r)))
+        self.assertEqual(closed_at, [len(proc.stdout.getvalue())])  # only after the last result
+        self.assertEqual(turn.text, "It's running.\n\nAll done.")
+        self.assertIn("1 agent still working…", statuses)
+        self.assertEqual((turn.usage, turn.cost_usd), ({"output_tokens": 15}, 0.75))
+        run = turn.agents[0]
+        self.assertEqual((run.done, run.failed, run.tokens, run.duration_ms, run.status), (True, False, 70212, 381720, "18 tools · 6m 21s · ↓70,212"))
+        self.assertAlmostEqual(frames[0]["started"], now_ms / 1000 - 90, delta=2)  # the agent's own start, wall clock
+
+    def test_a_turn_with_nothing_in_the_background_closes_at_its_result(self):
+        events = [{"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-x"}, *self._text("Hi."),
+                  {"type": "result", "subtype": "success", "session_id": "s1", "result": "Hi."}, *self._text("never read")]
+        proc = _Process(events)
+        closed_at = []
+        proc.stdin.close = lambda: closed_at.append(proc.stdout.tell())
+        with patch("subprocess.Popen", return_value=proc), patch("vision.brain.Brain._remember_session"):
+            self._brain().ask("go")
+        self.assertEqual(len(closed_at), 1)
+        self.assertLess(closed_at[0], len(proc.stdout.getvalue()))
+
+    def test_steer_sends_a_message_into_the_running_turn(self):
+        brain = self._brain()
+        self.assertFalse(brain.steer("too early"))  # nothing running: the caller queues it instead
+        events = [{"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-x"}, *self._text("Working."),
+                  {"type": "result", "subtype": "success", "session_id": "s1", "result": "Working."}]
+        proc = _Process(events)
+        proc.returncode = None  # still running while the reply streams
+        proc.wait = lambda timeout=None: 0
+        closes = []
+        proc.stdin.close = lambda: closes.append(True)
+        sent = []
+        with patch("subprocess.Popen", return_value=proc), patch("vision.brain.Brain._remember_session"):
+            brain.ask("go", on_text=lambda d: sent.append(brain.steer("use the other file")) if d == "Working." else None)
+        self.assertEqual(sent, [True])
+        self.assertIn('"content": "use the other file"', proc.stdin.value)
+        self.assertEqual(closes, [])  # a steered reply waits a moment for the queued message instead of closing at once
+        self.assertFalse(brain.steer("after the turn"))
+
     def test_a_subagents_bash_task_is_not_a_second_agent_row(self):
         # A Bash command that runs a few seconds inside a subagent gets task events of its own
         # (task_type local_bash), which must not open an `agent · <description> · 0 tools · 0.0s` row.
@@ -1038,12 +1151,12 @@ class SubagentTests(unittest.TestCase):
         timed = AgentRun("t", "Explore", "Map the tests", model="opus", effort="high", started=time.monotonic() - 12.4)
         console = Console(width=60, force_terminal=False, file=io.StringIO())
         console.print(agent_activity([timed], "⠋"))
-        self.assertIn("  ⎿  running · opus high · 12s", console.file.getvalue())  # a live timer from the moment it started
+        self.assertIn(f"  ⎿  running · {model_label('opus')} high · 12s", console.file.getvalue())  # a live timer from the moment it started
         native = AgentRun("z", "general-purpose", "Find largest folder", done=True, tool_uses=5, duration_ms=19400, model="opus", effort="high")
         failed = AgentRun("f", "Explore", "Nope", done=True, failed=True, tool_uses=2, duration_ms=800)
         console = Console(width=80, force_terminal=False, file=io.StringIO())
         console.print(agent_activity([native, failed]))
-        self.assertIn("⏺ general-purpose(Find largest folder)\n  ⎿  done · opus high · 5 tools · 19.4s", console.file.getvalue())
+        self.assertIn(f"⏺ general-purpose(Find largest folder)\n  ⎿  done · {model_label('opus')} high · 5 tools · 19.4s", console.file.getvalue())
         self.assertIn("⏺ Explore(Nope)\n  ⎿  failed · 2 tools · 0.8s", console.file.getvalue())
         # the child's tool calls are not listed, only the summary line
         self.assertNotIn("ls tests", out)
@@ -1242,7 +1355,7 @@ class ToolRowTests(unittest.TestCase):
             "● Sent the agent off.",
             "",
             "⏺ general-purpose(Find largest folder)",
-            "  ⎿  done · opus high · 3 tools · 17.3s",
+            f"  ⎿  done · {model_label('opus')} high · 3 tools · 17.3s",
             "",
             "● Steam is the monster.",
             "",
@@ -1259,7 +1372,7 @@ class ToolRowTests(unittest.TestCase):
         self.assertNotIn("⏺", "".join(text))
         e.shown = len("Sentthe agentoff.")  # the first piece is out (blanks are free): the agent's rows come into view, not the next prose
         e.invalidate()
-        self.assertEqual(plain(e.lines(80))[1:5], ["● Sent the agent off.", "", "⏺ general-purpose(Find largest folder)", "  ⎿  done · opus high · 3 tools · 17.3s"])
+        self.assertEqual(plain(e.lines(80))[1:5], ["● Sent the agent off.", "", "⏺ general-purpose(Find largest folder)", f"  ⎿  done · {model_label('opus')} high · 3 tools · 17.3s"])
         self.assertNotIn("● Steam", "".join(plain(e.lines(80))))
         # done: the agent and the tool call each fold in place, under their own prose, not at the top
         e.shown, e.finished, e.done = 1 << 30, True, True

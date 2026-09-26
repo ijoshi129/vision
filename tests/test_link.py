@@ -18,12 +18,14 @@ class _Terminal:
         self.frames = []
         self.busy = False
         self.waiting = False
+        self.questions = []
         self.session = "term-sess-1"
         self.host = link.LinkHost(self.summary, self.on_frame)
 
     def summary(self):
         return {"pid": os.getpid(), "title": "typed here", "provider": "claude", "model": "Opus 5", "model_id": "opus",
-                "effort": "high", "session_id": self.session, "workdir": "/tmp", "busy": self.busy, "waiting": self.waiting}
+                "effort": "high", "session_id": self.session, "workdir": "/tmp", "busy": self.busy, "waiting": self.waiting,
+                "questions": self.questions if self.waiting else []}
 
     def on_frame(self, frame):
         self.frames.append(frame)
@@ -64,6 +66,32 @@ class LinkTests(unittest.TestCase):
             Path(d, "junk.json").write_text("not json")
             self.assertEqual(link.list_links(), [])
             self.assertEqual(os.listdir(d), [])
+
+    def test_late_phone_gets_terminal_question_in_hello(self):
+        from fastapi.testclient import TestClient
+
+        questions = [{"question": "Which?", "header": "Pick", "options": [{"label": "A"}, {"label": "B"}]}]
+        with tempfile.TemporaryDirectory() as d, patch.object(link, "LIVE_DIR", Path(d)), \
+             patch.object(server.Hub, "warm_up", lambda self: None), \
+             patch.object(server.Hub, "LINK_POLL", 0.1):
+            term = _Terminal()
+            term.host.start()
+            hub = self._hub()
+            try:
+                with TestClient(server.create_app(hub)) as tc, tc.websocket_connect("/ws?token=tok") as first:
+                    first.receive_json()
+                    self._drain(first, lambda ev, _: ev["type"] == "chat" and ev.get("source") == "terminal")
+                    term.busy = term.waiting = True
+                    term.questions = questions
+                    term.host.post({"type": "question", "questions": questions})
+                    term.host.post_summary(force=True)
+                    self._drain(first, lambda ev, _: ev["type"] == "chat" and ev.get("waiting"))
+                    with tc.websocket_connect("/ws?token=tok") as late:
+                        snapshot = next(c for c in late.receive_json()["chats"] if c["source"] == "terminal")
+                        self.assertTrue(snapshot["waiting"])
+                        self.assertEqual(snapshot["questions"], questions)
+            finally:
+                term.host.stop()
 
     def test_terminal_chat_is_listed_driven_and_leaves_when_it_quits(self):
         from fastapi.testclient import TestClient
@@ -128,6 +156,30 @@ class LinkTests(unittest.TestCase):
                 self._drain(ws, lambda ev, _: ev["type"] == "chat_closed" and ev["chat"] == tid)
                 self.assertNotIn(tid, hub.chats)
                 self.assertEqual(os.listdir(d), [])
+
+    def test_server_copy_of_a_terminal_conversation_closes(self):
+        """`vision serve` continued the session a terminal has open: the terminal keeps it, the copy goes."""
+        from fastapi.testclient import TestClient
+
+        with tempfile.TemporaryDirectory() as d, patch.object(link, "LIVE_DIR", Path(d)), \
+             patch.object(server.Hub, "warm_up", lambda self: None), \
+             patch.object(server.Hub, "LINK_POLL", 0.1), \
+             patch("vision.sessions.session_history", lambda provider, sid: []):
+            term = _Terminal()
+            term.host.start()
+            hub = self._hub()
+            copy = next(iter(hub.chats.values()))
+            copy.brain.session_id = term.session
+            try:
+                with TestClient(server.create_app(hub)) as tc, tc.websocket_connect("/ws?token=tok") as ws:
+                    ws.receive_json()
+                    seen = self._drain(ws, lambda ev, _: ev["type"] == "chat_closed")
+                    tid = next(e["chat"] for e in seen if e["type"] == "chat" and e.get("source") == "terminal")
+                    self.assertEqual(seen[-1], {"type": "chat_closed", "chat": copy.id, "moved_to": tid})
+                    with tc.websocket_connect("/ws?token=tok") as late:
+                        self.assertEqual([c["chat"] for c in late.receive_json()["chats"]], [tid])
+            finally:
+                term.host.stop()
 
 
 if __name__ == "__main__":

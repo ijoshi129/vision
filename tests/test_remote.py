@@ -204,6 +204,69 @@ class JoinTests(unittest.TestCase):
                 for p in patches:
                     p.stop()
 
+    def test_agents_keep_their_timers_across_a_join_and_a_steered_message_splits_the_reply(self):
+        from vision.brain import AgentRun
+        from vision.config import BrainConfig
+
+        steered, go_on = [], threading.Event()
+
+        class Agents(_StubBrain):
+            def steer(self, text):
+                steered.append(text)
+                go_on.set()
+                return True
+
+            def ask(self, text, on_text=None, on_status=None, on_question=None, on_agent=None, on_tool=None):
+                self.session_id = "s1"
+                on_text("Sending one off.")
+                run = AgentRun("a1", "Explore", "Map the tests", started=time.monotonic() - 90)
+                on_agent(run)
+                go_on.wait(5)
+                on_text("Right, cli.py then.")
+                run.done, run.duration_ms = True, 95_000
+                on_agent(run)
+                return _Turn("Sending one off.Right, cli.py then.", "s1")
+
+        hub = _hub(Agents(BrainConfig()))
+        chat_id = next(iter(hub.chats))
+        with tempfile.TemporaryDirectory() as d:
+            patches = _quiet(d) + (patch("vision.agentlog.AGENTS_DIR", Path(d) / "agents"),)
+            for p in patches:
+                p.start()
+            try:
+                with _Live(hub) as info:
+                    phone = _Phone(info)
+                    phone.until(lambda ev: ev["type"] == "hello")
+                    phone.send({"type": "message", "chat": chat_id, "text": "map the tests"})
+                    phone.until(lambda ev: ev["type"] == "agent")
+                    # A terminal joins mid-reply: the row comes with the reply so far, timed from its real start.
+                    rb = remote.RemoteBrain(info, {"chat": chat_id}, BrainConfig())
+                    rb.connect()
+                    rows = []
+                    result = {}
+                    t = threading.Thread(target=lambda: result.update(turn=rb.ask("map the tests", on_agent=lambda r: rows.append(r))))
+                    t.start()
+                    for _ in range(50):
+                        if rows:
+                            break
+                        time.sleep(0.05)
+                    self.assertAlmostEqual(time.monotonic() - rows[0].started, 90, delta=3)
+                    # Send now from the phone: into the running turn, and everyone is told where it went in.
+                    phone.send({"type": "message", "chat": chat_id, "text": "use cli.py", "now": True})
+                    phone.until(lambda ev: ev["type"] == "steered" and ev["text"] == "use cli.py")
+                    phone.until(lambda ev: ev["type"] == "done")
+                    t.join(5)
+                    self.assertEqual(steered, ["use cli.py"])
+                    history = hub.chats[chat_id].history()
+                    self.assertEqual([(m["role"], m["text"]) for m in history[-4:]], [
+                        ("user", "map the tests"), ("assistant", "Sending one off."), ("user", "use cli.py"), ("assistant", "Right, cli.py then.")])
+                    self.assertEqual([a["id"] for a in history[-3]["agents"]], ["a1"])  # the row stays with the part it started in
+                    self.assertTrue(history[-3]["agents"][0]["done"])
+                    phone.close()
+            finally:
+                for p in patches:
+                    p.stop()
+
     def test_a_question_answered_on_the_phone_closes_the_terminal_form(self):
         from vision.config import BrainConfig
 
@@ -244,6 +307,66 @@ class JoinTests(unittest.TestCase):
                     self.assertTrue(dismissed.is_set())
                     self.assertEqual(got["answers"], {"Which?": "B"})
                     self.assertEqual(result["turn"].text, "went with B")
+                    phone.close()
+            finally:
+                for p in patches:
+                    p.stop()
+
+    def test_joining_during_a_question_restores_it_on_phone_and_terminal(self):
+        from vision.config import BrainConfig
+
+        questions = [{"question": "Which?", "header": "Pick", "options": [{"label": "A"}, {"label": "B"}]}]
+        got = {}
+
+        class Asks(_StubBrain):
+            def ask(self, text, on_text=None, on_status=None, on_question=None, on_agent=None, on_tool=None):
+                self.session_id = "s1"
+                got["answers"] = on_question(questions)
+                return _Turn("done", "s1")
+
+        hub = _hub(Asks(BrainConfig()))
+        chat_id = next(iter(hub.chats))
+        with tempfile.TemporaryDirectory() as d:
+            patches = _quiet(d)
+            for p in patches:
+                p.start()
+            try:
+                with _Live(hub) as info:
+                    phone = _Phone(info)
+                    phone.until(lambda ev: ev["type"] == "hello")
+                    phone.send({"type": "message", "chat": chat_id, "text": "choose"})
+                    phone.until(lambda ev: ev["type"] == "question")
+
+                    late_phone = _Phone(info)
+                    snapshot = late_phone.until(lambda ev: ev["type"] == "hello")["chats"][0]
+                    self.assertTrue(snapshot["waiting"])
+                    self.assertEqual(snapshot["questions"], questions)
+
+                    rb = remote.RemoteBrain(info, {"chat": chat_id}, BrainConfig())
+                    rb.connect()
+                    self.assertEqual(rb.pending_turn(), "choose")
+                    opened = threading.Event()
+                    dismissed = threading.Event()
+                    rb.on_answered = dismissed.set
+
+                    def form(qs):
+                        self.assertEqual(qs, questions)
+                        opened.set()
+                        dismissed.wait(5)
+
+                    result = {}
+                    turn_thread = threading.Thread(target=lambda: result.update(turn=rb.ask("choose", on_question=form)))
+                    turn_thread.start()
+                    self.assertTrue(opened.wait(5))
+                    late_phone.send({"type": "answer", "chat": chat_id, "answers": {"Which?": "B"}})
+                    turn_thread.join(5)
+                    self.assertFalse(turn_thread.is_alive())
+                    self.assertEqual(got["answers"], {"Which?": "B"})
+                    self.assertEqual(result["turn"].text, "done")
+                    self.assertTrue(dismissed.is_set())
+                    self.assertEqual(hub.chats[chat_id].summary()["questions"], [])
+                    rb.close()
+                    late_phone.close()
                     phone.close()
             finally:
                 for p in patches:

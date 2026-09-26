@@ -1,8 +1,9 @@
 """Codex brain: drives OpenAI's GPT models through the Codex CLI in headless mode.
 
-Uses `codex exec --json` exactly as documented for scripting, on your normal Codex (ChatGPT)
-login and subscription. Conversation continuity uses Codex's own thread store via
-`codex exec resume <thread_id>`.
+Turns run through `codex app-server` (vision/codex_app.py: messages into a running turn, streamed
+text, live usage and tool rows) unless `[codex].transport = "exec"`, which uses `codex exec --json`
+as documented for scripting; both on your normal Codex (ChatGPT) login and subscription and Codex's
+own thread store. The notes below are the exec path's.
 
 Verified against codex-cli 0.154.0:
 - JSONL events: thread.started{thread_id}, turn.started, item.started/item.completed{item},
@@ -209,6 +210,8 @@ class CodexBrain:
         self.handoff: str | None = None  # previous provider's transcript, sent with the next fresh thread's first message
         # (tokens the model read on its last response, its window): the `% ctx` figure / phone gauge.
         self.context: tuple[int, int] | None = None
+        self._rpc = None  # the running turn's app-server (vision.codex_app.AppServerTurn), for steer and cancel
+        self._cancelled_app = False
 
     # -- session helpers -------------------------------------------------
     @staticmethod
@@ -253,17 +256,49 @@ class CodexBrain:
         return self.cfg.model or None
 
     # -- main entry point -------------------------------------------------
-    def _command(self) -> list[str]:
-        sandbox = sandbox_for(self.cfg)
-        persona = system_prompt(
+    def _persona(self, sandbox: str) -> str:
+        if self.task_mode:
+            from vision.delegation import worker_prompt
+
+            return worker_prompt(self.cfg, self.workdir, self.provider, sandbox)
+        return system_prompt(
             self.voice_mode, self.cfg.address_user_as, self.workdir, self.cfg.allowed_tools,
             provider="codex", sandbox=sandbox, denied_tools=self.cfg.denied_tools, mode=self.cfg.mode,
             weather=weather_ready(self.cfg),
         )
-        if self.task_mode:
-            from vision.delegation import worker_prompt
 
-            persona = worker_prompt(self.cfg, self.workdir, self.provider, sandbox)
+    def _transport(self) -> str:
+        return getattr(getattr(self.cfg, "codex", None), "transport", "app-server") or "app-server"
+
+    def app_server_settings(self, sandbox: str) -> dict:
+        """thread/start (and thread/resume) settings: what the exec path passes as flags and `-c`."""
+        from vision.codex_app import _config_overrides
+
+        config = {"service_tier": "priority" if self.cfg.fast else "default"}
+        if self.cfg.effort:
+            config["model_reasoning_effort"] = self.cfg.effort
+        if sandbox == "workspace-write":
+            from vision.memory import MEMORY_DIR  # Vision's memory file lives outside the workdir
+
+            MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+            config["sandbox_workspace_write.writable_roots"] = [str(MEMORY_DIR)]
+        config.update(_config_overrides(getattr(getattr(self.cfg, "codex", None), "extra_config", []) or []))
+        settings = {"cwd": self.workdir, "approvalPolicy": "never", "sandbox": sandbox,
+                    "developerInstructions": self._persona(sandbox), "config": config}
+        if self.cfg.model:
+            settings["model"] = self.cfg.model
+        return settings
+
+    def steer(self, text: str) -> bool:
+        """Send a message into the running turn (app-server only; exec can't take one): False and
+        the caller queues it when nothing is running or Codex says the turn can't be steered."""
+        with self._lock:
+            rpc = self._rpc
+        return bool(rpc and rpc.steer(text))
+
+    def _command(self) -> list[str]:
+        sandbox = sandbox_for(self.cfg)
+        persona = self._persona(sandbox)
         common = ["--json", "--skip-git-repo-check"]
         if self.cfg.model:
             common += ["-m", self.cfg.model]
@@ -292,9 +327,13 @@ class CodexBrain:
         on_text: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
         on_question: Callable[[list[dict]], dict[str, str] | None] | None = None,  # Claude-only (AskUserQuestion); codex exec has no equivalent
-        on_agent: Callable | None = None,  # Claude-only (subagent activity); codex exec reports sub-agents as plain items
-        on_tool: Callable | None = None,  # Claude-only for now (live tool rows); codex items arrive whole, after the fact
+        on_agent: Callable | None = None,  # sub-agent rows, read from Codex's collab items (vision.subagents)
+        on_tool: Callable | None = None,  # live tool rows (app-server only; exec items arrive whole, after the fact)
     ) -> Turn:
+        if self._transport() != "exec":
+            from vision.codex_app import run_turn
+
+            return run_turn(self, prompt, on_text=on_text, on_status=on_status, on_agent=on_agent, on_tool=on_tool)
         from vision.brain import Turn, brain_env, inject_handoff
 
         env = brain_env("codex")
@@ -305,6 +344,9 @@ class CodexBrain:
         on_status = dedupe_status(on_status)
         last_error = ""
         turn_id: str | None = None
+        from vision.subagents import AgentTracker, codex_item
+
+        subs = AgentTracker(turn, on_agent, model=self.cfg.model or "", effort=self.cfg.effort or "")
 
         with self._lock:
             self._proc = subprocess.Popen(
@@ -342,6 +384,15 @@ class CodexBrain:
                     turn.session_id = tid or turn.session_id
                 elif t == "turn.started":
                     turn_id = ev.get("turn_id") or turn_id
+                elif t in ("item.started", "item.updated", "item.completed") and codex_item(subs, ev.get("item", {}), t == "item.completed"):
+                    # A sub-agent: its own row (on_agent); the live line says an agent is at work.
+                    if t == "item.started":
+                        reply.tool()
+                        turn.tools_used.append("Agent")
+                        if on_status:
+                            on_status("Agent")
+                    elif t == "item.completed" and on_status:
+                        on_status(READING)
                 elif t == "item.started":
                     item = ev.get("item", {})
                     kind = item.get("type", "")
@@ -401,6 +452,7 @@ class CodexBrain:
         finally:
             with self._lock:
                 self._proc = None
+            subs.close("cancelled" if turn.error == "cancelled" else "cut off when the turn ended")
 
         turn.text = reply.finish()
         if self.task_mode and reply.last is not None:
@@ -628,7 +680,11 @@ class CodexBrain:
 
     def cancel(self) -> None:
         with self._lock:
-            proc = self._proc
+            proc, rpc = self._proc, self._rpc
+        if rpc is not None:
+            self._cancelled_app = True
+            rpc.interrupt()  # the turn ends as `interrupted`; the process is killed if it lingers
+            return
         if proc and proc.poll() is None:
             try:
                 proc.terminate()

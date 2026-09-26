@@ -112,6 +112,9 @@ stall_s = 900
 sandbox = "auto"
 # Optional raw `codex exec -c key=value` entries. Most users should leave this empty.
 extra_config = []
+# How turns run: "app-server" (messages can go into a running reply, text streams in) or "exec"
+# (`codex exec --json`, one message per turn, replies arrive whole).
+transport = "app-server"
 
 [grok]
 # Sandbox used for Grok models in auto mode: "auto" (= off, unrestricted, matching Claude's auto mode),
@@ -354,6 +357,7 @@ def voice_choices(vc: "VoiceConfig") -> list[tuple[str, str]]:
 class CodexConfig:
     sandbox: str = "auto"
     extra_config: list[str] = field(default_factory=list)
+    transport: str = "app-server"  # or "exec" (see vision/codex_app.py)
 
 
 @dataclass

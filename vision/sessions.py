@@ -510,12 +510,18 @@ def session_history(provider: str, session_id: str, limit: int = HISTORY_LIMIT, 
     if not session_id:
         return []
     if provider == "codex":
-        return codex_history(session_id, limit, include_context=include_context)
-    if provider == "grok":
-        return grok_history(session_id, limit, include_context=include_context)
-    if provider == "local":
-        return local_history(session_id, limit, include_context=include_context)
-    return claude_history(session_id, limit, include_context=include_context)
+        history = codex_history(session_id, limit, include_context=include_context)
+    elif provider == "grok":
+        history = grok_history(session_id, limit, include_context=include_context)
+    elif provider == "local":
+        history = local_history(session_id, limit, include_context=include_context)
+    else:
+        history = claude_history(session_id, limit, include_context=include_context)
+    if include_context:
+        return history
+    from vision.agentlog import attach
+
+    return attach(history, provider or "claude", session_id)  # the agent rows each reply ran
 
 
 def format_transcript(messages: list[dict], max_chars: int | None = None) -> str:

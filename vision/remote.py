@@ -21,7 +21,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
 
-from vision.brain import ToolCall, Turn
+from vision.brain import AgentRun, ToolCall, Turn, run_from_frame
 from vision.config import STATE_DIR
 
 SERVE_FILE = STATE_DIR / "serve.json"
@@ -150,22 +150,15 @@ def _age(seconds: float) -> str:
 
 # ---------------------------------------------------------------- the brain that isn't here
 @dataclass
-class RemoteAgentRun:
-    """A subagent row rebuilt from the server's `agent` frames (what ui.agent_rows reads)."""
+class RemoteAgentRun(AgentRun):
+    """A subagent row rebuilt from the server's `agent` frames (vision.brain.run_from_frame): its timer
+    runs from the frame's wall-clock start, and once done it shows the server's own status line."""
 
-    id: str
-    kind: str = "agent"
-    label: str = ""
-    done: bool = False
-    failed: bool = False
-    cut_off: bool = False
-    model: str = ""
-    effort: str = ""
-    status: str = ""
-    started: float = 0.0
-    tokens_fn: Callable[[], int] | None = None
-    steps: list[tuple[str, str]] = field(default_factory=list)
-    details: list[str] = field(default_factory=list)
+    status_text: str = ""
+
+    @property
+    def status(self) -> str:
+        return self.status_text or AgentRun.status.fget(self)
 
 
 class RemoteBrain:
@@ -180,7 +173,8 @@ class RemoteBrain:
 
     def __init__(self, server: dict, chat: dict, cfg, *, on_summary: Callable[[dict], None] | None = None,
                  on_foreign_turn: Callable[[str], None] | None = None, on_note: Callable[[str, str], None] | None = None,
-                 on_answered: Callable[[], None] | None = None, on_closed: Callable[[str], None] | None = None):
+                 on_answered: Callable[[], None] | None = None, on_closed: Callable[[str], None] | None = None,
+                 on_steered: Callable[[str], None] | None = None):
         self.server = server
         self.chat_id = chat["chat"]
         self.state: dict = dict(chat)
@@ -190,6 +184,7 @@ class RemoteBrain:
         self.on_note = on_note or (lambda text, kind: None)
         self.on_answered = on_answered or (lambda: None)
         self.on_closed = on_closed or (lambda reason: None)
+        self.on_steered = on_steered or (lambda text: None)  # a message went into the running turn: split the reply there
         self.output_tokens = 0
         self.last_usage = None
         self.handoff = None
@@ -202,6 +197,8 @@ class RemoteBrain:
         self._incoming: str | None = None  # a turn another client started, not yet picked up by ask()
         self._question_open = False
         self._answered_elsewhere = False
+        self._snapshot_questions: list[dict] | None = None
+        self._snapshot_question_cancelled = False
         self._hello = threading.Event()
         self._hello_error = ""
         self._closed = False  # the socket is gone (either side)
@@ -324,8 +321,21 @@ class RemoteBrain:
                 # for the screen to pick up once connect() returns (see pending_turn).
                 self._incoming = mine["user_text"]
                 self._frames.put({"type": "start", "text": mine["user_text"]})
-                if mine.get("partial"):
-                    self._frames.put({"type": "delta", "text": mine["partial"]})
+                # What has streamed so far, with the agent rows slotted in where each started (`at`),
+                # their timers running from their real start.
+                partial, pos = mine.get("partial") or "", 0
+                for frame in sorted(mine.get("agents") or [], key=lambda a: a.get("at", 0)):
+                    at = min(max(pos, int(frame.get("at") or 0)), len(partial))
+                    if at > pos:
+                        self._frames.put({"type": "delta", "text": partial[pos:at]})
+                        pos = at
+                    self._frames.put({**frame, "type": "agent"})
+                if partial[pos:]:
+                    self._frames.put({"type": "delta", "text": partial[pos:]})
+                if mine.get("waiting") and mine.get("questions"):
+                    self._snapshot_questions = mine["questions"]
+                    self._snapshot_question_cancelled = False
+                    self._frames.put({"type": "question", "questions": mine["questions"], "snapshot": True})
             self._hello.set()
             return
         if kind == "pong":
@@ -347,6 +357,8 @@ class RemoteBrain:
         if kind == "chat":
             self._apply_summary(ev)
             self.on_summary(ev)
+            if not ev.get("waiting"):
+                self._snapshot_question_cancelled = True
             if self._question_open and not ev.get("waiting"):
                 self._question_open = False
                 self._answered_elsewhere = True
@@ -354,6 +366,11 @@ class RemoteBrain:
             return
         if kind in ("audio", "audio_end"):
             return  # the phone's speech; the terminal has its own
+        if kind == "question" and ev.get("questions") == self._snapshot_questions and not self._snapshot_question_cancelled:
+            return  # already queued from hello; a live event raced with the join
+        if kind == "answered":
+            self._snapshot_question_cancelled = True
+            self._snapshot_questions = None
         if self._active or self._incoming is not None:
             self._frames.put(ev)
             return
@@ -415,8 +432,11 @@ class RemoteBrain:
                     call = self._tool(ev)
                     if on_tool:
                         on_tool(call)
+                elif kind == "steered":
+                    self.on_steered(ev.get("text", ""))
                 elif kind == "question":
-                    self._answer(ev.get("questions") or [], on_question)
+                    if not ev.get("snapshot") or not self._snapshot_question_cancelled:
+                        self._answer(ev.get("questions") or [], on_question)
                 elif kind == "note":
                     self.on_note(ev.get("text", ""), "info")
                 elif kind == "error":
@@ -453,21 +473,11 @@ class RemoteBrain:
     def _agent(self, ev: dict) -> RemoteAgentRun:
         run = self._agents.get(ev.get("id", ""))
         if run is None:
-            run = RemoteAgentRun(id=ev.get("id", ""), started=time.monotonic())
+            run = RemoteAgentRun(ev.get("id", ""), "agent", "", started=time.monotonic())  # frames without `started`: from now
             self._agents[run.id] = run
-        run.kind = ev.get("kind") or run.kind
-        run.label = ev.get("label") or run.label
-        run.model = ev.get("model") or run.model
-        run.effort = ev.get("effort") or run.effort
-        step = ev.get("step")
-        if step and (not run.steps or run.steps[-1] != (step.get("tool", ""), step.get("detail", ""))):
-            run.steps.append((step.get("tool", ""), step.get("detail", "")))
+        run_from_frame(ev, run)
         if ev.get("done"):
-            run.done = True
-            run.failed = bool(ev.get("failed"))
-            run.cut_off = bool(ev.get("cut_off"))
-            run.status = ev.get("status") or run.status
-            run.details = list(ev.get("details") or [])
+            run.status_text = ev.get("status") or run.status_text
         return run
 
     def _tool(self, ev: dict) -> ToolCall:
@@ -482,6 +492,12 @@ class RemoteBrain:
         if "output" in ev:
             call.output = ev.get("output") or ""
         return call
+
+    def steer(self, text: str) -> bool:
+        """Send a message into the chat's running turn (the server sends it in, or queues it when that
+        brain can't take one mid-reply). Its `steered` frame splits the reply here."""
+        self.send({"type": "message", "text": text, "speak": False, "voice": False, "now": True})
+        return True
 
     # -- controls
     def cancel(self) -> None:

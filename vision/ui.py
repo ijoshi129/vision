@@ -35,6 +35,7 @@ from rich.table import Table
 from rich.text import Text
 
 from vision.buddy import HEIGHT as BUDDY_HEIGHT, MIN_COLUMNS as BUDDY_MIN_COLUMNS, WIDTH as BUDDY_WIDTH, Buddy, FACE_BG, FACE_X0, FACE_X1, idle_sprite
+from vision.brain import clock
 
 ACCENT = "bright_cyan"
 USER_STYLE = "bold"  # the user's own lines: bold behind a `›` mark
@@ -265,13 +266,15 @@ def agent_activity(runs, spin: str = "") -> Group:
             text.append(f"({run.label})", style="dim")
         text.append("\n")
         bits = ["cut off" if run.cut_off else "failed" if run.failed else "done"] if run.done else ["running"]
-        if run.model:  # which brain is spending
-            bits.append(run.model + (f" {run.effort}" if run.effort else ""))
+        if run.model:  # which brain is spending (`Fable 5.1`, not the id a workflow reports)
+            from vision.models import model_label
+
+            bits.append(model_label(run.model) + (f" {run.effort}" if run.effort else ""))
         if run.done:
             bits.append(run.status)
         elif run.started:
-            bits.append(f"{time.monotonic() - run.started:.0f}s")
-            tokens = run.tokens_fn() if run.tokens_fn else 0
+            bits.append(clock(time.monotonic() - run.started, live=True))
+            tokens = run.tokens_fn() if run.tokens_fn else getattr(run, "tokens", 0)
             if tokens:
                 bits.append(f"↓{short_count(tokens)}")
         text.append("  ⎿  ", style="dim")
@@ -1137,12 +1140,54 @@ class _Entry:
         self._lines.clear()
 
 
+_OSC8 = re.compile(r"\x1b\]8;([^;\x07\x1b]*);([^\x07\x1b]*)(?:\x1b\\|\x07)")
+_CSI = re.compile(r"(\x1b\[[0-9;]*[A-Za-z])")
+LINK_OFF = "\x1b]8;;\x1b\\"
+
+
+def _linked(chunk: str, link: str) -> str:
+    if not link:
+        return chunk
+    parts = _CSI.split(chunk)
+    for i in range(0, len(parts), 2):  # even parts are text, odd ones the SGR codes between
+        parts[i] = "".join(ch if ch == "\n" else f"\001{link}\002{ch}" for ch in parts[i])
+    return "".join(parts)
+
+
+def _links_to_escapes(ansi: str) -> str:
+    """rich's OSC 8 hyperlinks as prompt_toolkit zero-width escapes. Its ANSI parser knows no OSC:
+    it drops the ESC and prints the rest (`8;id=…;file://…`). Every linked character carries its
+    own opening, so a repaint that starts mid-link still links; the run's end closes it, and
+    _close_links shuts it whenever the renderer jumps, so a partial repaint can't spill it."""
+    if "\x1b]8;" not in ansi:
+        return ansi
+    out, link, pos = [], "", 0
+    for m in _OSC8.finditer(ansi):
+        out.append(_linked(ansi[pos:m.start()], link))
+        pos = m.end()
+        was, link = link, (m.group(0) if m.group(2) else "")
+        if was and not link:
+            out.append(f"\001{LINK_OFF}\002")
+    out.append(_linked(ansi[pos:], link))
+    return "".join(out).replace("\002\001", "")  # the parser takes a \001 straight after \002 as text
+
+
+def _close_links(output):
+    """Close any open hyperlink before every cursor jump and attribute reset (see _links_to_escapes)."""
+    for name in ("reset_attributes", "cursor_goto", "cursor_up", "cursor_down", "cursor_forward", "cursor_backward"):
+        def closing(*args, _method=getattr(output, name), **kwargs):
+            output.write_raw(LINK_OFF)
+            return _method(*args, **kwargs)
+        setattr(output, name, closing)
+    return output
+
+
 def _rows(ansi: str) -> list[list]:
     """Parsed ANSI as one prompt_toolkit fragment list per line (rich's trailing newline dropped).
     prompt_toolkit's ANSI parser emits one fragment per character; runs of the same style are
     merged here, which makes every later per-frame pass over the fragments ~10x cheaper."""
     rows = []
-    for row in split_lines(ANSI(ansi).__pt_formatted_text__()):
+    for row in split_lines(ANSI(_links_to_escapes(ansi)).__pt_formatted_text__()):
         merged: list = []
         for frag in row:
             if merged and merged[-1][0] == frag[0] and len(frag) == 2:
@@ -1528,6 +1573,9 @@ def _slice_row(row: list, c0: int, c1: int, style: str | None = None) -> tuple[l
     at = 0
     for frag in row:
         st, txt, *rest = frag
+        if "[ZeroWidthEscape]" in st:  # a link's escape code: no cells, not part of the copied text
+            out.append(frag)
+            continue
         cells = _cells(txt)
         end = at + cells[-1]
         if end <= c0 or at >= c1:
@@ -1605,7 +1653,7 @@ def _private_output():
 
     try:
         tty = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding=sys.stdout.encoding or "utf-8", errors="replace")
-        return create_output(stdout=tty)
+        return _close_links(create_output(stdout=tty))
     except (OSError, ValueError, AttributeError):
         return None  # not a real terminal (tests, pipes): prompt_toolkit's default output
 
@@ -1676,6 +1724,9 @@ class ChatScreen:
         self._notice: tuple[str, float] = ("", 0.0)  # a short status-row message and when it expires
         self._quit_armed = 0.0  # when an idle Ctrl-C on an empty box last happened; a second within QUIT_WINDOW quits
         self.on_submit: Callable[[str], None] = lambda text: None
+        # Ctrl-X mid-reply: send the message into the running turn now rather than queue it behind
+        # it ("" = send the queued ones now). Without a reply running it is a plain send.
+        self.on_steer: Callable[[str], None] = lambda text: self.on_submit(text) if text else None
         self.on_cancel: Callable[[], None] = lambda: None
         self.on_toggle_mode: Callable[[], None] = lambda: None  # Shift-Tab: auto ⇄ plan
         # Esc / Ctrl-C while nothing is being replied (e.g. to leave a voice conversation); True = consumed
@@ -1726,6 +1777,10 @@ class ChatScreen:
         @kb.add("c-j")
         def _newline(event):
             self.area.buffer.insert_text("\n")
+
+        @kb.add("c-x", filter=~overlay & ~menu_open)
+        def _send_now(event):
+            self._submit(self.area.text, now=True)
 
         @kb.add("escape", eager=True, filter=~overlay & ~menu_open)
         def _esc(event):
@@ -2208,14 +2263,18 @@ class ChatScreen:
     def _set_text(self, text: str) -> None:
         self.area.buffer.document = Document(text, len(text))
 
-    def _submit(self, text: str) -> None:
+    def _submit(self, text: str, now: bool = False) -> None:
         """Send the input (a message, or a /command which is allowed even mid-reply).
 
         A live reply has its own entry in ``_revealing``.  Messages submitted while that entry is
-        active are follow-ups; the chat driver serialises them behind the current turn.  ``busy`` is
-        also used for operations which cannot accept a message (model switches, usage lookups and
-        voice warm-up), so those retain the old guard.
+        active are follow-ups; the chat driver serialises them behind the current turn, unless
+        ``now`` (Ctrl-X) sends them into it.  ``busy`` is also used for operations which cannot
+        accept a message (model switches, usage lookups and voice warm-up), so those retain the old guard.
         """
+        steer = now and self._revealing is not None and not text.lstrip().startswith("/")
+        if steer and not text.strip():
+            self.on_steer("")  # an empty box: the queued messages go in now
+            return
         if not text.strip():
             return
         if self.busy and self._revealing is None and not text.lstrip().startswith("/"):
@@ -2228,7 +2287,7 @@ class ChatScreen:
         if not text.lstrip().startswith("/"):
             self.area.buffer.append_to_history()
         self.area.buffer.reset()  # reload working lines so Up sees this turn, not a stale snapshot
-        self.on_submit(text)
+        (self.on_steer if steer else self.on_submit)(text)
 
     def _picker_rows(self):
         p = self._picker
@@ -2464,6 +2523,10 @@ class ChatScreen:
     @property
     def form_open(self) -> bool:
         return self._form is not None
+
+    @property
+    def pending_questions(self) -> list[dict]:
+        return self._form.qs if self._form is not None else []
 
     def answer_questions(self, answers: dict[str, str] | None) -> bool:
         """Close the open form with answers that arrived elsewhere (the phone). False if none is open."""

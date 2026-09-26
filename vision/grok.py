@@ -353,7 +353,7 @@ class GrokBrain:
         on_text: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
         on_question: Callable[[list[dict]], dict[str, str] | None] | None = None,  # Claude-only
-        on_agent: Callable | None = None,  # Claude-only
+        on_agent: Callable | None = None,  # sub-agent rows, from its spawn_subagent calls (vision.subagents)
         on_tool: Callable | None = None,  # Claude-only; grok tool_calls are status labels
     ) -> Turn:
         from vision.brain import Turn, brain_env, inject_handoff
@@ -365,6 +365,10 @@ class GrokBrain:
         on_status = dedupe_status(on_status)
         pending: set[str] = set()
         last_error = ""
+        from vision.subagents import AgentTracker, grok_tool_call, grok_tool_update
+
+        subs = AgentTracker(turn, on_agent, model=_cli_model(self.cfg.model) or "", effort=self.cfg.effort or "")
+        sub_calls: dict[str, str] = {}  # sub-agent tool calls by toolCallId
         fd, prompt_path = tempfile.mkstemp(prefix="vision-grok-", suffix=".txt")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -412,6 +416,7 @@ class GrokBrain:
                     if on_status:
                         on_status(THINKING)  # real reasoning tokens (one line per chunk; deduped)
                 elif t == "tool_call":
+                    grok_tool_call(subs, ev, sub_calls)
                     name = ev.get("toolName") or ev.get("title") or "tool"
                     label = TOOL_LABELS.get(name, name)
                     turn.tools_used.append(label)
@@ -421,6 +426,7 @@ class GrokBrain:
                     if on_status:
                         on_status(label)
                 elif t == "tool_call_update":
+                    grok_tool_update(subs, ev, sub_calls)
                     status = ev.get("status") or ""
                     tid = ev.get("toolCallId")
                     if status in ("completed", "failed", "cancelled", "error") and tid:
@@ -476,6 +482,7 @@ class GrokBrain:
         finally:
             with self._lock:
                 self._proc = None
+            subs.close("cancelled" if turn.error == "cancelled" else "cut off when the turn ended")
             try:
                 os.unlink(prompt_path)
             except OSError:
