@@ -408,6 +408,14 @@ class Chat:
         if fut is not None and not fut.done():
             fut.set_result(answers if isinstance(answers, dict) and answers else None)
 
+    def unqueue(self, text: str) -> bool:
+        """Take a queued message back out (the first one reading `text`); False if it already ran."""
+        for i, item in enumerate(self._pending):
+            if item[0] == text:
+                del self._pending[i]
+                return True
+        return False
+
     def steer(self, text: str) -> bool:
         """Send `text` into the running turn now instead of after it (Claude takes it at its next step).
         A copy still waiting in the queue is taken out. False when this turn's brain can't take one
@@ -700,6 +708,12 @@ class LinkedChat:
 
     def answer(self, answers) -> None:
         self.link.send({"type": "answer", "answers": answers if isinstance(answers, dict) and answers else None})
+
+    def unqueue(self, text: str) -> bool:
+        if not self.link:
+            return False
+        self.link.send({"type": "unqueue", "text": text})
+        return True
 
     def steer(self, text: str) -> bool:
         """The terminal runs the turn: it sends the message in (and says `steered`) or leaves it queued."""
@@ -1077,6 +1091,11 @@ class Hub:
             # `now`: send it into the running turn (Claude takes it at its next step); else it queues.
             if text and not (msg.get("now") and chat.busy and chat.steer(text)):
                 chat.queue(text, bool(msg.get("speak")), bool(msg.get("voice")), bool(msg.get("talk")))
+        elif kind == "unqueue":
+            # A queued message removed (or taken back to edit) on the phone: it never runs.
+            text = with_attachments((msg.get("text") or "").strip(), msg.get("images"))
+            if text:
+                chat.unqueue(text)
         elif kind == "steer":
             # A queued message the phone wants sent into the running turn now.
             text = with_attachments((msg.get("text") or "").strip(), msg.get("images"))  # as it was queued

@@ -693,6 +693,7 @@ HELP_TEXT = (
     "a Claude or Local chat talks through its own /model; /voicemodel qwen3.6 save keeps it as the default)\n"
     "[dim]Type / for the command menu (↑/↓ choose · Enter runs · Tab fills in · Esc hides) · "
     "Enter sends (mid-reply it queues) · Ctrl-X sends it into the running reply now (empty box: the queued ones) · "
+    "↑ on an empty box picks a queued message: Enter edits, Del removes, Esc leaves (the queue waits meanwhile) · "
     "Ctrl-J newline · PgUp/PgDn or Shift-↑/↓ scroll (Alt-End follows again) · "
     "Esc cancels a reply · Ctrl-O unfolds the last reply's tool calls · Ctrl-D quits[/dim]"
 )
@@ -801,9 +802,11 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
     # provider CLIs still see exactly one turn at a time and therefore keep session order intact.
     import queue
 
-    state.update({"turn_queue": queue.Queue(), "turn_lock": threading.Lock(), "turn_active": False, "turn_thread": None})
+    from vision.turnqueue import QueuedTurn, TurnQueue
+
+    state.update({"turn_queue": TurnQueue(), "turn_lock": threading.Lock(), "turn_active": False, "turn_thread": None})
     # The running turn's driver and its `steered(text)` (splits the reply where a Ctrl-X message went
-    # in). Messages sent meanwhile wait in the queued strip above the input box (screen.queued).
+    # in). Messages sent meanwhile wait in the queued strip above the input box (vision.turnqueue).
     state.update({"driver": None, "steered": None})
     # `vision serve` finds this chat through its socket (link.py) and shows it on the phone as a
     # terminal chat: messages from there run here, and every turn here streams there.
@@ -1142,29 +1145,33 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         threading.Thread(target=fn, args=args, daemon=True).start()
 
     def drain_turns():
-        """Run typed follow-ups in submission order, never concurrently on the same brain."""
+        """Run typed follow-ups in submission order, never concurrently on the same brain. While a
+        queued message is being picked or edited in the strip, the queue is held: nothing goes."""
         pending = state["turn_queue"]
         while not state["quitting"]:
+            if not pending.wait_free(0.25):
+                continue
             with state["turn_lock"]:
-                try:
-                    text, speak_remote, follow, voice, talk = pending.get_nowait()
-                except queue.Empty:
+                item = pending.pop()
+                if item is None:
                     state["turn_active"] = False
                     state["turn_thread"] = None
                     return
-                if screen.unqueue(text):
-                    screen.add(user_grid(text), gap_before=True)  # its turn now: into the transcript, above its reply
-            run_turn(text, speak_remote=speak_remote, follow=follow, voice_remote=voice, talk_remote=talk)
+            if item.shown:
+                screen.add(user_grid(item.text), gap_before=True)  # its turn now: into the transcript, above its reply
+            screen.app.invalidate()
+            run_turn(item.text, speak_remote=item.speak, follow=item.follow, voice_remote=item.voice, talk_remote=item.talk)
         with state["turn_lock"]:
             state["turn_active"] = False
             state["turn_thread"] = None
 
-    def enqueue_turn(text: str, speak_remote: bool = False, follow: bool = False, voice: bool = False, talk: bool = False):
+    def enqueue_turn(text: str, speak_remote: bool = False, follow: bool = False, voice: bool = False, talk: bool = False,
+                     shown: bool = False):
         """`speak_remote`: the phone asked for this reply spoken; the server does that from the deltas.
-        `follow`, `voice`, `talk`: see run_turn."""
+        `follow`, `voice`, `talk`: see run_turn. `shown`: it waits in the queued strip (queue_or_add)."""
         pending = state["turn_queue"]
         with state["turn_lock"]:
-            pending.put((text, speak_remote, follow, voice, talk))
+            pending.put(QueuedTurn(text, speak_remote, follow, voice, talk, shown=shown))
             if state["turn_active"]:
                 return
             state["turn_active"] = True
@@ -2127,36 +2134,24 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             if state["cancel"]:
                 state["cancel"].set()
             return
-        queue_or_add(text)
-        enqueue_turn(text)
+        enqueue_turn(text, shown=queue_or_add(text))
 
-    def queue_or_add(text: str):
-        """A message behind a running reply waits in the queued strip over the input box (it joins the
-        transcript when its turn starts); otherwise it is in the transcript straight away."""
+    def queue_or_add(text: str) -> bool:
+        """A message behind a running reply waits in the queued strip over the input box (True: it
+        joins the transcript when its turn starts); otherwise it is in the transcript straight away."""
         if state["turn_active"]:
-            screen.queue(text, can_send_now=joined() or bool(getattr(state["driver"], "steer", None)))
-        else:
-            screen.add(user_grid(text), gap_before=True)
+            screen.app.invalidate()
+            return True
+        screen.add(user_grid(text), gap_before=True)
+        return False
 
     def take_queued(only: str | None = None) -> list[str]:
         """Queued typed messages out of the turn queue (all, or the one reading `only`), their rows
         out of the transcript: they are about to go into the running turn instead."""
-        taken, keep = [], []
         with state["turn_lock"]:
-            pending = state["turn_queue"]
-            while True:
-                try:
-                    item = pending.get_nowait()
-                except queue.Empty:
-                    break
-                follow = item[2]
-                (taken if not follow and (only is None or item[0] == only) and not (only and taken) else keep).append(item)
-            for item in keep:
-                pending.put(item)
-        texts = [item[0] for item in taken]
-        for t in texts:
-            screen.unqueue(t)
-        return texts
+            taken = state["turn_queue"].take_where(lambda it: not it.follow and (only is None or it.text == only), first_only=only is not None)
+        screen.app.invalidate()
+        return [item.text for item in taken]
 
     def steer_now(text: str, from_phone: bool = False):
         """Ctrl-X, or Send now on the phone: into the running turn rather than after it; Claude takes
@@ -2165,10 +2160,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         (sent earlier, now pushed) or not (sent with `now`); either way it must get through."""
         running = screen.busy and state["turn_active"]
         if not running:
-            if text and (not from_phone or text not in screen.queued):
+            if text and (not from_phone or not state["turn_queue"].has_text(text)):
                 if from_phone:
-                    queue_or_add(text)
-                    enqueue_turn(text)
+                    enqueue_turn(text, shown=queue_or_add(text))
                 else:
                     send(text)
             return
@@ -2190,8 +2184,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                     split(t)
             else:
                 note("this model can't take a message mid-reply, so it's queued")
-                queue_or_add(t)
-                enqueue_turn(t)
+                enqueue_turn(t, shown=queue_or_add(t))
 
     def submit(text: str):
         text = text.strip()
@@ -2203,6 +2196,8 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
 
     screen.on_submit = submit
     screen.on_steer = steer_now
+    screen.turns = state["turn_queue"]  # the queued strip reads and edits the same queue
+    screen.can_steer_fn = lambda: joined() or bool(getattr(state["driver"], "steer", None))
     screen.on_cancel = cancel_reply
     screen.on_toggle_mode = lambda: command("mode", "")
     screen.on_interrupt = stop_listening  # Esc / Ctrl-C while idle: leave the voice conversation
@@ -2239,15 +2234,19 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 return
             if state["talk"]:
                 screen.add(user_grid(text), gap_before=True)
-            else:
-                queue_or_add(text)
-            note("from the phone")
-            if state["talk"]:
+                note("from the phone")
                 state["typed"].put(text)
                 if state["cancel"]:
                     state["cancel"].set()
             else:
-                enqueue_turn(text, speak_remote=bool(frame.get("speak")), voice=bool(frame.get("voice")), talk=bool(frame.get("talk")))
+                shown = queue_or_add(text)
+                note("from the phone")
+                enqueue_turn(text, speak_remote=bool(frame.get("speak")), voice=bool(frame.get("voice")), talk=bool(frame.get("talk")), shown=shown)
+        elif kind == "unqueue":
+            # Removed (or taken back to edit) on the phone: out of the queue here too.
+            text = (frame.get("text") or "").strip()
+            if text:
+                take_queued(text)
         elif kind == "steer":
             text = (frame.get("text") or "").strip()
             if text:

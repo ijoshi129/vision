@@ -165,16 +165,63 @@ if __name__ == "__main__":
 
 
 class QueuedStripTests(unittest.TestCase):
-    def test_queued_messages_show_over_the_input_until_their_turn(self):
+    def _screen(self, *texts, can_steer=True):
+        from vision.turnqueue import QueuedTurn, TurnQueue
+
         screen = _chat_screen(self)
-        screen.queue("use cli.py instead\nand check the tests", can_send_now=True)
-        screen.queue("then commit it", can_send_now=True)
-        text = "".join(t for _, t in screen._queued_text())
+        screen.turns = TurnQueue()
+        screen.can_steer_fn = lambda: can_steer
+        for t in texts:
+            screen.turns.put(QueuedTurn(t, shown=True))
+        return screen
+
+    @staticmethod
+    def _strip(screen):
+        return "".join(t for _, t in screen._queued_text())
+
+    def test_queued_messages_show_over_the_input_until_their_turn(self):
+        screen = self._screen("use cli.py instead\nand check the tests", "then commit it")
+        text = self._strip(screen)
         self.assertIn("⏸ queued  use cli.py instead and check the tests", text)
         self.assertIn("⏸ queued  then commit it", text)
-        self.assertIn("Ctrl-X sends them into the reply now", text)
+        self.assertIn("Ctrl-X sends them into the reply now · ↑ to edit", text)
         self.assertEqual(len(screen.entries), 0)  # not in the transcript yet
-        self.assertTrue(screen.unqueue("then commit it"))
-        self.assertFalse(screen.unqueue("then commit it"))
-        screen.queue("later", can_send_now=False)  # a model that can't take one mid-reply
-        self.assertIn("goes when this reply ends", "".join(t for _, t in screen._queued_text()))
+        self.assertIn("goes when this reply ends", self._strip(self._screen("later", can_steer=False)))
+
+    def test_picking_holds_the_queue_and_removes_one(self):
+        screen = self._screen("one", "two", "three")
+        screen._queue_pick()
+        self.assertTrue(screen.turns.held)
+        self.assertIn("› queued  three", self._strip(screen))
+        screen._queue_move(-1)
+        screen._queue_remove()  # "two"
+        self.assertEqual(screen.queued, ["one", "three"])
+        self.assertTrue(screen.turns.held)
+        screen._queue_done()
+        self.assertFalse(screen.turns.held)
+
+    def test_an_edited_message_goes_back_in_its_place(self):
+        screen = self._screen("one", "two", "three")
+        screen._queue_pick()
+        screen._queue_move(-1)
+        screen._queue_edit()  # "two" into the box
+        self.assertEqual((screen.area.text, screen.queued), ("two", ["one", "three"]))
+        self.assertTrue(screen.turns.held)  # nothing goes while it is being edited
+        self.assertIn("✎ in the box below", self._strip(screen))
+        screen._submit("two, but with tests")
+        self.assertEqual(screen.queued, ["one", "two, but with tests", "three"])
+        self.assertFalse(screen.turns.held)
+        self.assertEqual(screen.area.text, "")
+
+    def test_esc_keeps_the_original_and_an_empty_box_removes_it(self):
+        screen = self._screen("one", "two")
+        screen._queue_pick()
+        screen._queue_edit()
+        screen.area.text = "changed my mind"
+        screen._queue_edit_finish(None)  # Esc
+        self.assertEqual(screen.queued, ["one", "two"])
+        screen._queue_pick()
+        screen._queue_edit()
+        screen._submit("")  # Enter on an emptied box
+        self.assertEqual(screen.queued, ["one"])
+        self.assertFalse(screen.turns.held)

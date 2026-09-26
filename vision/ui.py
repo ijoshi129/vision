@@ -70,6 +70,8 @@ PT_STYLE = Style.from_dict({
     "placeholder": "#6b7580 italic",
     "queued": "#c9d1d9",  # the strip of messages waiting behind a reply, over the input box
     "queued.hint": "#6b7580 italic",
+    "queued.sel": "ansicyan bold",
+    "queued.edit": "#6b7580",
     "status": "#8a939c",
     "status.key": "#c9d1d9 bold",
     # mode indicator, bottom left (Shift-Tab)
@@ -1727,8 +1729,10 @@ class ChatScreen:
         self._quit_armed = 0.0  # when an idle Ctrl-C on an empty box last happened; a second within QUIT_WINDOW quits
         # Messages sent while a reply runs, oldest first: shown in a dim strip over the input box until
         # their turn starts (or Ctrl-X sends them into the running one). See queue / unqueue.
-        self.queued: list[str] = []
-        self._queue_can_steer = False
+        self.turns = None  # vision.turnqueue.TurnQueue, set by the chat (cli.py)
+        self.can_steer_fn: Callable[[], bool] = lambda: False  # can Ctrl-X send into the running reply?
+        self._qsel: int | None = None  # the strip row ↑ picked (index among the shown messages)
+        self._qedit: dict | None = None  # the message pulled into the box to edit: {"item", "index"}
         self.on_submit: Callable[[str], None] = lambda text: None
         # Ctrl-X mid-reply: send the message into the running turn now rather than queue it behind
         # it ("" = send the queued ones now). Without a reply running it is a plain send.
@@ -1788,7 +1792,45 @@ class ChatScreen:
         def _send_now(event):
             self._submit(self.area.text, now=True)
 
-        @kb.add("escape", eager=True, filter=~overlay & ~menu_open)
+        # The queued strip: ↑ on an empty box picks a waiting message (the queue holds meanwhile).
+        picking = Condition(lambda: self._qsel is not None)
+        editing = Condition(lambda: self._qedit is not None)
+        can_pick = Condition(lambda: self._qsel is None and self._qedit is None and not self.area.text and bool(self.queued))
+
+        @kb.add("up", filter=~overlay & ~menu_open & can_pick)
+        def _pick_queued(event):
+            self._queue_pick()
+
+        @kb.add("up", filter=picking)
+        def _queued_up(event):
+            self._queue_move(-1)
+
+        @kb.add("down", filter=picking)
+        def _queued_down(event):
+            self._queue_move(1)
+
+        @kb.add("enter", filter=picking)
+        def _queued_edit(event):
+            self._queue_edit()
+
+        @kb.add("delete", filter=picking)
+        @kb.add("backspace", filter=picking)
+        def _queued_remove(event):
+            self._queue_remove()
+
+        @kb.add("c-x", filter=picking)
+        def _queued_now(event):
+            self._queue_send_now()
+
+        @kb.add("escape", eager=True, filter=picking)
+        def _queued_leave(event):
+            self._queue_done()
+
+        @kb.add("escape", eager=True, filter=editing & ~overlay & ~menu_open)
+        def _queued_keep(event):
+            self._queue_edit_finish(None)
+
+        @kb.add("escape", eager=True, filter=~overlay & ~menu_open & ~picking & ~editing)
         def _esc(event):
             if self.busy:
                 self._cancel()
@@ -2006,7 +2048,7 @@ class ChatScreen:
         )
         queued_win = ConditionalContainer(
             Window(FormattedTextControl(self._queued_text, focusable=False), height=lambda: len(self._queued_lines()) or 1),
-            filter=Condition(lambda: bool(self.queued)),
+            filter=Condition(lambda: bool(self.queued) or self._qedit is not None),
         )
         self.transcript = Window(
             _TranscriptControl(self.scroll_by, self._mouse, text=self._transcript_text, get_cursor_position=self._cursor, show_cursor=False, focusable=False),
@@ -2253,42 +2295,118 @@ class ChatScreen:
             self._menu_cache = (text, slash_menu_rows(self.commands, text))
         return self._menu_cache[1]
 
-    def queue(self, text: str, can_send_now: bool = False) -> None:
-        """A message waiting behind the running reply: it shows in the queued strip, not the transcript."""
-        with self._lock:
-            self.queued.append(text)
-            self._queue_can_steer = can_send_now
-        self.app.invalidate()
+    @property
+    def queued(self) -> list[str]:
+        """The messages waiting behind the running reply, oldest first (the strip's rows)."""
+        return [it.text for it in self.turns.shown()] if self.turns else []
 
-    def unqueue(self, text: str) -> bool:
-        """Its turn came (or it went into the running one): out of the strip. False if it wasn't there."""
-        with self._lock:
-            if text not in self.queued:
-                return False
-            self.queued.remove(text)
-        self.app.invalidate()
-        return True
-
-    QUEUED_ROWS = 4  # messages shown in the strip before the rest fold into `+ 2 more`
+    QUEUED_ROWS = 4  # strip rows shown at once; the rest fold into `+ 2 more` around the picked one
 
     def _queued_lines(self) -> list[tuple[str, str]]:
-        items = list(self.queued)
+        items = self.queued
+        rows: list[tuple[str, str]] = [("class:queued", t) for t in items]
+        if self._qedit is not None:
+            at = min(self._qedit["index"], len(rows))
+            rows.insert(at, ("class:queued.edit", "✎ in the box below"))
         width = max(20, self._width() - 16)
+        sel = self._qsel
+        first = 0 if sel is None else max(0, min(sel - self.QUEUED_ROWS + 1, len(rows) - self.QUEUED_ROWS))
         lines = []
-        for text in items[: self.QUEUED_ROWS]:
-            first = " ".join(text.split())
-            lines.append(("class:queued", f"  ⏸ queued  {first[:width - 1] + '…' if len(first) > width else first}"))
-        if len(items) > self.QUEUED_ROWS:
-            lines.append(("class:queued", f"            + {len(items) - self.QUEUED_ROWS} more"))
-        hint = "Ctrl-X sends them into the reply now" if len(items) > 1 else "Ctrl-X sends it into the reply now"
-        lines.append(("class:queued.hint", f"            {hint if self._queue_can_steer else 'goes when this reply ends'}"))
+        if first:
+            lines.append(("class:queued.hint", f"            + {first} more"))
+        for i, (style, text) in enumerate(rows[first:first + self.QUEUED_ROWS], start=first):
+            one = " ".join(text.split())
+            one = one[: width - 1] + "…" if len(one) > width else one
+            mark = "›" if i == sel else "⏸"
+            lines.append(("class:queued.sel" if i == sel else style, f"  {mark} queued  {one}"))
+        if len(rows) > first + self.QUEUED_ROWS:
+            lines.append(("class:queued.hint", f"            + {len(rows) - first - self.QUEUED_ROWS} more"))
+        if self._qedit is not None:
+            hint = "Enter puts it back · empty removes it · Esc keeps the original · queue held while you edit"
+        elif sel is not None:
+            hint = "↑↓ pick · Enter edit · Del remove" + (" · Ctrl-X send now" if self.can_steer_fn() else "") + " · Esc done · queue held"
+        else:
+            now = ("Ctrl-X sends them into the reply now" if len(items) > 1 else "Ctrl-X sends it into the reply now") if self.can_steer_fn() else "goes when this reply ends"
+            hint = f"{now} · ↑ to edit"
+        lines.append(("class:queued.hint", f"            {hint}"))
         return lines
 
     def _queued_text(self):
-        out = []
-        for i, (style, line) in enumerate(self._queued_lines()):
-            out.append((style, line + ("\n" if i < len(self._queued_lines()) - 1 else "")))
-        return FormattedText(out)
+        lines = self._queued_lines()
+        return FormattedText([(style, line + ("\n" if i < len(lines) - 1 else "")) for i, (style, line) in enumerate(lines)])
+
+    # -- picking and editing queued messages (the queue is held meanwhile, see vision.turnqueue)
+    def _queue_pick(self) -> None:
+        """↑ on an empty box: into the strip, on the newest message."""
+        if self.turns and self.queued:
+            self.turns.hold()
+            self._qsel = len(self.queued) - 1
+            self.app.invalidate()
+
+    def _queue_move(self, step: int) -> None:
+        n = len(self.queued)
+        if self._qsel is None or not n:
+            return self._queue_done()
+        sel = self._qsel + step
+        if sel >= n:
+            return self._queue_done()  # ↓ past the last one: back to the box
+        self._qsel = max(0, sel)
+        self.app.invalidate()
+
+    def _queue_done(self) -> None:
+        """Out of the strip: the queue carries on."""
+        self._qsel = None
+        if self._qedit is None and self.turns:
+            self.turns.release()
+        self.app.invalidate()
+
+    def _queue_selected(self):
+        shown = self.turns.shown() if self.turns else []
+        return shown[self._qsel] if self._qsel is not None and 0 <= self._qsel < len(shown) else None
+
+    def _queue_remove(self) -> None:
+        item = self._queue_selected()
+        if item is not None and self.turns.take(item.id) is not None:
+            self.notice("removed from the queue", 2)
+        if not self.queued:
+            return self._queue_done()
+        self._qsel = min(self._qsel or 0, len(self.queued) - 1)
+        self.app.invalidate()
+
+    def _queue_edit(self) -> None:
+        """Enter on a picked message: into the box to edit; the queue stays held until it goes back."""
+        item = self._queue_selected()
+        index = self._qsel or 0
+        if item is None or self.turns.take(item.id) is None:
+            self.notice("that one has already gone", 2)
+            return self._queue_done()
+        self._qedit = {"item": item, "index": index}
+        self._qsel = None
+        self.area.buffer.set_document(Document(item.text, len(item.text)), bypass_readonly=True)
+        self.app.invalidate()
+
+    def _queue_send_now(self) -> None:
+        item = self._queue_selected()
+        if item is None or self.turns.take(item.id) is None:
+            return self._queue_done()
+        self._queue_done()
+        self.on_steer(item.text)
+
+    def _queue_edit_finish(self, text: str | None) -> None:
+        """Enter (the new text; empty drops it) or Esc (None: the original) while editing a queued message."""
+        edit, self._qedit = self._qedit, None
+        if edit is None:
+            return
+        item = edit["item"]
+        if text is None or text.strip():
+            if text is not None:
+                item.text = text.strip()
+            self.turns.insert(edit["index"], item)
+        else:
+            self.notice("removed from the queue", 2)
+        self.area.buffer.reset()
+        self.turns.release()
+        self.app.invalidate()
 
     def _menu_text(self):
         rows = self._menu_rows()
@@ -2300,6 +2418,8 @@ class ChatScreen:
         return next((c for c in self.commands if c.name == name or name in c.aliases), None)
 
     def _on_text_changed(self, _buf) -> None:
+        if self._qsel is not None and self.area.text:
+            self._queue_done()  # typing: back to the box, the queue carries on
         if self._form:
             self._form.typing(self.area.text)
         self._menu_idx = 0
@@ -2318,6 +2438,15 @@ class ChatScreen:
         ``now`` (Ctrl-X) sends them into it.  ``busy`` is also used for operations which cannot
         accept a message (model switches, usage lookups and voice warm-up), so those retain the old guard.
         """
+        if self._qedit is not None and not text.lstrip().startswith("/"):
+            if now and text.strip():  # Ctrl-X on an edited message: into the running reply now
+                edit, self._qedit = self._qedit, None
+                self.area.buffer.reset()
+                self.turns.release()
+                self.on_steer(text.strip())
+                return
+            self._queue_edit_finish(text)  # Enter: back in its place (empty: removed)
+            return
         steer = now and self._revealing is not None and not text.lstrip().startswith("/")
         if steer and not text.strip():
             self.on_steer("")  # an empty box: the queued messages go in now

@@ -399,3 +399,17 @@ class LiveSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QueueEditTests(unittest.TestCase):
+    def test_a_queued_message_taken_back_never_runs(self):
+        from collections import deque
+
+        from vision.config import BrainConfig
+
+        hub = _hub(_StubBrain(BrainConfig()))
+        chat = next(iter(hub.chats.values()))
+        chat._pending = deque([("first", False, False, False), ("second", False, False, False)])
+        self.assertTrue(chat.unqueue("second"))
+        self.assertFalse(chat.unqueue("second"))
+        self.assertEqual([p[0] for p in chat._pending], ["first"])

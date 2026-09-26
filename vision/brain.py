@@ -686,7 +686,9 @@ class Brain:
             """The subagent a message belongs to (None for the main conversation). A child seen before
             its task_started, e.g. after a resume, still gets a run so its steps are not lost."""
             pid = ev.get("parent_tool_use_id")
-            if not pid:
+            if not pid or pid in tools or pid in child_tools:
+                # A Bash call that runs a while streams its progress under its own id: not a subagent.
+                # Given a row, it never got a task_notification and held the turn open until cancelled.
                 return None
             run = agents.get(pid)
             if run is None:
