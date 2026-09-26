@@ -209,6 +209,23 @@ def bash() -> str | None:
     return None
 
 
+def check_hf_symlinks(repo_id: str) -> None:
+    """Windows: run huggingface_hub's symlink test for a model's cache folder before downloading it.
+    The library records "supported" before it tries, so its parallel download threads can race the
+    test, try a real symlink, and fail with WinError 1314 when Developer Mode is off. Run once, first,
+    the test settles on copies. Does nothing on other platforms or for a local path."""
+    if not WINDOWS or not repo_id or os.path.isdir(repo_id):
+        return
+    try:
+        from huggingface_hub import constants
+        from huggingface_hub.file_download import are_symlinks_supported, repo_folder_name
+
+        constants.HF_HUB_DISABLE_SYMLINKS_WARNING = True  # copies instead of links is the expected outcome here
+        are_symlinks_supported(os.path.join(constants.HF_HUB_CACHE, repo_folder_name(repo_id=repo_id, repo_type="model")))
+    except Exception:  # noqa: BLE001 - an older or newer huggingface_hub: download as before
+        pass
+
+
 def is_batch_file(path: str) -> bool:
     """A .cmd/.bat launcher (what `npm i -g` installs on Windows). Popen runs those through cmd.exe,
     which re-parses the whole command line: a multi-line argument ends it at the first newline, and

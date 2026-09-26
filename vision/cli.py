@@ -3127,6 +3127,9 @@ def _install_llama() -> None:
 def _fetch_hf(repo: str) -> None:
     from huggingface_hub import snapshot_download
 
+    from vision.compat import check_hf_symlinks
+
+    check_hf_symlinks(repo)
     with console.status(f"[dim]downloading {repo} (about 4.5 GB)…[/dim]"):
         snapshot_download(repo)
 

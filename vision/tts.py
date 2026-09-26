@@ -863,6 +863,9 @@ def design_voice(description: str, text: str, language: str = "English", device:
             claim.acquire()
         except GpuBusy as e:
             raise TTSError(f"voice is {e}") from None
+    from vision.compat import check_hf_symlinks
+
+    check_hf_symlinks(QWEN_TTS_DESIGN)
     with _quiet():
         model = Qwen3TTSModel.from_pretrained(
             QWEN_TTS_DESIGN,
