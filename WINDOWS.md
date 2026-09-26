@@ -85,8 +85,8 @@ Ported, but not tested on real installs:
 - **The Orpheus voice engine (`setup --orpheus`).**
   - It uses the Windows CUDA 13.4 build of llama.cpp.
   - A job object stops `llama-server` when Vision exits, in place of the `sh` watchdog used on Linux.
-- **`vision serve`, the phone app and `vision --join`.** The server, the terminal link and joining a phone
-  chat are covered by the test suite on Windows, but untested with the iPhone app.
+- **`vision serve`, the phone app and `vision --join`.** Pairing and chatting from the iPhone app were tested
+  against a Windows machine. The terminal link and joining a phone chat are covered by the test suite.
   - **Link transport.** CPython has no Unix sockets on Windows, so a terminal chat listens on a `127.0.0.1` port with a random
     secret instead. The secret is kept in `%USERPROFILE%\.local\state\vision\live`. A connection that
     doesn't present it gets nothing.
