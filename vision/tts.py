@@ -48,7 +48,7 @@ def model_files() -> tuple[Path, Path]:
 
 
 def llama_server_bin() -> Path:
-    return LLAMA_DIR / "llama-server"
+    return LLAMA_DIR / ("llama-server.exe" if sys.platform == "win32" else "llama-server")
 
 
 def orpheus_present() -> bool:
@@ -267,10 +267,21 @@ class OrpheusEngine:
                 "-m", str(gguf), "-ngl", str(ngl), "-c", "4096", "-np", "1", "-fa", "on",
                 "--host", "127.0.0.1", "--port", str(self.cfg.port), "--no-webui", "-lv", "4",  # 4 logs the GPU offload
             ]
-            with open(log, "w", encoding="utf-8") as f:
-                self._proc = subprocess.Popen(
-                    cmd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True
-                )
+            if sys.platform == "win32":
+                # No sh there: run the server directly, and a job object stands in for the watchdog.
+                from vision import compat
+
+                with open(log, "w", encoding="utf-8") as f:
+                    self._proc = subprocess.Popen(cmd[5:], stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+                try:
+                    compat.end_with_this_process(self._proc)
+                except OSError:
+                    pass  # it still stops with close(); only a crash of Vision would leave it running
+            else:
+                with open(log, "w", encoding="utf-8") as f:
+                    self._proc = subprocess.Popen(
+                        cmd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True
+                    )
             deadline = time.time() + _LOAD_TIMEOUT_S
             while time.time() < deadline and self._proc.poll() is None:
                 if self._server_alive():
@@ -291,7 +302,12 @@ class OrpheusEngine:
             return "?"
 
     def _kill_server(self):
-        if self._proc is not None and self._proc.poll() is None:
+        if self._proc is not None and self._proc.poll() is None and sys.platform == "win32":
+            from vision import compat
+
+            compat.terminate(self._proc)
+            self._proc.wait(5)
+        elif self._proc is not None and self._proc.poll() is None:
             os.killpg(self._proc.pid, signal.SIGTERM)  # the watchdog and the server share a group
             try:
                 self._proc.wait(5)

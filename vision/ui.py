@@ -1671,7 +1671,14 @@ def _private_output():
     from prompt_toolkit.output import create_output
 
     try:
-        tty = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding=sys.stdout.encoding or "utf-8", errors="replace")
+        if sys.platform == "win32":
+            # A dup'd fd would be written byte-wise in the console's code page (mojibake); CONOUT$ is a
+            # console stream of its own, Unicode like sys.stdout and untouched by fd 1's redirection.
+            if not sys.stdout.isatty():
+                return None
+            tty = open("CONOUT$", "w", encoding="utf-8", errors="replace")
+        else:
+            tty = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding=sys.stdout.encoding or "utf-8", errors="replace")
         return _close_links(create_output(stdout=tty))
     except (OSError, ValueError, AttributeError):
         return None  # not a real terminal (tests, pipes): prompt_toolkit's default output

@@ -40,6 +40,58 @@ def kill(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
+_jobs: list[int] = []  # job handles, deliberately never closed: Windows closes them when Vision exits
+
+
+def end_with_this_process(proc: subprocess.Popen) -> None:
+    """Windows: put proc in a job object that kills it when this process exits, crash included (the
+    job's last handle closes with us). The POSIX callers get the same from a watchdog shell instead."""
+    import ctypes
+    from ctypes import wintypes
+
+    class BASIC(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD)]
+
+    class EXTENDED(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", BASIC), ("IoInfo", ctypes.c_uint64 * 6),
+                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+    kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    JobObjectExtendedLimitInformation, KILL_ON_JOB_CLOSE = 9, 0x2000
+    PROCESS_TERMINATE, PROCESS_SET_QUOTA = 0x0001, 0x0100
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+    info = EXTENDED()
+    info.BasicLimitInformation.LimitFlags = KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)):
+        kernel32.CloseHandle(job)
+        raise ctypes.WinError(ctypes.get_last_error())
+    handle = kernel32.OpenProcess(PROCESS_TERMINATE | PROCESS_SET_QUOTA, False, proc.pid)
+    if not handle:
+        kernel32.CloseHandle(job)
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not kernel32.AssignProcessToJobObject(job, handle):
+            kernel32.CloseHandle(job)
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel32.CloseHandle(handle)
+    _jobs.append(job)
+
+
 def pid_alive(pid: int) -> bool:
     """Whether a process with this id exists. os.kill(pid, 0) is the POSIX probe; on Windows signal 0
     is CTRL_C_EVENT, so it would interrupt the process instead of asking about it."""

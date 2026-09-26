@@ -80,6 +80,11 @@ LLAMA_URLS = [
     f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-ubuntu-cuda-13.3-x64.tar.gz",
     f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/cudart-llama-{LLAMA_BUILD}-bin-ubuntu-cuda-13.3-x64.tar.gz",
 ]
+if sys.platform == "win32":  # the same build for Windows x64 (zips; the cudart one carries no build number)
+    LLAMA_URLS = [
+        f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-win-cuda-13.4-x64.zip",
+        f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/cudart-llama-bin-win-cuda-13.4-x64.zip",
+    ]
 
 DEFAULT_CONFIG = '''# Vision configuration. Edit freely; run `vision config` to see the resolved values.
 
@@ -838,10 +843,28 @@ def resolve_device(spec: str | int | None, kind: str) -> AudioDevice:
         if needle in description.lower() or needle in name.lower():
             alsa = next((i for i, d in enumerate(devices) if d["name"] == "pipewire" and d[key] > 0), None)
             return AudioDevice(alsa, name)
-    for i, d in enumerate(devices):
+    order = _windows_devices(sd, key) if sys.platform == "win32" else enumerate(devices)
+    for i, d in order:
         if d[key] > 0 and needle in d["name"].lower() and "JACK" not in sd.query_hostapis(d["hostapi"])["name"]:
             return AudioDevice(i)
     raise SystemExit(f"No {kind} device matching {spec!r}. Run `vision doctor` to list devices.")
+
+
+# Windows lists every device once per host API. DirectSound and MME convert to whatever rate Vision
+# asks for (16 kHz in, 24 kHz out); WASAPI shared mode only runs at the mixer's rate, and WDM-KS
+# opens the hardware exclusively. DirectSound first: MME truncates names to 31 characters.
+_WINDOWS_HOST_APIS = ("Windows DirectSound", "MME")
+
+
+def _windows_devices(sd, key: str) -> list[tuple[int, dict]]:
+    """(index, device) for the usable Windows host APIs, in _WINDOWS_HOST_APIS order."""
+    rank = {name: n for n, name in enumerate(_WINDOWS_HOST_APIS)}
+    found = []
+    for i, d in enumerate(sd.query_devices()):
+        api = sd.query_hostapis(d["hostapi"])["name"]
+        if d[key] > 0 and api in rank:
+            found.append((rank[api], i, d))
+    return [(i, d) for _, i, d in sorted(found, key=lambda r: (r[0], r[1]))]
 
 
 def input_device_choices() -> list[tuple[str, str, str]]:
@@ -853,6 +876,11 @@ def input_device_choices() -> list[tuple[str, str, str]]:
         return rows + [(name, desc, name) for name, desc in nodes]
     import sounddevice as sd
 
+    if sys.platform == "win32":
+        rows[0] = ("", "system default", "follows your Windows default microphone")
+        first = _WINDOWS_HOST_APIS[0]
+        devices = [(i, d) for i, d in _windows_devices(sd, "max_input_channels") if sd.query_hostapis(d["hostapi"])["name"] == first]
+        return rows + [(str(i), d["name"], f"#{i} · {d['max_input_channels']} in") for i, d in devices]
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0 and "JACK" not in sd.query_hostapis(d["hostapi"])["name"]:
             rows.append((str(i), d["name"], f"#{i} · {d['max_input_channels']} in"))

@@ -3109,6 +3109,14 @@ def _install_llama() -> None:
         for url in LLAMA_URLS:
             archive = Path(tmp) / url.rsplit("/", 1)[1]
             _download(url, archive)
+            if archive.suffix == ".zip":  # the Windows builds
+                import zipfile
+
+                with zipfile.ZipFile(archive) as z:
+                    for info in z.infolist():
+                        if not info.is_dir():
+                            (LLAMA_DIR / Path(info.filename).name).write_bytes(z.read(info))
+                continue
             with tarfile.open(archive) as tar:
                 for member in tar.getmembers():
                     if member.isfile():
