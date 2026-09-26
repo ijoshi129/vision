@@ -7,3 +7,8 @@ models/
 
 # The iPhone app is kept out of the public repo.
 ios/
+
+# Local design mocks and benchmark logs, kept out of the public repo.
+design/
+docs/voice-latency*
+build/

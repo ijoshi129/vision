@@ -84,7 +84,10 @@ _SOUND_TAG = re.compile(r"\s*<(?:chuckle|laugh|sigh|gasp|groan|yawn|cough|sniffl
 # A dash used as a spoken pause ("word - word", "word -- word", "word—word"): the voice reads straight
 # through dashes, so it becomes the comma the voice does honour. Hyphens inside words are left alone.
 _DASH = re.compile(r"\s*—+\s*|\s+[–-]{1,2}\s+")
-_PHOENIX_STYLE = re.compile(r"^(phoenix)-(conversational|expressive|reassuring|london)$", re.I)
+# A styled voice is a set of cloned references named <name>-conversational, <name>-expressive and
+# <name>-reassuring (plus any extra ones, such as <name>-london, that can be the configured default);
+# each reply is spoken in whichever style suits its text.
+_STYLED_VOICE = re.compile(r"^(.+)-(conversational|expressive|reassuring|london)$", re.I)
 _REASSURING = re.compile(
     r"\b(?:all good|don't worry|no worries|no stress|not to worry|nothing to worry about|i(?:'m| am) here|"
     r"i(?:'ve| have) got you|we(?:'ve| have) got this|take your time|you(?:'re| are) okay|you(?:'re| are) fine|"
@@ -95,7 +98,7 @@ _REASSURING = re.compile(
 _EXCLAIM = re.compile(r"!+(?:\s|$|['\")\]])")
 
 
-STYLE_LOG = STATE_DIR / "voice.log"  # one line per reply: when, which Phoenix style, the text it was judged on
+STYLE_LOG = STATE_DIR / "voice.log"  # one line per reply: when, which style, the text it was judged on
 
 
 def _log_style_choice(voice: str, preview: str) -> None:
@@ -110,8 +113,8 @@ def _log_style_choice(voice: str, preview: str) -> None:
 
 
 def select_reply_voice(default: str, text: str, available: list[str]) -> str:
-    """Pick a Phoenix reference for a reply from as much of its text as is known; other voices are untouched."""
-    match = _PHOENIX_STYLE.fullmatch(default.strip())
+    """Pick a styled voice's reference for a reply from as much of its text as is known; other voices are untouched."""
+    match = _STYLED_VOICE.fullmatch(default.strip())
     if match is None:
         return default
     choices = {voice.lower(): voice for voice in available}
@@ -999,9 +1002,9 @@ class Speaker:
     FILLER_DIR = STATE_DIR / "fillers"
 
     def _filler_voice(self) -> str:
-        """The voice the fillers are in. A Phoenix voice changes style per chunk, so the engine may be
-        left on `phoenix-expressive` by the last reply; the fillers stay in the configured style."""
-        return self.cfg.voice.strip() if _PHOENIX_STYLE.fullmatch(self.cfg.voice.strip()) else self.voice
+        """The voice the fillers are in. A styled voice changes style per chunk, so the engine may be
+        left on `<name>-expressive` by the last reply; the fillers stay in the configured style."""
+        return self.cfg.voice.strip() if _STYLED_VOICE.fullmatch(self.cfg.voice.strip()) else self.voice
 
     def _filler_key(self, phrase: str) -> str:
         parts = (self.cfg.engine, self._filler_voice(), self.cfg.language, self.cfg.clone_mode, f"{self._voice_rate():.3f}", phrase)
@@ -1213,7 +1216,7 @@ class StreamingSpeaker:
     MAX_CHUNK_CHARS = 320  # ~20 s of speech; keeps stop responsive and the continuation context short
     CPS = 14.0  # starting guess at source chars per second of speech, refined per chunk
     BLEND_S = 2.0  # seconds over which the reveal eases onto a chunk's exact timing once it is known
-    # A Phoenix voice picks its style (conversational / expressive / reassuring) per chunk, judged from
+    # A styled voice picks its style (conversational / expressive / reassuring) per chunk, judged from
     # the whole chunk's text, so a reply can open flat, get excited and settle again. A chunk in a new
     # style starts cold from that style's reference clip (continuity would otherwise carry the old
     # delivery straight through it); chunks that keep the style continue the reply as before. Sentences
@@ -1380,7 +1383,7 @@ class StreamingSpeaker:
         return audio[int(loud[0]) - keep :] if loud.size and loud[0] > keep else audio
 
     def _style_of(self, text: str) -> str:
-        """The voice this text would be spoken in: a Phoenix style for a Phoenix voice, else the voice as set."""
+        """The voice this text would be spoken in: a style for a styled voice, else the voice as set."""
         if self._voices is None:
             self._voices = self.speaker.available_voices()
         return select_reply_voice(self.speaker.cfg.voice, text, self._voices)
@@ -1428,7 +1431,7 @@ class StreamingSpeaker:
                 self._audio_q.put((None, raw, True))  # nothing to say: just let the text show
                 continue
             cold = style != self.speaker.voice  # a new style: start from its reference, not the reply so far
-            if _PHOENIX_STYLE.fullmatch(self.speaker.cfg.voice.strip()):
+            if _STYLED_VOICE.fullmatch(self.speaker.cfg.voice.strip()):
                 _log_style_choice(style, text)
             if cold:
                 self.speaker.set_voice(style)

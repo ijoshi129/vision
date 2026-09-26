@@ -231,14 +231,14 @@ _cached = _grok_models_from_cache()
 GROK_MODELS = _cached or list(_GROK_FALLBACK)
 LIVE |= {"grok"} if _cached else set()
 
-# Self-hosted models on the llama-server in `[local]` (deploy/mini). Talked to directly over HTTP:
+# Self-hosted models on the llama-server in `[local]` (deploy/local-model). Talked to directly over HTTP:
 # no CLI, nothing leaves the LAN and no subscription is used. Vision runs the model's tool calls itself
 # (Bash, Read, Write, Edit, WebSearch, WebFetch; see vision/localtools.py). The two effort levels are
-# the model's thinking switch: off answers straight away, high reasons first (20-40 s on the M4).
+# the model's thinking switch: off answers straight away, high reasons first (20-40 s on a base M4 Mac mini).
 # llama-server has no per-request budget (`reasoning_budget` in the body is ignored, verified b11064),
 # so there is nothing in between; low/medium arriving from another model land on off.
 _LOCAL_FALLBACK = [
-    ModelInfo("local", "qwen3.6", "Qwen 3.6 35B-A3B", "on the Mac mini; free; shell, files and web search", (THINKING_OFF, "high"), None, THINKING_OFF),
+    ModelInfo("local", "qwen3.6", "Qwen 3.6 35B-A3B", "self-hosted; free; shell, files and web search", (THINKING_OFF, "high"), None, THINKING_OFF),
 ]
 LOCAL_MODELS = list(_LOCAL_FALLBACK)
 MODELS: list[ModelInfo] = CLAUDE_MODELS + CODEX_MODELS + GROK_MODELS + LOCAL_MODELS
@@ -249,7 +249,7 @@ MODEL_TABS = [
     ("Claude", [(m.alias, m.label, m.description) for m in CLAUDE_MODELS], "via Claude Code · Claude Subscription"),
     ("Codex", [(m.alias, m.label, m.description) for m in CODEX_MODELS], "via Codex CLI · ChatGPT Subscription"),
     ("Grok", [(m.alias, m.label, m.description) for m in GROK_MODELS], "via Grok CLI · Grok Subscription"),
-    ("Local", [(m.alias, m.label, m.description) for m in LOCAL_MODELS], "via llama-server on the Mac mini · free"),
+    ("Local", [(m.alias, m.label, m.description) for m in LOCAL_MODELS], "via your llama-server · free"),
 ]
 MODEL_CHOICES = [(m.alias, m.label, f"{PROVIDER_LABELS.get(m.provider, m.provider)} · {m.description}") for m in MODELS]
 
@@ -301,7 +301,7 @@ def set_local_models(ids) -> bool:
     """The models llama-server serves (its /v1/models ids). A known one keeps its label and levels; a new
     one gets the same thinking switch (llama-server's enable_thinking; a model without it just ignores it)."""
     known = {m.alias: m for m in _LOCAL_FALLBACK + LOCAL_MODELS}
-    new = [known.get(i) or ModelInfo("local", i, i, "on the Mac mini; free; shell, files and web search", (THINKING_OFF, "high"), None, THINKING_OFF)
+    new = [known.get(i) or ModelInfo("local", i, i, "self-hosted; free; shell, files and web search", (THINKING_OFF, "high"), None, THINKING_OFF)
            for i in dict.fromkeys(str(i) for i in ids if i)]
     if not new:
         return False

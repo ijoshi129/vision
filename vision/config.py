@@ -19,6 +19,8 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / 
 DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "vision"
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "vision"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
+# Vision's voice and example exchanges; replaces the built-in personality when it has any text.
+PERSONALITY_PATH = CONFIG_DIR / "personality.md"
 MODELS_DIR = DATA_DIR / "models"
 WORKSPACE_DIR = DATA_DIR / "workspace"
 
@@ -33,7 +35,7 @@ QWEN_TTS_BASE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 QWEN_TTS_DESIGN = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 # Built-in voice designs: `vision voice design <name>` uses these when no description is given.
 _DESIGN_LINE = (
-    "Good afternoon, boss. All systems are online and running within normal parameters. "
+    "Good afternoon. All systems are online and running within normal parameters. "
     "I've taken the liberty of reviewing today's schedule; nothing that can't be handled with a little finesse."
 )
 VOICE_DESIGNS = {
@@ -91,8 +93,9 @@ allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "
 denied_tools = ["Bash(sudo:*)", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(mkfs:*)", "Bash(dd:*)", "Bash(shutdown:*)", "Bash(reboot:*)", "Bash(claude:*)", "Bash(codex:*)", "Bash(grok:*)"]
 # Directory Vision works in. Empty = the directory you launch `vision` from.
 workdir = ""
-# How you'd like Vision to address you (e.g. "boss", your first name). Empty = nothing special.
-address_user_as = "boss"
+# How you'd like Vision to address you now and then (e.g. your first name). Empty = nothing special.
+# Its personality lives in ~/.config/vision/personality.md (see the README); delete that file for the default.
+address_user_as = ""
 # Starting mode. "auto": every tool runs without approval (denied_tools still apply; Codex gets
 # danger-full-access). "plan": read-only — Vision investigates and proposes a plan, and carries it out
 # once you approve it (Claude) or switch to auto. Shift-Tab or /mode switches during a chat.
@@ -119,7 +122,7 @@ sandbox = "auto"
 extra_args = []
 
 [local]
-# llama-server hosting the Local models (see deploy/mini): spoken to directly, no CLI, nothing
+# llama-server hosting the Local models (see deploy/local-model): spoken to directly, no CLI, nothing
 # leaves the tailnet. Vision runs its tool calls itself (Bash, Read, Write, Edit, WebSearch, WebFetch, as
 # listed in [brain].allowed_tools). Point it at the machine running llama-server; a Tailscale name works away from home.
 base_url = "http://localhost:8080/v1"
@@ -361,7 +364,7 @@ class GrokConfig:
 
 @dataclass
 class LocalConfig:
-    """The llama-server that hosts the Local models (deploy/mini)."""
+    """The llama-server that hosts the Local models (deploy/local-model)."""
 
     base_url: str = "http://localhost:8080/v1"
     timeout_s: float = 180
@@ -382,7 +385,7 @@ class BrainConfig:
         default_factory=lambda: ["Bash(sudo:*)", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(mkfs:*)", "Bash(dd:*)", "Bash(shutdown:*)", "Bash(reboot:*)", "Bash(claude:*)", "Bash(codex:*)", "Bash(grok:*)"]
     )
     workdir: str = ""
-    address_user_as: str = "boss"
+    address_user_as: str = ""
     # "auto" (every tool pre-approved, Codex on danger-full-access; denied_tools still applies) or
     # "plan" (read-only until the plan is approved). Shift-Tab or /mode switches for the session.
     mode: str = "auto"

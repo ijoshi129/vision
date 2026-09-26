@@ -1,9 +1,32 @@
 [project]
 name = "vision"
 version = "0.1.0"
-description = "Vision: a local voice + text AI assistant driven by Claude Code, OpenAI Codex, or Grok"
+description = "A terminal voice + text AI assistant driven by your Claude Code, OpenAI Codex or Grok subscription"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["assistant", "voice", "tts", "speech-to-text", "claude-code", "codex", "grok", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+# The core install is the text chat: it runs anywhere Python and one of the brain CLIs do.
 dependencies = [
+  "typer>=0.12",
+  "rich>=13",
+  "prompt_toolkit>=3.0",
+]
+
+[project.optional-dependencies]
+# Speech in and out: Qwen3-TTS, faster-whisper, the mic and VAD. Built for Linux with an NVIDIA GPU;
+# everything falls back to the CPU, but speech is then several times slower than real time.
+voice = [
   "onnxruntime-gpu==1.22.0",  # CUDA 12 build; shares the nvidia-*-cu12 libs with CTranslate2. Works on CPU too.
   "faster-whisper>=1.1",
   "nvidia-cublas-cu12",
@@ -15,24 +38,29 @@ dependencies = [
   "sounddevice>=0.5",
   "soundfile>=0.12",
   "numpy",
-  "typer>=0.12",
-  "rich>=13",
-  "prompt_toolkit>=3.0",
   "webrtcvad-wheels",
-  # `vision serve` (the iOS remote): HTTP + WebSocket server and the pairing QR code
+  "qwen-tts>=0.1.1",
+]
+# `vision serve`: HTTP + WebSocket API for remote clients and the pairing QR code
+serve = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
   "python-multipart>=0.0.9",
   "qrcode>=7",
-  "qwen-tts>=0.1.1",
-  "cryptography>=42",  # ES256 signing of Apple WeatherKit tokens (vision/weather.py)
 ]
+# `vision weather`: ES256 signing of Apple WeatherKit tokens (needs an Apple Developer account)
+weather = ["cryptography>=42"]
+all = ["vision[voice,serve,weather]"]
+
+[project.urls]
+Homepage = "https://github.com/domdevz/vision"
+Issues = "https://github.com/domdevz/vision/issues"
 
 [project.scripts]
-vision = "vision.cli:main"
+vision = "vision.__main__:run"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.uv]

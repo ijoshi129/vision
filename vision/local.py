@@ -1,4 +1,4 @@
-"""Local brain: a model served by llama-server on the LAN (deploy/mini), spoken to directly over HTTP.
+"""Local brain: a model served by llama-server on the LAN (deploy/local-model), spoken to directly over HTTP.
 
 No CLI, nothing leaves the network and no subscription is spent. Two drivers share the transport:
 LocalBrain is the typed brain (`/model qwen3.6`) and the voice conversation's task worker,
@@ -73,7 +73,7 @@ class _Stream:
             detail = e.read().decode(errors="replace")[:400]
             raise LocalError(f"llama-server returned {e.code}: {detail}") from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise LocalError(f"llama-server at {base_url} is unreachable ({getattr(e, 'reason', e)}). Is the Mac mini on?") from e
+            raise LocalError(f"llama-server at {base_url} is unreachable ({getattr(e, 'reason', e)}). Is the server running?") from e
 
     def __iter__(self):
         for raw in self.resp:
@@ -456,7 +456,7 @@ class LocalBrain:
         model = str((props.get("model_alias") or props.get("model_path") or "?")).rsplit("/", 1)[-1]
         ctx = props.get("default_generation_settings", {}).get("n_ctx") or self.context_window()
         t = usage_ui.usage_table("Local", model)
-        usage_ui.add_window(t, "Mac mini", 0.0, "never: your own hardware, no limits")
+        usage_ui.add_window(t, "Self-hosted", 0.0, "never: your own hardware, no limits")
         parts = [t, Text(f"{base} · context {ctx:,} tokens", style="dim")]
         timings = (self.last_usage or {}).get("timings") or {}
         if timings.get("predicted_per_second"):
@@ -505,7 +505,7 @@ class LocalConversation:
         model = self.cfg.conversation.model
         return (conversation_prompt(self.cfg.brain.address_user_as, web=False,  # no web tools on the local server
                                     front_end=getattr(self.cfg, "router", None) is not None and self.cfg.router.mode == "on")
-                + f"\nYou are {model_label(model) or model}, an open model running on the user's own Mac mini; "
+                + f"\nYou are {model_label(model) or model}, an open model running on the user's own hardware; "
                 "the models listed above are the workers you can delegate to, not what you are. If asked what "
                 "model or brain is answering, say so; the worker's model only handles delegated tasks.")
 
