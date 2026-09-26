@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from vision.config import DATA_DIR, STATE_DIR, WORKSPACE_DIR, BrainConfig, weather_ready
-from vision import cachettl, clis, models
+from vision import cachettl, clis, compat, models
 from vision.persona import system_prompt
 from vision.reply import READING, THINKING, dedupe_status, retry_label
 
@@ -113,6 +113,14 @@ echo "blocked by Vision: '$(basename "$0")' cannot be run from inside a Vision t
 exit 1
 """
 
+# The same for Windows, where cmd and PowerShell (and Claude Code's PowerShell tool) only run files
+# with a PATHEXT extension; Git Bash still finds the #!/bin/sh ones above.
+_SHIM_CMD = """@echo off
+rem Installed by Vision: see the #!/bin/sh shim next to this file.
+echo blocked by Vision: '%~n0' cannot be run from inside a Vision turn (it would spend a subscription behind the user's back). Ask the user to switch with /model instead. 1>&2
+exit /b 1
+"""
+
 _SHIM_NAMES = ("claude", "codex", "grok")
 _PROVIDER_HOME = {
     "claude": "CLAUDE_CONFIG_DIR",
@@ -129,8 +137,12 @@ def _shim_dir() -> str:
         for name in _SHIM_NAMES:
             f = d / name
             if not f.exists() or f.read_text(encoding="utf-8") != _SHIM:
-                f.write_text(_SHIM, encoding="utf-8")
+                f.write_text(_SHIM, encoding="utf-8", newline="\n")  # LF even on Windows: "#!/bin/sh\r" is no shebang
             f.chmod(0o755)
+            if compat.WINDOWS:
+                f = d / f"{name}.cmd"
+                if not f.exists() or f.read_text(encoding="utf-8") != _SHIM_CMD:
+                    f.write_text(_SHIM_CMD, encoding="utf-8", newline="\r\n")
     except OSError:
         return ""
     return str(d)
@@ -165,11 +177,20 @@ def brain_env(provider: str) -> dict[str, str]:
 
 def find_claude() -> str:
     exe = shutil.which("claude")
+    if not exe:
+        for cand in (os.path.expanduser("~/.local/bin/claude"), "/usr/local/bin/claude", "/usr/bin/claude"):
+            if compat.WINDOWS:
+                cand += ".exe"
+            if os.path.exists(cand):
+                exe = cand
+                break
+    if exe and compat.is_batch_file(exe):
+        raise BrainError(
+            f"Found Claude Code as {exe}, a .cmd launcher, which cannot pass Vision's multi-line prompts safely. "
+            "Install the native claude.exe instead: irm https://claude.ai/install.ps1 | iex"
+        )
     if exe:
         return exe
-    for cand in (os.path.expanduser("~/.local/bin/claude"), "/usr/local/bin/claude", "/usr/bin/claude"):
-        if os.path.exists(cand):
-            return cand
     raise BrainError("Claude Code CLI ('claude') not found on PATH. Install it and run `claude` once to log in.")
 
 
@@ -789,7 +810,7 @@ class Brain:
                 if not paused[0] and time.monotonic() - activity[0] > limit and proc.poll() is None:
                     stalled[0] = True
                     try:
-                        proc.terminate()
+                        compat.terminate(proc)
                     except OSError:
                         pass
                     return
@@ -1085,7 +1106,8 @@ class Brain:
             choice = ((on_question([question]) if on_question else None) or {}).get(question["question"], "")
             if choice == "Yes":
                 self._plan_approved = turn.plan_approved = True
-                self.cfg.mode = "auto"  # the turns after this one run without approval too
+                if getattr(self.cfg, "plan_approval", "session") != "turn":
+                    self.cfg.mode = "auto"  # the turns after this one run without approval too
                 result = {"behavior": "allow", "updatedInput": tool_input}
             elif choice and choice != "No":
                 result = {"behavior": "deny", "message": f"The user did not approve the plan and said: {choice}\nStay in plan mode and revise the plan accordingly."}
@@ -1195,7 +1217,7 @@ class Brain:
             self._cancelled = proc is not None
         if proc and proc.poll() is None:
             try:
-                proc.terminate()
+                compat.terminate(proc)
                 proc.wait(timeout=3)
             except Exception:
                 proc.kill()

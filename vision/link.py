@@ -22,9 +22,12 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from vision import compat
 from vision.config import STATE_DIR
 
 LIVE_DIR = STATE_DIR / "live"
+# Unix sockets: CPython has no AF_UNIX on Windows, so there a chat is simply not linked to `vision serve`.
+SUPPORTED = hasattr(socket, "AF_UNIX")
 
 
 def descriptor_path(pid: int) -> Path:
@@ -36,13 +39,7 @@ def socket_path(pid: int) -> Path:
 
 
 def pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return compat.pid_alive(pid)
 
 
 def list_links() -> list[dict]:
