@@ -2269,11 +2269,8 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
 
     def start_link():
         try:
-            from vision.link import SUPPORTED, LinkHost
+            from vision.link import LinkHost
 
-            if not SUPPORTED:
-                state["link"] = None
-                return
             state["link"] = LinkHost(link_summary, link_frame, log=lambda m: screen.add(notice_grid(m, "warn")))
             state["link"].start()
         except Exception as e:  # noqa: BLE001  (a read-only state dir: the phone just does not see this chat)
@@ -3042,7 +3039,7 @@ def voice_rm(name: str = typer.Argument(..., help="A saved voice to delete.")):
 # ---------------------------------------------------------------- remote (iOS app)
 @app.command()
 def serve(
-    host: Optional[str] = typer.Option(None, "--host", help="Bind address (config: remote.host, default 127.0.0.1)."),
+    host: Optional[str] = typer.Option(None, "--host", help="Bind address (config: remote.host, default 0.0.0.0: the LAN, for the phone)."),
     port: Optional[int] = typer.Option(None, "--port", "-p", help="Port (config: remote.port, default 8765)."),
     public_url: Optional[str] = typer.Option(None, "--public-url", help="The https:// address the phone uses (your tunnel)."),
     new_token: bool = typer.Option(False, "--new-token", help="Rotate the pairing token (old phones must re-pair)."),
