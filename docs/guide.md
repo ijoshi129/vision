@@ -367,7 +367,8 @@ Cloudflare Tunnel) carries it, and every request needs the bearer token in `~/.c
 the app scans to pair. The API lives in `vision/server.py` if you want to write your own client.
 
 A `vision` chat open in a terminal on the same machine shows up in the app's chat list too (terminal
-icon): the terminal announces itself on a Unix socket under `~/.local/state/vision/live/`, `vision serve`
+icon): the terminal announces itself on a Unix socket under `~/.local/state/vision/live/` (on Windows,
+which has no Unix sockets, a 127.0.0.1 port plus a secret the connection must present), `vision serve`
 picks it up, and what is typed on the phone runs in that terminal while its replies stream to both.
 It leaves the list when the terminal quits, and closing it on the phone quits that terminal (`vision/link.py`).
 
