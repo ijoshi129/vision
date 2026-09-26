@@ -803,8 +803,8 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
 
     state.update({"turn_queue": queue.Queue(), "turn_lock": threading.Lock(), "turn_active": False, "turn_thread": None})
     # The running turn's driver and its `steered(text)` (splits the reply where a Ctrl-X message went
-    # in), and the transcript rows of messages typed meanwhile that still wait in the queue.
-    state.update({"driver": None, "steered": None, "queued_rows": []})
+    # in). Messages sent meanwhile wait in the queued strip above the input box (screen.queued).
+    state.update({"driver": None, "steered": None})
     # `vision serve` finds this chat through its socket (link.py) and shows it on the phone as a
     # terminal chat: messages from there run here, and every turn here streams there.
     state["link"] = None
@@ -1152,7 +1152,8 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                     state["turn_active"] = False
                     state["turn_thread"] = None
                     return
-                state["queued_rows"] = [(t, row) for t, row in state["queued_rows"] if t != text]
+                if screen.unqueue(text):
+                    screen.add(user_grid(text), gap_before=True)  # its turn now: into the transcript, above its reply
             run_turn(text, speak_remote=speak_remote, follow=follow, voice_remote=voice, talk_remote=talk)
         with state["turn_lock"]:
             state["turn_active"] = False
@@ -2120,17 +2121,22 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             note(f"[red]unknown command /{cmd}[/red]")
 
     def send(text: str):
-        row = screen.add(user_grid(text), gap_before=True)
         if state["talk"]:
+            screen.add(user_grid(text), gap_before=True)
             state["typed"].put(text)
             if state["cancel"]:
                 state["cancel"].set()
             return
-        if state["turn_active"]:
-            state["queued_rows"].append((text, row))
-            if getattr(state["driver"], "steer", None):
-                screen.notice("queued · Ctrl-X sends it in now", 4)
+        queue_or_add(text)
         enqueue_turn(text)
+
+    def queue_or_add(text: str):
+        """A message behind a running reply waits in the queued strip over the input box (it joins the
+        transcript when its turn starts); otherwise it is in the transcript straight away."""
+        if state["turn_active"]:
+            screen.queue(text, can_send_now=joined() or bool(getattr(state["driver"], "steer", None)))
+        else:
+            screen.add(user_grid(text), gap_before=True)
 
     def take_queued(only: str | None = None) -> list[str]:
         """Queued typed messages out of the turn queue (all, or the one reading `only`), their rows
@@ -2149,11 +2155,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 pending.put(item)
         texts = [item[0] for item in taken]
         for t in texts:
-            for i, (qt, row) in enumerate(state["queued_rows"]):
-                if qt == t:
-                    screen.remove_entry(row)
-                    del state["queued_rows"][i]
-                    break
+            screen.unqueue(t)
         return texts
 
     def steer_now(text: str, from_phone: bool = False):
@@ -2163,9 +2165,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         (sent earlier, now pushed) or not (sent with `now`); either way it must get through."""
         running = screen.busy and state["turn_active"]
         if not running:
-            if text and (not from_phone or not any(t == text for t, _ in state["queued_rows"])):
+            if text and (not from_phone or text not in screen.queued):
                 if from_phone:
-                    screen.add(user_grid(text), gap_before=True)
+                    queue_or_add(text)
                     enqueue_turn(text)
                 else:
                     send(text)
@@ -2188,8 +2190,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                     split(t)
             else:
                 note("this model can't take a message mid-reply, so it's queued")
-                row = screen.add(user_grid(t), gap_before=True)
-                state["queued_rows"].append((t, row))
+                queue_or_add(t)
                 enqueue_turn(t)
 
     def submit(text: str):
@@ -2236,10 +2237,11 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             text = (frame.get("text") or "").strip()
             if not text:
                 return
-            row = screen.add(user_grid(text), gap_before=True)
+            if state["talk"]:
+                screen.add(user_grid(text), gap_before=True)
+            else:
+                queue_or_add(text)
             note("from the phone")
-            if state["turn_active"] and not state["talk"]:
-                state["queued_rows"].append((text, row))
             if state["talk"]:
                 state["typed"].put(text)
                 if state["cancel"]:

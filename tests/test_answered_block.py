@@ -162,3 +162,19 @@ class ConversationHistoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QueuedStripTests(unittest.TestCase):
+    def test_queued_messages_show_over_the_input_until_their_turn(self):
+        screen = _chat_screen(self)
+        screen.queue("use cli.py instead\nand check the tests", can_send_now=True)
+        screen.queue("then commit it", can_send_now=True)
+        text = "".join(t for _, t in screen._queued_text())
+        self.assertIn("⏸ queued  use cli.py instead and check the tests", text)
+        self.assertIn("⏸ queued  then commit it", text)
+        self.assertIn("Ctrl-X sends them into the reply now", text)
+        self.assertEqual(len(screen.entries), 0)  # not in the transcript yet
+        self.assertTrue(screen.unqueue("then commit it"))
+        self.assertFalse(screen.unqueue("then commit it"))
+        screen.queue("later", can_send_now=False)  # a model that can't take one mid-reply
+        self.assertIn("goes when this reply ends", "".join(t for _, t in screen._queued_text()))

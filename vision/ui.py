@@ -68,6 +68,8 @@ PT_STYLE = Style.from_dict({
     "frame.label": "ansicyan",
     "frame.corner": "ansicyan",  # the model name in the input box's bottom-right border
     "placeholder": "#6b7580 italic",
+    "queued": "#c9d1d9",  # the strip of messages waiting behind a reply, over the input box
+    "queued.hint": "#6b7580 italic",
     "status": "#8a939c",
     "status.key": "#c9d1d9 bold",
     # mode indicator, bottom left (Shift-Tab)
@@ -1723,6 +1725,10 @@ class ChatScreen:
         self._sel_timer: threading.Timer | None = None
         self._notice: tuple[str, float] = ("", 0.0)  # a short status-row message and when it expires
         self._quit_armed = 0.0  # when an idle Ctrl-C on an empty box last happened; a second within QUIT_WINDOW quits
+        # Messages sent while a reply runs, oldest first: shown in a dim strip over the input box until
+        # their turn starts (or Ctrl-X sends them into the running one). See queue / unqueue.
+        self.queued: list[str] = []
+        self._queue_can_steer = False
         self.on_submit: Callable[[str], None] = lambda text: None
         # Ctrl-X mid-reply: send the message into the running turn now rather than queue it behind
         # it ("" = send the queued ones now). Without a reply running it is a plain send.
@@ -1998,6 +2004,10 @@ class ChatScreen:
             Window(FormattedTextControl(self._menu_text, focusable=False), height=lambda: min(MENU_ROWS, len(self._menu_rows())) or 1),
             filter=menu_open,
         )
+        queued_win = ConditionalContainer(
+            Window(FormattedTextControl(self._queued_text, focusable=False), height=lambda: len(self._queued_lines()) or 1),
+            filter=Condition(lambda: bool(self.queued)),
+        )
         self.transcript = Window(
             _TranscriptControl(self.scroll_by, self._mouse, text=self._transcript_text, get_cursor_position=self._cursor, show_cursor=False, focusable=False),
             wrap_lines=False, always_hide_cursor=True,  # rich already wrapped at the width; one line = one row keeps the scroll maths exact
@@ -2037,7 +2047,7 @@ class ChatScreen:
             composer = VSplit([buddy_gutter, frame])
             self.area.buffer.on_text_changed += lambda _buf: self.buddy.touch()
         bottom = HSplit([composer, status_win])  # the status row runs the full width, under Pip too
-        body = HSplit([self.transcript, picker_win, form_win, menu_win, bottom])
+        body = HSplit([self.transcript, picker_win, form_win, menu_win, queued_win, bottom])
         self.app = _snappy(Application(
             layout=Layout(body, focused_element=self.area),
             # Mouse on: the wheel scrolls the transcript and a click on a tool row expands its
@@ -2242,6 +2252,43 @@ class ChatScreen:
         if self._menu_cache[0] != text:
             self._menu_cache = (text, slash_menu_rows(self.commands, text))
         return self._menu_cache[1]
+
+    def queue(self, text: str, can_send_now: bool = False) -> None:
+        """A message waiting behind the running reply: it shows in the queued strip, not the transcript."""
+        with self._lock:
+            self.queued.append(text)
+            self._queue_can_steer = can_send_now
+        self.app.invalidate()
+
+    def unqueue(self, text: str) -> bool:
+        """Its turn came (or it went into the running one): out of the strip. False if it wasn't there."""
+        with self._lock:
+            if text not in self.queued:
+                return False
+            self.queued.remove(text)
+        self.app.invalidate()
+        return True
+
+    QUEUED_ROWS = 4  # messages shown in the strip before the rest fold into `+ 2 more`
+
+    def _queued_lines(self) -> list[tuple[str, str]]:
+        items = list(self.queued)
+        width = max(20, self._width() - 16)
+        lines = []
+        for text in items[: self.QUEUED_ROWS]:
+            first = " ".join(text.split())
+            lines.append(("class:queued", f"  ⏸ queued  {first[:width - 1] + '…' if len(first) > width else first}"))
+        if len(items) > self.QUEUED_ROWS:
+            lines.append(("class:queued", f"            + {len(items) - self.QUEUED_ROWS} more"))
+        hint = "Ctrl-X sends them into the reply now" if len(items) > 1 else "Ctrl-X sends it into the reply now"
+        lines.append(("class:queued.hint", f"            {hint if self._queue_can_steer else 'goes when this reply ends'}"))
+        return lines
+
+    def _queued_text(self):
+        out = []
+        for i, (style, line) in enumerate(self._queued_lines()):
+            out.append((style, line + ("\n" if i < len(self._queued_lines()) - 1 else "")))
+        return FormattedText(out)
 
     def _menu_text(self):
         rows = self._menu_rows()
