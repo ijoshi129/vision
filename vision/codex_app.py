@@ -24,6 +24,7 @@ import tomllib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from vision import compat
 from vision.reply import READING, THINKING, ReplyText, dedupe_status, retry_label
 
 if TYPE_CHECKING:
@@ -189,7 +190,7 @@ class AppServerTurn:
     def kill(self) -> None:
         if self.proc.poll() is None:
             try:
-                self.proc.terminate()
+                compat.terminate(self.proc)
                 self.proc.wait(timeout=2)
             except Exception:  # noqa: BLE001
                 try:

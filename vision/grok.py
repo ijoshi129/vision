@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 
 from rich.text import Text
 
+from vision import compat
 from vision import usage as usage_ui
 from vision.brain import context_read
 from vision.config import STATE_DIR, BrainConfig, weather_ready
@@ -82,6 +83,8 @@ class GrokError(RuntimeError):
 
 def find_grok() -> str:
     exe = shutil.which("grok")
+    if exe and compat.is_batch_file(exe):
+        raise GrokError(f"Found Grok as {exe}, a .cmd launcher, which cannot pass Vision's multi-line instructions safely. Install the native grok.exe.")
     if exe:
         return exe
     home = os.path.expanduser(os.environ.get("GROK_HOME", "~/.grok"))
@@ -364,6 +367,15 @@ class GrokBrain:
 
         env = brain_env("grok")
         turn = Turn(session_id=self.session_id, model=_cli_model(self.cfg.model) or None)
+        sandbox = sandbox_for(self.cfg)
+        if compat.WINDOWS and sandbox != "off":
+            # Grok always runs with --always-approve and leaves every limit to its kernel sandbox, which
+            # is Linux/macOS machinery. Refuse rather than run "read-only" with nothing enforcing it.
+            turn.is_error = True
+            turn.error = (f"Grok's {sandbox} sandbox is not available on Windows, so Vision will not run Grok "
+                          + ("in plan mode. Switch to auto (Shift-Tab) or use Claude for planning."
+                             if self.cfg.mode == "plan" else "with it. Set [grok] sandbox = \"off\" to run Grok unrestricted."))
+            return turn
         prompt = inject_handoff(self, prompt)
         reply = ReplyText(on_text)
         on_status = dedupe_status(on_status)
@@ -388,6 +400,7 @@ class GrokBrain:
                 pass
             raise
 
+        self._killed = False
         with self._lock:
             self._proc = subprocess.Popen(
                 self._command(prompt_path),
@@ -470,7 +483,7 @@ class GrokBrain:
                 try:
                     proc.wait(timeout=0.5)
                 except subprocess.TimeoutExpired:
-                    proc.terminate()
+                    compat.terminate(proc)
                     try:
                         proc.wait(timeout=2)
                     except subprocess.TimeoutExpired:
@@ -498,7 +511,7 @@ class GrokBrain:
         err_blob = f"{turn.error} {diagnostic_text}".lower()
         if not completed and proc.returncode not in (0, None):
             turn.is_error = True
-            if proc.returncode in (-15, -9, 130, 143) or proc.returncode < 0:
+            if proc.returncode in (-15, -9, 130, 143) or proc.returncode < 0 or (compat.WINDOWS and self._killed):
                 turn.error = "cancelled"
             else:
                 err_lines = [ln for ln in diagnostics if ln]
@@ -581,8 +594,9 @@ class GrokBrain:
         with self._lock:
             proc = self._proc
         if proc and proc.poll() is None:
+            self._killed = True
             try:
-                proc.terminate()
+                compat.terminate(proc)
                 proc.wait(timeout=3)
             except Exception:
                 proc.kill()

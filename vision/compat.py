@@ -184,6 +184,31 @@ def copy_text_windows(text: str) -> bool:
         user32.CloseClipboard()
 
 
+def bash() -> str | None:
+    """The bash that runs a local model's shell commands: plain `bash` on POSIX. On Windows, Git for
+    Windows' bash.exe (the one Claude Code uses too), never System32\\bash.exe, which is the WSL
+    launcher and would run the command in a Linux VM without Vision's PATH shims. None if not found."""
+    import shutil
+
+    if not WINDOWS:
+        return "bash"
+    configured = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+    if configured and os.path.isfile(configured):
+        return configured
+    git = shutil.which("git")
+    if git:
+        root = os.path.dirname(os.path.dirname(os.path.realpath(git)))  # <Git>\cmd\git.exe → <Git>
+        for rel in (("bin", "bash.exe"), ("usr", "bin", "bash.exe")):
+            cand = os.path.join(root, *rel)
+            if os.path.isfile(cand):
+                return cand
+    for base in (os.environ.get("ProgramFiles"), os.environ.get("LOCALAPPDATA") and os.path.join(os.environ["LOCALAPPDATA"], "Programs")):
+        cand = base and os.path.join(base, "Git", "bin", "bash.exe")
+        if cand and os.path.isfile(cand):
+            return cand
+    return None
+
+
 def is_batch_file(path: str) -> bool:
     """A .cmd/.bat launcher (what `npm i -g` installs on Windows). Popen runs those through cmd.exe,
     which re-parses the whole command line: a multi-line argument ends it at the first newline, and

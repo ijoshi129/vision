@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 
 from rich.text import Text
 
-from vision import localtools
+from vision import compat, localtools
 from vision import usage as usage_ui
 from vision.config import STATE_DIR, BrainConfig, weather_ready
 from vision.persona import system_prompt
@@ -471,7 +471,7 @@ class LocalBrain:
             proc = self._holder.get("proc")
         if proc is not None:
             try:
-                proc.kill()
+                compat.kill(proc)
             except OSError:
                 pass
         if stream is not None:
