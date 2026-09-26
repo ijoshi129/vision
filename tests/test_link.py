@@ -41,6 +41,7 @@ class _Terminal:
         self.busy = False
 
 
+@unittest.skipUnless(link.SUPPORTED, "the terminal link needs Unix sockets")
 class LinkTests(unittest.TestCase):
     def _hub(self):
         from vision.config import Config
