@@ -5,7 +5,7 @@ import queue
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from vision.brain import Turn
 from vision.cli import _next_input, _talk_turns, _turn_brain
@@ -93,98 +93,116 @@ class TerminalRoutingTests(unittest.TestCase):
 
 
 class RemoteRoutingTests(unittest.IsolatedAsyncioTestCase):
+    """The phone's side: each chat on the hub routes its own turns, like the terminal's talk loop."""
+
     def setUp(self):
         self.cfg = Config()
         self.brain = make_brain(self.cfg)
         self.hub = Hub(self.cfg, self.brain, "token", log=lambda _: None)
         self.events = []
         self.hub.post = self.events.append
+        (self.chat,) = self.hub.chats.values()
         self.voice = Mock()
         def answer(text, **callbacks):
             callbacks["on_text"]("Spoken reply")
             return Turn(text="Spoken reply", model="sonnet")
         self.voice.ask.side_effect = answer
-        self.hub.conversation = self.voice
+        self.chat.conversation = self.voice
+        # A fresh chat has no saved session to seed its transcript from.
+        history = patch("vision.sessions.session_history", return_value=[])
+        history.start()
+        self.addCleanup(history.stop)
+
+    def socket(self):
+        ws = Mock()
+        ws.send_json = AsyncMock()
+        return ws
 
     async def test_playback_does_not_send_typed_input_to_conversation(self):
         wire = Mock()
         with patch.object(self.hub, "speaker", return_value=Mock()), patch("vision.server.WireSpeaker", return_value=wire):
-            await self.hub.run_turn("typed", speak=True, voice=False)
+            await self.chat.run_turn("typed", speak=True, voice=False)
         self.brain.ask.assert_called_once()
         self.voice.ask.assert_not_called()
         wire.feed.assert_called_once_with("Typed reply")
         self.assertFalse(self.brain.voice_mode)
 
     async def test_voice_routes_to_conversation_even_without_playback(self):
-        await self.hub.run_turn("spoken", speak=False, voice=True)
+        await self.chat.run_turn("spoken", speak=False, voice=True)
         self.voice.ask.assert_called_once()
         self.brain.ask.assert_not_called()
-        self.assertEqual(self.hub.history(), [{"role": "user", "text": "spoken"}, {"role": "assistant", "text": "Spoken reply"}])
-        self.assertIsNotNone(self.hub.hello()["history_id"])
-        self.assertFalse(self.hub.busy)
+        self.assertEqual(self.chat.history(), [{"role": "user", "text": "spoken"}, {"role": "assistant", "text": "Spoken reply"}])
+        self.assertIsNotNone(self.hub.hello()["chats"][0]["history_id"])
+        self.assertFalse(self.chat.busy)
 
     async def test_voice_then_text_preserves_mixed_history_on_reconnect(self):
-        await self.hub.run_turn("spoken", speak=False, voice=True)
-        await self.hub.run_turn("typed", speak=False, voice=False)
-        self.assertEqual([row["text"] for row in self.hub.history()], ["spoken", "Spoken reply", "typed", "Typed reply"])
+        await self.chat.run_turn("spoken", speak=False, voice=True)
+        await self.chat.run_turn("typed", speak=False, voice=False)
+        self.assertEqual([row["text"] for row in self.chat.history()], ["spoken", "Spoken reply", "typed", "Typed reply"])
         self.assertIs(self.voice.agent, self.brain)
 
-    async def test_new_and_resume_clear_voice_state_and_transcript(self):
+    async def test_new_and_resume_open_their_own_chats_and_leave_this_one_alone(self):
         from vision.sessions import SessionInfo
 
-        socket = Mock()
+        ws = self.socket()
         old = SessionInfo(id="old-typed", provider=self.brain.provider, title="earlier", last_active=0.0)
-        with patch("vision.sessions.find_any_session", return_value=old), \
+        with patch("vision.brain.create_brain", side_effect=lambda *a, **k: make_brain(self.cfg)), \
+             patch("vision.sessions.find_any_session", return_value=old), \
              patch("vision.cli._apply_session", return_value="resumed old-typed"):
-            for frame in ({"type": "new"}, {"type": "resume", "session_id": "old-typed"}):
-                old_history = self.hub.history_id
-                await self.hub.handle(socket, frame)
-                self.assertNotEqual(self.hub.history_id, old_history)
-        self.assertEqual(self.voice.new_session.call_count, 2)
+            await self.hub.handle(ws, {"type": "new"})
+            await self.hub.handle(ws, {"type": "resume", "session_id": "old-typed"})
+        opened = [c.args[0] for c in ws.send_json.call_args_list]
+        self.assertEqual([frame.get("opened") for frame in opened], [True, True])
+        self.assertEqual(len(self.hub.chats), 3)
+        ids = {frame["chat"] for frame in opened} | {self.chat.id}
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(len({c.history_id for c in self.hub.chats.values()}), 3)
+        self.assertEqual(self.hub.chats[opened[1]["chat"]].title, "earlier")
+        self.voice.new_session.assert_not_called()
 
     async def test_resume_of_an_unknown_id_changes_nothing(self):
-        socket = Mock()
-        old_history = self.hub.history_id
+        ws = self.socket()
+        history_id = self.chat.history_id
         with patch("vision.sessions.find_any_session", return_value=None):
-            await self.hub.handle(socket, {"type": "resume", "session_id": "nope"})
-        self.assertEqual(self.hub.history_id, old_history)
+            await self.hub.handle(ws, {"type": "resume", "session_id": "nope"})
+        self.assertEqual(list(self.hub.chats), [self.chat.id])
+        self.assertEqual(self.chat.history_id, history_id)
         self.voice.new_session.assert_not_called()
-        self.assertIn("no conversation starts with", self.events[-1]["text"])
+        self.assertIn("no conversation starts with", ws.send_json.call_args.args[0]["text"])
 
     async def test_cancel_reaches_both_models_and_audio(self):
-        self.hub._wire = Mock()
+        wire = self.chat._wire = Mock()
         self.hub.cancel()
         self.voice.cancel.assert_called_once()
         self.brain.cancel.assert_called_once()
-        self.hub._wire.stop.assert_called_once()
+        wire.stop.assert_called_once()
 
     async def test_messages_received_during_a_turn_run_in_order(self):
         started = asyncio.Event()
         release = asyncio.Event()
         calls = []
 
-        async def run_one(text, speak, voice):
+        async def run_one(text, speak, voice, talk=False):
             calls.append(text)
             if text == "first":
                 started.set()
                 await release.wait()
-            self.events.append({"type": "done", "text": f"reply to {text}", "busy": bool(self.hub._pending)})
+            self.events.append({"type": "done", "text": f"reply to {text}", "busy": bool(self.chat._pending)})
 
-        self.hub._run_one_turn = run_one
-        socket = Mock()
-        socket.send_json = Mock()
-        await self.hub.handle(socket, {"type": "message", "text": "first"})
+        self.chat._run_one_turn = run_one
+        ws = self.socket()
+        await self.hub.handle(ws, {"type": "message", "text": "first", "chat": self.chat.id})
         await asyncio.wait_for(started.wait(), 1)
 
-        await self.hub.handle(socket, {"type": "message", "text": "second"})
+        await self.hub.handle(ws, {"type": "message", "text": "second", "chat": self.chat.id})
         self.assertEqual(calls, ["first"])
-        self.assertEqual(len(self.hub._pending), 1)
-        task = self.hub._turn_task
+        self.assertEqual(len(self.chat._pending), 1)
+        task = self.chat._turn_task
         self.assertIsNotNone(task)
         release.set()
         await asyncio.wait_for(task, 3)
 
-        self.assertFalse(self.hub.busy)
+        self.assertFalse(self.chat.busy)
         self.assertEqual(calls, ["first", "second"])
         done = [event for event in self.events if event["type"] == "done"]
         self.assertEqual([event["busy"] for event in done], [True, False])
