@@ -48,7 +48,7 @@ def model_files() -> tuple[Path, Path]:
 
 
 def llama_server_bin() -> Path:
-    return LLAMA_DIR / "llama-server"
+    return LLAMA_DIR / ("llama-server.exe" if sys.platform == "win32" else "llama-server")
 
 
 def orpheus_present() -> bool:
@@ -106,7 +106,7 @@ def _log_style_choice(voice: str, preview: str) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         snippet = " ".join(preview.split())[:120]
-        with STYLE_LOG.open("a") as f:
+        with STYLE_LOG.open("a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%H:%M:%S')} {voice:<22} {snippet!r}\n")
     except OSError:
         pass
@@ -267,10 +267,21 @@ class OrpheusEngine:
                 "-m", str(gguf), "-ngl", str(ngl), "-c", "4096", "-np", "1", "-fa", "on",
                 "--host", "127.0.0.1", "--port", str(self.cfg.port), "--no-webui", "-lv", "4",  # 4 logs the GPU offload
             ]
-            with open(log, "w") as f:
-                self._proc = subprocess.Popen(
-                    cmd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True
-                )
+            if sys.platform == "win32":
+                # No sh there: run the server directly, and a job object stands in for the watchdog.
+                from vision import compat
+
+                with open(log, "w", encoding="utf-8") as f:
+                    self._proc = subprocess.Popen(cmd[5:], stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+                try:
+                    compat.end_with_this_process(self._proc)
+                except OSError:
+                    pass  # it still stops with close(); only a crash of Vision would leave it running
+            else:
+                with open(log, "w", encoding="utf-8") as f:
+                    self._proc = subprocess.Popen(
+                        cmd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True
+                    )
             deadline = time.time() + _LOAD_TIMEOUT_S
             while time.time() < deadline and self._proc.poll() is None:
                 if self._server_alive():
@@ -285,13 +296,18 @@ class OrpheusEngine:
     @staticmethod
     def _device_from_log(log: Path) -> str:
         try:
-            m = re.search(r"offloaded (\d+)/\d+ layers to GPU", log.read_text(errors="replace"))
+            m = re.search(r"offloaded (\d+)/\d+ layers to GPU", log.read_text(errors="replace", encoding="utf-8"))
             return "cuda" if m and int(m.group(1)) > 0 else "cpu"
         except OSError:
             return "?"
 
     def _kill_server(self):
-        if self._proc is not None and self._proc.poll() is None:
+        if self._proc is not None and self._proc.poll() is None and sys.platform == "win32":
+            from vision import compat
+
+            compat.terminate(self._proc)
+            self._proc.wait(5)
+        elif self._proc is not None and self._proc.poll() is None:
             os.killpg(self._proc.pid, signal.SIGTERM)  # the watchdog and the server share a group
             try:
                 self._proc.wait(5)
@@ -690,11 +706,11 @@ class Qwen3Engine:
         d = voice_dir(spec)
         if (d / "ref.wav").is_file():
             txt = d / "ref.txt"
-            return spec, d / "ref.wav", (txt.read_text().strip() or None) if txt.is_file() else None
+            return spec, d / "ref.wav", (txt.read_text(encoding="utf-8").strip() or None) if txt.is_file() else None
         p = Path(spec).expanduser()
         if p.is_file():
             txt = p.with_suffix(".txt")
-            return p.stem, p, (txt.read_text().strip() or None) if txt.is_file() else None
+            return p.stem, p, (txt.read_text(encoding="utf-8").strip() or None) if txt.is_file() else None
         have = ", ".join(saved_voices()) or "none yet"
         raise TTSError(f"No voice {spec!r} (have: {have}). Make one: `vision voice design {spec}` or `vision voice add {spec} --from clip.wav`.")
 
@@ -709,7 +725,7 @@ class Qwen3Engine:
         clone_mode = self.cfg.clone_mode
         mode_file = wav.parent / "clone_mode.txt"
         if mode_file.is_file():
-            saved_mode = mode_file.read_text().strip().lower()
+            saved_mode = mode_file.read_text(encoding="utf-8").strip().lower()
             if saved_mode in ("embedding", "context"):
                 clone_mode = saved_mode
         embedding_only = text is None or clone_mode != "context"
@@ -847,6 +863,9 @@ def design_voice(description: str, text: str, language: str = "English", device:
             claim.acquire()
         except GpuBusy as e:
             raise TTSError(f"voice is {e}") from None
+    from vision.compat import check_hf_symlinks
+
+    check_hf_symlinks(QWEN_TTS_DESIGN)
     with _quiet():
         model = Qwen3TTSModel.from_pretrained(
             QWEN_TTS_DESIGN,
@@ -953,7 +972,7 @@ class Speaker:
             rate_file = voice_dir(self.engine.voice) / "rate.txt"
             if rate_file.is_file():
                 try:
-                    saved_rate = float(rate_file.read_text().strip())
+                    saved_rate = float(rate_file.read_text(encoding="utf-8").strip())
                     if 0.5 <= saved_rate <= 2.0:
                         rate = saved_rate
                 except ValueError:

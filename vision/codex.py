@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from rich.text import Text
 
+from vision import compat
 from vision import usage as usage_ui
 from vision.config import STATE_DIR, BrainConfig, weather_ready
 from vision.persona import system_prompt
@@ -51,12 +52,26 @@ class CodexError(RuntimeError):
 
 def find_codex() -> str:
     exe = shutil.which("codex")
+    if exe and compat.is_batch_file(exe):
+        return _native_codex(exe)
     if exe:
         return exe
     for cand in (os.path.expanduser("~/.local/bin/codex"), "/usr/local/bin/codex", "/usr/bin/codex"):
         if os.path.exists(cand):
             return cand
     raise CodexError("Codex CLI ('codex') not found on PATH. Install it (npm i -g @openai/codex) and run `codex login` once.")
+
+
+def _native_codex(launcher: str) -> str:
+    """The codex.exe behind npm's codex.cmd. Vision passes its instructions as a multi-line argument,
+    which cmd.exe (and so any .cmd) cannot carry intact; npm's bin/codex.js does no more than find this
+    binary in the platform package and mark the install as npm-managed, so Vision does the same."""
+    root = os.path.join(os.path.dirname(launcher), "node_modules", "@openai")
+    found = sorted(glob.glob(os.path.join(root, "**", "vendor", "*-pc-windows-msvc", "bin", "codex.exe"), recursive=True))
+    if not found:
+        raise CodexError(f"Found Codex as {launcher}, but not the codex.exe it launches. Reinstall: npm i -g @openai/codex")
+    os.environ.setdefault("CODEX_MANAGED_BY_NPM", "1")  # what codex.js sets: `codex update` then goes through npm
+    return found[0]
 
 
 def toml_str(s: str) -> str:
@@ -97,6 +112,7 @@ def app_server_call(exe: str, method: str, params: dict, timeout: float = APP_SE
         proc = subprocess.Popen(
             [exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1, env=dict(os.environ),
+            encoding="utf-8",
         )
     except OSError:
         return None
@@ -107,15 +123,34 @@ def app_server_call(exe: str, method: str, params: dict, timeout: float = APP_SE
         proc.stdin.write(json.dumps(obj) + "\n")
         proc.stdin.flush()
 
+    lines = None
+    if compat.WINDOWS:  # select() takes only sockets there: read on a thread instead
+        import queue
+
+        lines = queue.Queue()
+
+        def pump() -> None:
+            for text in iter(proc.stdout.readline, ""):
+                lines.put(text)
+            lines.put("")
+
+        threading.Thread(target=pump, daemon=True).start()
+
+    def next_line(left: float) -> str:
+        if lines is not None:
+            try:
+                return lines.get(timeout=left)
+            except queue.Empty:
+                return ""
+        ready, _, _ = select.select([proc.stdout], [], [], left)
+        return proc.stdout.readline() if ready else ""
+
     def wait_for(msg_id: int) -> dict | None:
         while True:
             left = deadline - time.monotonic()
             if left <= 0:
                 return None
-            ready, _, _ = select.select([proc.stdout], [], [], left)
-            if not ready:
-                return None
-            line = proc.stdout.readline()
+            line = next_line(left)
             if not line:
                 return None
             try:
@@ -217,7 +252,7 @@ class CodexBrain:
     @staticmethod
     def _read_last() -> dict:
         try:
-            return json.loads(LAST_SESSION_FILE.read_text())
+            return json.loads(LAST_SESSION_FILE.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
 
@@ -234,7 +269,7 @@ class CodexBrain:
             return
         if self.session_id:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            LAST_SESSION_FILE.write_text(json.dumps({"id": self.session_id, "model": self.cfg.model, "at": time.time()}))
+            LAST_SESSION_FILE.write_text(json.dumps({"id": self.session_id, "model": self.cfg.model, "at": time.time()}), encoding="utf-8")
 
     def new_session(self) -> None:
         self.session_id = None
@@ -348,6 +383,7 @@ class CodexBrain:
 
         subs = AgentTracker(turn, on_agent, model=self.cfg.model or "", effort=self.cfg.effort or "")
 
+        self._killed = False
         with self._lock:
             self._proc = subprocess.Popen(
                 self._command(),
@@ -358,6 +394,7 @@ class CodexBrain:
                 env=env,
                 text=True,
                 bufsize=1,
+                encoding="utf-8",
             )
         proc = self._proc
         diagnostics: list[str] = []
@@ -434,7 +471,7 @@ class CodexBrain:
                 try:
                     proc.wait(timeout=0.5)
                 except subprocess.TimeoutExpired:
-                    proc.terminate()
+                    compat.terminate(proc)
                     try:
                         proc.wait(timeout=2)
                     except subprocess.TimeoutExpired:
@@ -463,12 +500,12 @@ class CodexBrain:
         diagnostic_text = "\n".join(diagnostics)
         if not completed and proc.returncode not in (0, None):
             turn.is_error = True
-            if proc.returncode < 0:
+            if proc.returncode < 0 or (compat.WINDOWS and self._killed):  # TerminateProcess leaves exit code 1
                 turn.error = "cancelled"
             else:
                 err_lines = [ln for ln in diagnostics if ln and "stdin" not in ln.lower()]
                 turn.error = turn.error or last_error or (err_lines[-1] if err_lines else f"codex exited with code {proc.returncode}")
-            if proc.returncode < 0:
+            if proc.returncode < 0 or (compat.WINDOWS and self._killed):  # TerminateProcess leaves exit code 1
                 turn.usage = turn.usage or self._cancelled_usage(turn, turn_id, fresh_thread=not requested)
             if "no rollout found" in (turn.error + diagnostic_text).lower() or "thread/resume" in diagnostic_text.lower():
                 self.session_id = None  # stale thread id: next turn starts clean
@@ -497,7 +534,7 @@ class CodexBrain:
             return
         read = window = 0
         try:
-            with open(max(paths, key=os.path.getmtime)) as f:
+            with open(max(paths, key=os.path.getmtime), encoding="utf-8") as f:
                 for line in f:
                     try:
                         ev = json.loads(line)
@@ -528,7 +565,7 @@ class CodexBrain:
             return None
         found = None
         try:
-            with open(max(paths, key=os.path.getmtime)) as f:
+            with open(max(paths, key=os.path.getmtime), encoding="utf-8") as f:
                 for line in f:
                     try:
                         ev = json.loads(line)
@@ -579,14 +616,14 @@ class CodexBrain:
         turn.usage = last  # this turn only; the cumulative thread snapshot lives in last_usage
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            USAGE_FILE.write_text(json.dumps(self.last_usage))
+            USAGE_FILE.write_text(json.dumps(self.last_usage), encoding="utf-8")
         except OSError:
             pass
 
     @staticmethod
     def cached_usage() -> dict | None:
         try:
-            return json.loads(USAGE_FILE.read_text())
+            return json.loads(USAGE_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -610,7 +647,7 @@ class CodexBrain:
             return None
         found, stamp = None, None
         try:
-            with open(max(paths, key=os.path.getmtime)) as f:
+            with open(max(paths, key=os.path.getmtime), encoding="utf-8") as f:
                 for line in f:
                     if '"token_count"' not in line:
                         continue
@@ -686,8 +723,9 @@ class CodexBrain:
             rpc.interrupt()  # the turn ends as `interrupted`; the process is killed if it lingers
             return
         if proc and proc.poll() is None:
+            self._killed = True
             try:
-                proc.terminate()
+                compat.terminate(proc)
                 proc.wait(timeout=3)
             except Exception:
                 proc.kill()

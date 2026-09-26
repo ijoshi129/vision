@@ -87,7 +87,7 @@ class Schedule:
 
     def _load(self) -> list[dict]:
         try:
-            data = json.loads(self.path.read_text())
+            data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return []
         return [t for t in data if isinstance(t, dict) and t.get("id")] if isinstance(data, list) else []
@@ -95,7 +95,7 @@ class Schedule:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._tasks, indent=1))
+        tmp.write_text(json.dumps(self._tasks, indent=1), encoding="utf-8")
         os.replace(tmp, self.path)
 
     def list(self) -> list[dict]:

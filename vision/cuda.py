@@ -2,14 +2,17 @@
 
 The nvidia-*-cu12 wheels drop their .so files under site-packages/nvidia/*/lib, which is not
 on the dynamic loader path. Loading them globally once, before the consumers import, is enough.
+On Windows they are DLLs under site-packages/nvidia/*/bin; see _preload_windows.
 """
 from __future__ import annotations
 
 import ctypes
-import fcntl
 import os
 import site
+import sys
 from pathlib import Path
+
+from vision import compat
 
 _LIBS = [
     "cuda_runtime/lib/libcudart.so.12",
@@ -31,6 +34,7 @@ def gpu_holders() -> list[str]:
         out = subprocess.run(
             ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
+            encoding="utf-8",
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return []
@@ -71,7 +75,7 @@ class GpuClaim:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            compat.lock_nonblocking(fd)
         except OSError:
             try:
                 pid = int(os.read(fd, 32).decode().strip() or 0)
@@ -127,6 +131,10 @@ def preload() -> None:
     roots = list(site.getsitepackages())
     if site.getusersitepackages():
         roots.append(site.getusersitepackages())
+    if sys.platform == "win32":
+        _preload_windows(roots)
+        _done = True
+        return
     for root in roots:
         for n in _LIBS:
             p = os.path.join(root, "nvidia", n)
@@ -136,3 +144,28 @@ def preload() -> None:
                 except OSError:
                     pass
     _done = True
+
+
+_dll_dirs: list = []  # os.add_dll_directory handles: a directory stays searchable while its handle lives
+
+
+def _preload_windows(roots: list[str]) -> None:
+    """Make the nvidia-*-cu12 wheels' DLLs findable. CTranslate2 and ONNX Runtime's CUDA provider load
+    cuBLAS and cuDNN by name, and cuDNN loads its own sub-libraries by name later, which only PATH
+    covers (add_dll_directory reaches LoadLibraryEx callers that ask for it); so do both."""
+    dirs = []
+    for root in roots:
+        base = os.path.join(root, "nvidia")
+        if not os.path.isdir(base):
+            continue
+        for pkg in sorted(os.listdir(base)):
+            d = os.path.join(base, pkg, "bin")
+            if os.path.isdir(d) and d not in dirs:
+                dirs.append(d)
+    for d in dirs:
+        try:
+            _dll_dirs.append(os.add_dll_directory(d))
+        except OSError:
+            pass
+    if dirs:
+        os.environ["PATH"] = os.pathsep.join(dirs + [os.environ.get("PATH", "")])

@@ -24,6 +24,7 @@ import tomllib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from vision import compat
 from vision.reply import READING, THINKING, ReplyText, dedupe_status, retry_label
 
 if TYPE_CHECKING:
@@ -69,7 +70,7 @@ class AppServerTurn:
 
     def __init__(self, exe: str, cwd: str, env: dict):
         self.proc = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     cwd=cwd, env=env, text=True, bufsize=1)
+                                     cwd=cwd, env=env, text=True, bufsize=1, encoding="utf-8")
         self.stderr: list[str] = []
         threading.Thread(target=lambda: self.stderr.append(self.proc.stderr.read() if self.proc.stderr else ""), daemon=True).start()
         self._write_lock = threading.Lock()
@@ -189,7 +190,7 @@ class AppServerTurn:
     def kill(self) -> None:
         if self.proc.poll() is None:
             try:
-                self.proc.terminate()
+                compat.terminate(self.proc)
                 self.proc.wait(timeout=2)
             except Exception:  # noqa: BLE001
                 try:

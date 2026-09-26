@@ -64,8 +64,13 @@ Vision has two modes, and the bottom-left corner of the status line always shows
 Vision reads, searches and runs read-only commands, then presents a plan and a `Carry out this plan?`
 selector. Yes switches to auto mode and carries it out in the same turn; No (or typing what should change)
 keeps it planning. Shift-Tab toggles the modes, `/mode plan`, `/mode auto` (or `/plan`, `/auto`) set one,
-and `mode` under `[brain]` picks the one Vision starts in. Codex and Grok have no Vision-wired plan-approval
+and `mode` under `[brain]` picks the one Vision starts in (auto by default; plan on Windows). With
+`plan_approval = "turn"` a Yes carries out only that plan and the next message starts in plan mode again.
+Codex and Grok have no Vision-wired plan-approval
 UI, so plan mode gives them a read-only sandbox and asks them to present the plan for you to approve by switching to auto.
+Banked limit resets and Grok's allowance on the usage page come from undocumented endpoints that Vision
+calls with the logins Claude Code and Grok saved on disk; `read_cli_logins = false` under `[brain]` keeps
+Vision out of those files. Windows is covered in [WINDOWS.md](../WINDOWS.md).
 Inside chat: `/speak` toggles voice, `/talk` starts a hands-free spoken conversation right there in the
 chat screen (type to answer instead of speaking; Esc, `/talk` again or saying "goodbye" ends it), `/wake`
 turns the wake word on: whenever the chat is idle a tiny Whisper on the CPU listens for "Vision"; say it and

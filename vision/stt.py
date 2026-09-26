@@ -24,6 +24,19 @@ LIVE_STOP_TIMEOUT_S = 5.0
 from vision.cuda import preload as _preload_cuda_libs
 
 
+def _check_hf_symlinks(name: str) -> None:
+    """compat.check_hf_symlinks for a faster-whisper model name ("large-v3-turbo" is a repo alias)."""
+    from vision.compat import WINDOWS, check_hf_symlinks
+
+    if not WINDOWS:
+        return
+    try:
+        from faster_whisper.utils import _MODELS
+    except ImportError:
+        _MODELS = {}
+    check_hf_symlinks(_MODELS.get(name, name))
+
+
 class Transcriber:
     def __init__(self, cfg: ListenConfig):
         self.cfg = cfg
@@ -56,6 +69,7 @@ class Transcriber:
                 try:
                     if dev == "cuda":
                         _preload_cuda_libs()
+                    _check_hf_symlinks(name)
                     self._model = WhisperModel(name, device=dev, compute_type=ct)
                     # Touch the encoder once so missing CUDA libs fail here, not mid-conversation.
                     self._model.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32), beam_size=1, language="en")

@@ -449,14 +449,21 @@ class _Heading(Heading):
         yield text
 
 
+_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")  # a Windows path: C:/x.png or C:\x.png
+
+
 class _Image(ImageItem):
     """`![caption](/abs/path.png)`: the caption and the path, one click away (a file:// link the terminal
     opens in the image viewer). The iPhone app draws the picture itself."""
 
     def __rich_console__(self, console, options):
         path = self.destination
-        link = RichStyle(link=("file://" + path) if path.startswith("/") else path or None)
-        caption = self.text.plain.strip() or path.rsplit("/", 1)[-1]
+        if _DRIVE_PATH.match(path):
+            link = RichStyle(link="file:///" + path.replace("\\", "/"))
+            caption = self.text.plain.strip() or path.replace("\\", "/").rsplit("/", 1)[-1]
+        else:
+            link = RichStyle(link=("file://" + path) if path.startswith("/") else path or None)
+            caption = self.text.plain.strip() or path.rsplit("/", 1)[-1]
         yield Text.assemble(("🖼 ", "none"), (caption, link + RichStyle(bold=True)), ("  ", "none"), (path, link + RichStyle(dim=True)), end="")
 
 
@@ -1538,6 +1545,14 @@ def copy_to_clipboard(text: str, output=None) -> str:
     import shutil
     import subprocess
 
+    if sys.platform == "win32":
+        from vision.compat import copy_text_windows
+
+        try:
+            if copy_text_windows(text):
+                return "clipboard"
+        except OSError:
+            pass
     cmds = []
     if os.environ.get("WAYLAND_DISPLAY"):
         cmds.append(["wl-copy"])
@@ -1656,7 +1671,14 @@ def _private_output():
     from prompt_toolkit.output import create_output
 
     try:
-        tty = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding=sys.stdout.encoding or "utf-8", errors="replace")
+        if sys.platform == "win32":
+            # A dup'd fd would be written byte-wise in the console's code page (mojibake); CONOUT$ is a
+            # console stream of its own, Unicode like sys.stdout and untouched by fd 1's redirection.
+            if not sys.stdout.isatty():
+                return None
+            tty = open("CONOUT$", "w", encoding="utf-8", errors="replace")
+        else:
+            tty = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding=sys.stdout.encoding or "utf-8", errors="replace")
         return _close_links(create_output(stdout=tty))
     except (OSError, ValueError, AttributeError):
         return None  # not a real terminal (tests, pipes): prompt_toolkit's default output

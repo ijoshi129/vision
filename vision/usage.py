@@ -225,9 +225,13 @@ def _claude_login() -> tuple[str, str | None] | None:
     import json
     import os
 
+    from vision.config import cli_logins_allowed
+
+    if not cli_logins_allowed():
+        return None
     home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     try:
-        with open(os.path.join(home, ".credentials.json")) as f:
+        with open(os.path.join(home, ".credentials.json"), encoding="utf-8") as f:
             oauth = json.load(f).get("claudeAiOauth") or {}
     except (OSError, ValueError):
         return None
@@ -237,7 +241,7 @@ def _claude_login() -> tuple[str, str | None] | None:
     org = None
     state = os.path.join(home, ".claude.json") if os.environ.get("CLAUDE_CONFIG_DIR") else os.path.expanduser("~/.claude.json")
     try:
-        with open(state) as f:
+        with open(state, encoding="utf-8") as f:
             org = (json.load(f).get("oauthAccount") or {}).get("organizationUuid")
     except (OSError, ValueError):
         pass
@@ -298,7 +302,7 @@ def _claude_banked_save(body: dict) -> None:
     try:
         f = _claude_banked_file()
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps({"at": time.time(), "cedar_ember": (body or {}).get("cedar_ember")}))
+        f.write_text(json.dumps({"at": time.time(), "cedar_ember": (body or {}).get("cedar_ember")}), encoding="utf-8")
     except OSError:
         pass
 
@@ -306,7 +310,7 @@ def _claude_banked_save(body: dict) -> None:
 def _claude_banked_cached() -> dict | None:
     import json
     try:
-        saved = json.loads(_claude_banked_file().read_text())
+        saved = json.loads(_claude_banked_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(saved, dict) or time.time() - (saved.get("at") or 0) > CLAUDE_BANKED_MAX_AGE:
@@ -405,6 +409,10 @@ def use_claude_reset(grant_id: str | None = None, timeout: float = 35) -> dict:
     import urllib.request
     import uuid
 
+    from vision.config import cli_logins_allowed
+
+    if not cli_logins_allowed():
+        return {"ok": False, "outcome": "unsupported", "message": "Using a Claude reset needs read_cli_logins = true under [brain]."}
     login = _claude_login()
     if not login:
         return {"ok": False, "outcome": "auth_error", "message": "Claude's login has lapsed. Send Claude a message so it refreshes, then try again."}
@@ -539,6 +547,10 @@ def _codex_data(brain) -> dict:
 def _grok_data() -> dict:
     from vision.grok import fetch_subscription
 
+    from vision.config import cli_logins_allowed
+
+    if not cli_logins_allowed():
+        return {"windows": [], "error": "Grok usage is off: it needs read_cli_logins = true under [brain]."}
     sub = fetch_subscription()
     if not sub:
         return {"windows": [], "error": "Grok usage unavailable: needs a live grok.com login (run `grok login`)."}

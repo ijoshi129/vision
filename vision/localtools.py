@@ -25,6 +25,8 @@ import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 
+from vision import compat
+
 MAX_OUTPUT = 8_000  # characters of one tool result the model gets back (head and tail of anything longer)
 HISTORY_OUTPUT = 1_500  # what a result shrinks to once the turn is over and it sits in the transcript
 READ_LINES = 400  # default lines per Read
@@ -204,16 +206,19 @@ def _bash(args: dict, workdir: str, rules: list[str] | None, holder: dict, lock:
         timeout = min(float(args.get("timeout_s") or BASH_TIMEOUT), BASH_TIMEOUT)
     except (TypeError, ValueError):
         timeout = BASH_TIMEOUT
+    shell = compat.bash()
+    if shell is None:
+        return "Error: no bash here. On Windows, Vision runs commands with Git for Windows' bash.exe; install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH.", True
     with lock:
         if holder.get("cancelled"):
             return "Error: cancelled.", True
-        proc = subprocess.Popen(["bash", "-c", command], cwd=workdir, env=brain_env("local"), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+        proc = subprocess.Popen([shell, "-c", command], cwd=workdir, env=brain_env("local"), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", encoding="utf-8")
         holder["proc"] = proc
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        compat.kill(proc)
         out, _ = proc.communicate()
         return clip((out or "") + f"\nError: the command did not finish within {timeout:.0f} s and was killed."), True
     finally:
@@ -233,7 +238,7 @@ def _read(args: dict, workdir: str) -> tuple[str, bool]:
         return f"Error: {p} does not exist.", True
     if p.is_dir():
         return f"Error: {p} is a directory; list it with Bash (ls).", True
-    lines = p.read_text(errors="replace").splitlines()
+    lines = p.read_text(errors="replace", encoding="utf-8").splitlines()
     try:
         offset = max(1, int(args.get("offset") or 1))
         limit = max(1, int(args.get("limit") or READ_LINES))
@@ -254,7 +259,7 @@ def _write(args: dict, workdir: str) -> tuple[str, bool]:
     content = str(args.get("content") if args.get("content") is not None else "")
     p.parent.mkdir(parents=True, exist_ok=True)
     existed = p.exists()
-    p.write_text(content)
+    p.write_text(content, encoding="utf-8")
     return f"{'Overwrote' if existed else 'Wrote'} {p} ({len(content):,} characters).", False
 
 
@@ -265,13 +270,13 @@ def _edit(args: dict, workdir: str) -> tuple[str, bool]:
     old, new = str(args.get("old_string") or ""), str(args.get("new_string") if args.get("new_string") is not None else "")
     if not old:
         return "Error: old_string is empty.", True
-    text = p.read_text(errors="replace")
+    text = p.read_text(errors="replace", encoding="utf-8")
     n = text.count(old)
     if n == 0:
         return f"Error: old_string was not found in {p}. Read the file and copy the text exactly.", True
     if n > 1 and not args.get("replace_all"):
         return f"Error: old_string appears {n} times in {p}; include more surrounding text or set replace_all.", True
-    p.write_text(text.replace(old, new))
+    p.write_text(text.replace(old, new), encoding="utf-8")
     return f"Edited {p}: replaced {n} occurrence{'s' if n > 1 else ''}.", False
 
 

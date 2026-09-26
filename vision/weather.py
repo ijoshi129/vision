@@ -195,7 +195,7 @@ class WeatherKit:
     def _place_cache(self) -> dict[str, dict]:
         if self._places is None:
             try:
-                self._places = json.loads(GEOCODE_CACHE.read_text())
+                self._places = json.loads(GEOCODE_CACHE.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 self._places = {}
         return self._places
@@ -229,7 +229,7 @@ class WeatherKit:
             cache[key] = place.__dict__
             try:
                 GEOCODE_CACHE.parent.mkdir(parents=True, exist_ok=True)
-                GEOCODE_CACHE.write_text(json.dumps(cache, indent=1))
+                GEOCODE_CACHE.write_text(json.dumps(cache, indent=1), encoding="utf-8")
             except OSError:
                 pass
         return place

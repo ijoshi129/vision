@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from vision.config import DATA_DIR, STATE_DIR, WORKSPACE_DIR, BrainConfig, weather_ready
-from vision import cachettl, clis, models
+from vision import cachettl, clis, compat, models
 from vision.persona import system_prompt
 from vision.reply import READING, THINKING, dedupe_status, retry_label
 
@@ -40,7 +40,7 @@ WINDOWS_FILE = STATE_DIR / "claude_windows.json"  # model id → context window 
 
 def _saved_windows() -> dict[str, int]:
     try:
-        data = json.loads(WINDOWS_FILE.read_text())
+        data = json.loads(WINDOWS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return {k: int(v) for k, v in data.items() if isinstance(v, int) and v > 0} if isinstance(data, dict) else {}
@@ -49,7 +49,7 @@ def _saved_windows() -> dict[str, int]:
 def _save_window(model_id: str, window: int) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        WINDOWS_FILE.write_text(json.dumps({**_saved_windows(), model_id: window}))
+        WINDOWS_FILE.write_text(json.dumps({**_saved_windows(), model_id: window}), encoding="utf-8")
     except OSError:
         pass
 
@@ -113,6 +113,14 @@ echo "blocked by Vision: '$(basename "$0")' cannot be run from inside a Vision t
 exit 1
 """
 
+# The same for Windows, where cmd and PowerShell (and Claude Code's PowerShell tool) only run files
+# with a PATHEXT extension; Git Bash still finds the #!/bin/sh ones above.
+_SHIM_CMD = """@echo off
+rem Installed by Vision: see the #!/bin/sh shim next to this file.
+echo blocked by Vision: '%~n0' cannot be run from inside a Vision turn (it would spend a subscription behind the user's back). Ask the user to switch with /model instead. 1>&2
+exit /b 1
+"""
+
 _SHIM_NAMES = ("claude", "codex", "grok")
 _PROVIDER_HOME = {
     "claude": "CLAUDE_CONFIG_DIR",
@@ -128,9 +136,13 @@ def _shim_dir() -> str:
         d.mkdir(parents=True, exist_ok=True)
         for name in _SHIM_NAMES:
             f = d / name
-            if not f.exists() or f.read_text() != _SHIM:
-                f.write_text(_SHIM)
+            if not f.exists() or f.read_text(encoding="utf-8") != _SHIM:
+                f.write_text(_SHIM, encoding="utf-8", newline="\n")  # LF even on Windows: "#!/bin/sh\r" is no shebang
             f.chmod(0o755)
+            if compat.WINDOWS:
+                f = d / f"{name}.cmd"
+                if not f.exists() or f.read_text(encoding="utf-8") != _SHIM_CMD:
+                    f.write_text(_SHIM_CMD, encoding="utf-8", newline="\r\n")
     except OSError:
         return ""
     return str(d)
@@ -165,11 +177,20 @@ def brain_env(provider: str) -> dict[str, str]:
 
 def find_claude() -> str:
     exe = shutil.which("claude")
+    if not exe:
+        for cand in (os.path.expanduser("~/.local/bin/claude"), "/usr/local/bin/claude", "/usr/bin/claude"):
+            if compat.WINDOWS:
+                cand += ".exe"
+            if os.path.exists(cand):
+                exe = cand
+                break
+    if exe and compat.is_batch_file(exe):
+        raise BrainError(
+            f"Found Claude Code as {exe}, a .cmd launcher, which cannot pass Vision's multi-line prompts safely. "
+            "Install the native claude.exe instead: irm https://claude.ai/install.ps1 | iex"
+        )
     if exe:
         return exe
-    for cand in (os.path.expanduser("~/.local/bin/claude"), "/usr/local/bin/claude", "/usr/bin/claude"):
-        if os.path.exists(cand):
-            return cand
     raise BrainError("Claude Code CLI ('claude') not found on PATH. Install it and run `claude` once to log in.")
 
 
@@ -417,7 +438,7 @@ def claude_default_model() -> str | None:
         os.path.expanduser("~/.claude/settings.json"),
     ):
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 model = json.load(f).get("model")
         except (OSError, ValueError, AttributeError):
             continue
@@ -500,7 +521,7 @@ class Brain:
     @staticmethod
     def last_session_id() -> str | None:
         try:
-            sid = LAST_SESSION_FILE.read_text().strip()
+            sid = LAST_SESSION_FILE.read_text(encoding="utf-8").strip()
             return sid or None
         except FileNotFoundError:
             return None
@@ -510,7 +531,7 @@ class Brain:
             return  # a voice worker must not replace the typed --continue target
         if self.session_id:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            LAST_SESSION_FILE.write_text(self.session_id)
+            LAST_SESSION_FILE.write_text(self.session_id, encoding="utf-8")
 
     def new_session(self) -> None:
         self.session_id = None
@@ -765,6 +786,7 @@ class Brain:
                 env=env,
                 text=True,
                 bufsize=1,
+                encoding="utf-8",
             )
             self._stdin_open = True
             self._steered = steered
@@ -788,7 +810,7 @@ class Brain:
                 if not paused[0] and time.monotonic() - activity[0] > limit and proc.poll() is None:
                     stalled[0] = True
                     try:
-                        proc.terminate()
+                        compat.terminate(proc)
                     except OSError:
                         pass
                     return
@@ -1084,7 +1106,8 @@ class Brain:
             choice = ((on_question([question]) if on_question else None) or {}).get(question["question"], "")
             if choice == "Yes":
                 self._plan_approved = turn.plan_approved = True
-                self.cfg.mode = "auto"  # the turns after this one run without approval too
+                if getattr(self.cfg, "plan_approval", "session") != "turn":
+                    self.cfg.mode = "auto"  # the turns after this one run without approval too
                 result = {"behavior": "allow", "updatedInput": tool_input}
             elif choice and choice != "No":
                 result = {"behavior": "deny", "message": f"The user did not approve the plan and said: {choice}\nStay in plan mode and revise the plan accordingly."}
@@ -1138,14 +1161,14 @@ class Brain:
         self.last_usage = {"info": info, "at": time.time()}
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            USAGE_FILE.write_text(json.dumps(self.last_usage))
+            USAGE_FILE.write_text(json.dumps(self.last_usage), encoding="utf-8")
         except OSError:
             pass
 
     @staticmethod
     def cached_usage() -> dict | None:
         try:
-            return json.loads(USAGE_FILE.read_text())
+            return json.loads(USAGE_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -1155,7 +1178,7 @@ class Brain:
         env.pop("CLAUDECODE", None)
         cmd = [self.claude, "-p", "/usage", "--output-format", "json", "--no-session-persistence", "--tools", ""]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, cwd=self.workdir, env=env, timeout=60)
+            r = subprocess.run(cmd, capture_output=True, text=True, cwd=self.workdir, env=env, timeout=60, encoding="utf-8")
             data = json.loads(r.stdout.strip().splitlines()[-1])
         except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
             return None
@@ -1164,7 +1187,7 @@ class Brain:
             return None
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            (STATE_DIR / "usage.txt").write_text(text)
+            (STATE_DIR / "usage.txt").write_text(text, encoding="utf-8")
         except OSError:
             pass
         return text
@@ -1176,7 +1199,7 @@ class Brain:
         cmd = [self.claude, "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
                "--model", "haiku", "--tools", "", "--max-turns", "1"]
         try:
-            r = subprocess.run(cmd, input="Reply with OK.", capture_output=True, text=True, cwd=self.workdir, env=env, timeout=120)
+            r = subprocess.run(cmd, input="Reply with OK.", capture_output=True, text=True, cwd=self.workdir, env=env, timeout=120, encoding="utf-8")
         except (subprocess.TimeoutExpired, OSError):
             return None
         for line in r.stdout.splitlines():
@@ -1194,7 +1217,7 @@ class Brain:
             self._cancelled = proc is not None
         if proc and proc.poll() is None:
             try:
-                proc.terminate()
+                compat.terminate(proc)
                 proc.wait(timeout=3)
             except Exception:
                 proc.kill()

@@ -8,12 +8,17 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import sys
 import threading
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from vision.models import THINKING_OFF, provider_for
+
+# Windows starts in plan mode: none of the Linux sandboxes exist there, and denied_tools only knows
+# POSIX commands. "auto" still works; set it under [brain] or press Shift-Tab.
+DEFAULT_MODE = "plan" if sys.platform == "win32" else "auto"
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "vision"
 DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "vision"
@@ -75,6 +80,11 @@ LLAMA_URLS = [
     f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-ubuntu-cuda-13.3-x64.tar.gz",
     f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/cudart-llama-{LLAMA_BUILD}-bin-ubuntu-cuda-13.3-x64.tar.gz",
 ]
+if sys.platform == "win32":  # the same build for Windows x64 (zips; the cudart one carries no build number)
+    LLAMA_URLS = [
+        f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-win-cuda-13.4-x64.zip",
+        f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/cudart-llama-bin-win-cuda-13.4-x64.zip",
+    ]
 
 DEFAULT_CONFIG = '''# Vision configuration. Edit freely; run `vision config` to see the resolved values.
 
@@ -100,6 +110,13 @@ address_user_as = ""
 # danger-full-access). "plan": read-only — Vision investigates and proposes a plan, and carries it out
 # once you approve it (Claude) or switch to auto. Shift-Tab or /mode switches during a chat.
 mode = "auto"
+# Approving a plan: "session" switches to auto for the rest of the session; "turn" runs only the
+# approved plan and goes back to plan mode for your next message.
+plan_approval = "session"
+# Banked limit resets (/usage) and Grok's allowance come from undocumented endpoints that Vision calls
+# with the logins Claude Code (~/.claude/.credentials.json) and Grok (~/.grok/auth.json) saved.
+# false = Vision never reads those files; /usage then shows only what the CLIs report themselves.
+read_cli_logins = true
 # Stall watchdog for Claude turns: seconds without any output from the brain before the turn is
 # killed and reported as stalled. Long tool calls still stream events; only true silence counts.
 # 0 disables it.
@@ -319,6 +336,8 @@ country_code = ""  # e.g. GB; enables official weather alerts when using latitud
 units = "metric"   # "metric" (°C, km/h) or "imperial" (°F, mph)
 language = "en"
 '''
+if DEFAULT_MODE != "auto":
+    DEFAULT_CONFIG = DEFAULT_CONFIG.replace('\nmode = "auto"\n', f'\nmode = "{DEFAULT_MODE}"\n', 1)
 
 VOICE_ENGINES = ("qwen3", "orpheus")
 # The voices baked into the Orpheus fine-tune, roughly in order of how polished they are.
@@ -392,7 +411,13 @@ class BrainConfig:
     address_user_as: str = ""
     # "auto" (every tool pre-approved, Codex on danger-full-access; denied_tools still applies) or
     # "plan" (read-only until the plan is approved). Shift-Tab or /mode switches for the session.
-    mode: str = "auto"
+    mode: str = DEFAULT_MODE
+    # What approving a plan unlocks: "session" (Vision switches to auto for the rest of the session)
+    # or "turn" (only the approved plan runs; the next message starts in plan mode again).
+    plan_approval: str = "session"
+    # Read Claude Code's and Grok's saved logins to query their usage endpoints directly (see
+    # read_cli_logins in DEFAULT_CONFIG); False = Vision never opens those credential files.
+    read_cli_logins: bool = True
     # Seconds of silence from the Claude process before the turn is killed as stalled; 0 = never.
     stall_s: float = 900
     codex: CodexConfig = field(default_factory=CodexConfig, repr=False)
@@ -402,6 +427,13 @@ class BrainConfig:
 
 
 MODES = ("auto", "plan")
+
+_read_cli_logins = True  # [brain].read_cli_logins from the last load_config()
+
+
+def cli_logins_allowed() -> bool:
+    """Whether Vision may read the Claude Code and Grok login files (usage.py, grok.py)."""
+    return _read_cli_logins
 
 
 @dataclass
@@ -549,9 +581,9 @@ def ensure_dirs() -> None:
 def load_config() -> Config:
     ensure_dirs()
     if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(DEFAULT_CONFIG)
+        CONFIG_PATH.write_text(DEFAULT_CONFIG, encoding="utf-8")
     try:
-        raw = tomllib.loads(CONFIG_PATH.read_text())
+        raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         raise SystemExit(f"Config error in {CONFIG_PATH}: {e}")
     cfg = Config()
@@ -563,8 +595,13 @@ def load_config() -> Config:
                 if section == "brain" and k == "effort" and not v and not raw.get("brain", {}).get("model"):
                     continue  # same migration; an explicit model + empty effort is meaningful (e.g. Haiku)
                 setattr(target, k, v)
+    cfg.brain.mode = str(cfg.brain.mode).strip().lower()
     if cfg.brain.mode not in MODES:
-        cfg.brain.mode = "auto"
+        cfg.brain.mode = DEFAULT_MODE
+    if cfg.brain.plan_approval not in ("session", "turn"):
+        cfg.brain.plan_approval = "session"
+    global _read_cli_logins
+    _read_cli_logins = cfg.brain.read_cli_logins is not False
     vc = cfg.voice
     vc.filler_after_ms = max(0, int(vc.filler_after_ms or 0))
     vc.filler_again_ms = max(0, int(vc.filler_again_ms or 0))
@@ -645,7 +682,7 @@ def saved_brain_defaults() -> tuple[str, str] | None:
 def save_brain_defaults(model: str, effort: str) -> None:
     """Persist the default model and effort in config.toml, editing the lines in place so comments survive."""
     ensure_dirs()
-    text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else DEFAULT_CONFIG
+    text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else DEFAULT_CONFIG
     lines = text.splitlines()
     wanted = {"model": model, "effort": effort}
     section, done = None, set()
@@ -670,13 +707,13 @@ def save_brain_defaults(model: str, effort: str) -> None:
             lines.insert(at, f'{k} = "{wanted[k]}"')
     out = "\n".join(lines) + "\n"
     tomllib.loads(out)  # refuse to write a broken config
-    CONFIG_PATH.write_text(out)
+    CONFIG_PATH.write_text(out, encoding="utf-8")
 
 
 def save_voice_default(name: str) -> None:
     """Persist `[voice] voice = name` in config.toml, editing the line in place so comments survive."""
     ensure_dirs()
-    text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else DEFAULT_CONFIG
+    text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else DEFAULT_CONFIG
     lines = text.splitlines()
     section, done = None, False
     for i, line in enumerate(lines):
@@ -696,13 +733,13 @@ def save_voice_default(name: str) -> None:
         lines.insert(at, f'voice = "{name}"')
     out = "\n".join(lines) + "\n"
     tomllib.loads(out)  # refuse to write a broken config
-    CONFIG_PATH.write_text(out)
+    CONFIG_PATH.write_text(out, encoding="utf-8")
 
 
 def save_config_value(section: str, key: str, literal: str) -> None:
     """Persist one `[section] key = literal` in config.toml, editing the line in place so comments survive."""
     ensure_dirs()
-    text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else DEFAULT_CONFIG
+    text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else DEFAULT_CONFIG
     lines = text.splitlines()
     current, done = None, False
     for i, line in enumerate(lines):
@@ -722,7 +759,7 @@ def save_config_value(section: str, key: str, literal: str) -> None:
         lines.insert(at, f"{key} = {literal}")
     out = "\n".join(lines) + "\n"
     tomllib.loads(out)  # refuse to write a broken config
-    CONFIG_PATH.write_text(out)
+    CONFIG_PATH.write_text(out, encoding="utf-8")
 
 
 def save_wake_enabled(enabled: bool) -> None:
@@ -775,7 +812,7 @@ def pipewire_nodes(kind: str) -> list[tuple[str, str]]:
     import subprocess
 
     try:
-        out = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5, check=True).stdout
+        out = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5, check=True, encoding="utf-8").stdout
         objects = json.loads(out)
     except (OSError, subprocess.SubprocessError, ValueError):
         return []
@@ -806,10 +843,28 @@ def resolve_device(spec: str | int | None, kind: str) -> AudioDevice:
         if needle in description.lower() or needle in name.lower():
             alsa = next((i for i, d in enumerate(devices) if d["name"] == "pipewire" and d[key] > 0), None)
             return AudioDevice(alsa, name)
-    for i, d in enumerate(devices):
+    order = _windows_devices(sd, key) if sys.platform == "win32" else enumerate(devices)
+    for i, d in order:
         if d[key] > 0 and needle in d["name"].lower() and "JACK" not in sd.query_hostapis(d["hostapi"])["name"]:
             return AudioDevice(i)
     raise SystemExit(f"No {kind} device matching {spec!r}. Run `vision doctor` to list devices.")
+
+
+# Windows lists every device once per host API. DirectSound and MME convert to whatever rate Vision
+# asks for (16 kHz in, 24 kHz out); WASAPI shared mode only runs at the mixer's rate, and WDM-KS
+# opens the hardware exclusively. DirectSound first: MME truncates names to 31 characters.
+_WINDOWS_HOST_APIS = ("Windows DirectSound", "MME")
+
+
+def _windows_devices(sd, key: str) -> list[tuple[int, dict]]:
+    """(index, device) for the usable Windows host APIs, in _WINDOWS_HOST_APIS order."""
+    rank = {name: n for n, name in enumerate(_WINDOWS_HOST_APIS)}
+    found = []
+    for i, d in enumerate(sd.query_devices()):
+        api = sd.query_hostapis(d["hostapi"])["name"]
+        if d[key] > 0 and api in rank:
+            found.append((rank[api], i, d))
+    return [(i, d) for _, i, d in sorted(found, key=lambda r: (r[0], r[1]))]
 
 
 def input_device_choices() -> list[tuple[str, str, str]]:
@@ -821,6 +876,11 @@ def input_device_choices() -> list[tuple[str, str, str]]:
         return rows + [(name, desc, name) for name, desc in nodes]
     import sounddevice as sd
 
+    if sys.platform == "win32":
+        rows[0] = ("", "system default", "follows your Windows default microphone")
+        first = _WINDOWS_HOST_APIS[0]
+        devices = [(i, d) for i, d in _windows_devices(sd, "max_input_channels") if sd.query_hostapis(d["hostapi"])["name"] == first]
+        return rows + [(str(i), d["name"], f"#{i} · {d['max_input_channels']} in") for i, d in devices]
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0 and "JACK" not in sd.query_hostapis(d["hostapi"])["name"]:
             rows.append((str(i), d["name"], f"#{i} · {d['max_input_channels']} in"))

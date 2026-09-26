@@ -37,7 +37,7 @@ class OneShot(ClaudeConversation):
         command.remove("--include-partial-messages")
         with tempfile.TemporaryDirectory(prefix="vision-benchmark-") as cwd:
             with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, text=True, cwd=cwd, env=brain_env("claude")) as proc:
+                                  stderr=subprocess.PIPE, text=True, cwd=cwd, env=brain_env("claude"), encoding="utf-8") as proc:
                 try:
                     out, _ = proc.communicate(json.dumps(packet), timeout=self.cfg.conversation.timeout_s)
                 except BaseException:
@@ -99,7 +99,7 @@ def main():
     finally:
         model.cancel()
         if args.output:
-            args.output.write_text(json.dumps({"transport": args.transport, "rows": rows}, indent=2) + "\n")
+            args.output.write_text(json.dumps({"transport": args.transport, "rows": rows}, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

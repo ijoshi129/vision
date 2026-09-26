@@ -40,6 +40,9 @@ voice = [
   "numpy",
   "webrtcvad-wheels",
   "qwen-tts>=0.1.1",
+  # PyPI's Windows torch wheels are CPU-only; uv takes these from PyTorch's CUDA index (tool.uv.sources).
+  "torch; sys_platform == 'win32'",
+  "torchaudio; sys_platform == 'win32'",
 ]
 # `vision serve`: HTTP + WebSocket API for remote clients and the pairing QR code
 serve = [
@@ -68,6 +71,16 @@ build-backend = "setuptools.build_meta"
 # as onnxruntime-gpu and silently puts the SNAC decoder and Silero VAD back on the CPU after every `uv sync`.
 # The marker never matches, so the CPU wheel drops out of resolution; onnxruntime-gpu provides the import.
 override-dependencies = ["onnxruntime; sys_platform == 'never'"]
+
+[tool.uv.sources]
+# Windows only: Linux keeps PyPI's torch, which already carries CUDA there.
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32'" }]
+torchaudio = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.setuptools]
 packages = ["vision"]

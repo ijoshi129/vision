@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 
 from rich.text import Text
 
-from vision import localtools
+from vision import compat, localtools
 from vision import usage as usage_ui
 from vision.config import STATE_DIR, BrainConfig, weather_ready
 from vision.persona import system_prompt
@@ -204,7 +204,7 @@ class LocalBrain:
     @staticmethod
     def _read_last() -> dict:
         try:
-            return json.loads(LAST_SESSION_FILE.read_text())
+            return json.loads(LAST_SESSION_FILE.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
 
@@ -219,7 +219,7 @@ class LocalBrain:
     @staticmethod
     def _load(session_id: str) -> list[dict]:
         try:
-            data = json.loads((SESSIONS_DIR / f"{session_id}.json").read_text())
+            data = json.loads((SESSIONS_DIR / f"{session_id}.json").read_text(encoding="utf-8"))
             return [m for m in data.get("messages", []) if isinstance(m, dict)]
         except (OSError, ValueError):
             return []
@@ -229,8 +229,8 @@ class LocalBrain:
             return
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         (SESSIONS_DIR / f"{self.session_id}.json").write_text(
-            json.dumps({"model": self.cfg.model, "at": time.time(), "messages": self._messages}, ensure_ascii=False))
-        LAST_SESSION_FILE.write_text(json.dumps({"id": self.session_id, "model": self.cfg.model, "at": time.time()}))
+            json.dumps({"model": self.cfg.model, "at": time.time(), "messages": self._messages}, ensure_ascii=False), encoding="utf-8")
+        LAST_SESSION_FILE.write_text(json.dumps({"id": self.session_id, "model": self.cfg.model, "at": time.time()}), encoding="utf-8")
 
     def new_session(self) -> None:
         self.session_id = None
@@ -471,7 +471,7 @@ class LocalBrain:
             proc = self._holder.get("proc")
         if proc is not None:
             try:
-                proc.kill()
+                compat.kill(proc)
             except OSError:
                 pass
         if stream is not None:
