@@ -97,6 +97,7 @@ def app_server_call(exe: str, method: str, params: dict, timeout: float = APP_SE
         proc = subprocess.Popen(
             [exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1, env=dict(os.environ),
+            encoding="utf-8",
         )
     except OSError:
         return None
@@ -217,7 +218,7 @@ class CodexBrain:
     @staticmethod
     def _read_last() -> dict:
         try:
-            return json.loads(LAST_SESSION_FILE.read_text())
+            return json.loads(LAST_SESSION_FILE.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
 
@@ -234,7 +235,7 @@ class CodexBrain:
             return
         if self.session_id:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            LAST_SESSION_FILE.write_text(json.dumps({"id": self.session_id, "model": self.cfg.model, "at": time.time()}))
+            LAST_SESSION_FILE.write_text(json.dumps({"id": self.session_id, "model": self.cfg.model, "at": time.time()}), encoding="utf-8")
 
     def new_session(self) -> None:
         self.session_id = None
@@ -358,6 +359,7 @@ class CodexBrain:
                 env=env,
                 text=True,
                 bufsize=1,
+                encoding="utf-8",
             )
         proc = self._proc
         diagnostics: list[str] = []
@@ -497,7 +499,7 @@ class CodexBrain:
             return
         read = window = 0
         try:
-            with open(max(paths, key=os.path.getmtime)) as f:
+            with open(max(paths, key=os.path.getmtime), encoding="utf-8") as f:
                 for line in f:
                     try:
                         ev = json.loads(line)
@@ -528,7 +530,7 @@ class CodexBrain:
             return None
         found = None
         try:
-            with open(max(paths, key=os.path.getmtime)) as f:
+            with open(max(paths, key=os.path.getmtime), encoding="utf-8") as f:
                 for line in f:
                     try:
                         ev = json.loads(line)
@@ -579,14 +581,14 @@ class CodexBrain:
         turn.usage = last  # this turn only; the cumulative thread snapshot lives in last_usage
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            USAGE_FILE.write_text(json.dumps(self.last_usage))
+            USAGE_FILE.write_text(json.dumps(self.last_usage), encoding="utf-8")
         except OSError:
             pass
 
     @staticmethod
     def cached_usage() -> dict | None:
         try:
-            return json.loads(USAGE_FILE.read_text())
+            return json.loads(USAGE_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -610,7 +612,7 @@ class CodexBrain:
             return None
         found, stamp = None, None
         try:
-            with open(max(paths, key=os.path.getmtime)) as f:
+            with open(max(paths, key=os.path.getmtime), encoding="utf-8") as f:
                 for line in f:
                     if '"token_count"' not in line:
                         continue

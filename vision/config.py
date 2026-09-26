@@ -549,9 +549,9 @@ def ensure_dirs() -> None:
 def load_config() -> Config:
     ensure_dirs()
     if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(DEFAULT_CONFIG)
+        CONFIG_PATH.write_text(DEFAULT_CONFIG, encoding="utf-8")
     try:
-        raw = tomllib.loads(CONFIG_PATH.read_text())
+        raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         raise SystemExit(f"Config error in {CONFIG_PATH}: {e}")
     cfg = Config()
@@ -645,7 +645,7 @@ def saved_brain_defaults() -> tuple[str, str] | None:
 def save_brain_defaults(model: str, effort: str) -> None:
     """Persist the default model and effort in config.toml, editing the lines in place so comments survive."""
     ensure_dirs()
-    text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else DEFAULT_CONFIG
+    text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else DEFAULT_CONFIG
     lines = text.splitlines()
     wanted = {"model": model, "effort": effort}
     section, done = None, set()
@@ -670,13 +670,13 @@ def save_brain_defaults(model: str, effort: str) -> None:
             lines.insert(at, f'{k} = "{wanted[k]}"')
     out = "\n".join(lines) + "\n"
     tomllib.loads(out)  # refuse to write a broken config
-    CONFIG_PATH.write_text(out)
+    CONFIG_PATH.write_text(out, encoding="utf-8")
 
 
 def save_voice_default(name: str) -> None:
     """Persist `[voice] voice = name` in config.toml, editing the line in place so comments survive."""
     ensure_dirs()
-    text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else DEFAULT_CONFIG
+    text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else DEFAULT_CONFIG
     lines = text.splitlines()
     section, done = None, False
     for i, line in enumerate(lines):
@@ -696,13 +696,13 @@ def save_voice_default(name: str) -> None:
         lines.insert(at, f'voice = "{name}"')
     out = "\n".join(lines) + "\n"
     tomllib.loads(out)  # refuse to write a broken config
-    CONFIG_PATH.write_text(out)
+    CONFIG_PATH.write_text(out, encoding="utf-8")
 
 
 def save_config_value(section: str, key: str, literal: str) -> None:
     """Persist one `[section] key = literal` in config.toml, editing the line in place so comments survive."""
     ensure_dirs()
-    text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else DEFAULT_CONFIG
+    text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else DEFAULT_CONFIG
     lines = text.splitlines()
     current, done = None, False
     for i, line in enumerate(lines):
@@ -722,7 +722,7 @@ def save_config_value(section: str, key: str, literal: str) -> None:
         lines.insert(at, f"{key} = {literal}")
     out = "\n".join(lines) + "\n"
     tomllib.loads(out)  # refuse to write a broken config
-    CONFIG_PATH.write_text(out)
+    CONFIG_PATH.write_text(out, encoding="utf-8")
 
 
 def save_wake_enabled(enabled: bool) -> None:
@@ -775,7 +775,7 @@ def pipewire_nodes(kind: str) -> list[tuple[str, str]]:
     import subprocess
 
     try:
-        out = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5, check=True).stdout
+        out = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5, check=True, encoding="utf-8").stdout
         objects = json.loads(out)
     except (OSError, subprocess.SubprocessError, ValueError):
         return []

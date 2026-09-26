@@ -93,7 +93,7 @@ def find_grok() -> str:
 
 def _auth_entry() -> dict | None:
     try:
-        data = json.loads(open(GROK_AUTH_FILE).read())
+        data = json.loads(open(GROK_AUTH_FILE, encoding="utf-8").read())
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict):
@@ -136,7 +136,7 @@ def _product_label(name: str) -> str:
 
 def _cached_plan_name() -> str | None:
     try:
-        raw = json.loads(open(GROK_SETTINGS_CACHE).read())
+        raw = json.loads(open(GROK_SETTINGS_CACHE, encoding="utf-8").read())
     except (OSError, json.JSONDecodeError):
         return None
     payload = raw.get("payload") if isinstance(raw, dict) else None
@@ -258,7 +258,7 @@ class GrokBrain:
     @staticmethod
     def _read_last() -> dict:
         try:
-            return json.loads(LAST_SESSION_FILE.read_text())
+            return json.loads(LAST_SESSION_FILE.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
 
@@ -269,7 +269,7 @@ class GrokBrain:
     def context_window(self) -> int:
         """The model's window from the CLI's models cache (~/.grok/models_cache.json), else 256k."""
         try:
-            with open(os.path.join(GROK_HOME, "models_cache.json")) as f:
+            with open(os.path.join(GROK_HOME, "models_cache.json"), encoding="utf-8") as f:
                 info = json.load(f).get("models", {}).get(_cli_model(self.cfg.model), {}).get("info", {})
             return int(info.get("context_window") or 0) or 256_000
         except (OSError, ValueError, AttributeError):
@@ -284,7 +284,7 @@ class GrokBrain:
             return
         if self.session_id:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            LAST_SESSION_FILE.write_text(json.dumps({"id": self.session_id, "model": self.cfg.model, "at": time.time()}))
+            LAST_SESSION_FILE.write_text(json.dumps({"id": self.session_id, "model": self.cfg.model, "at": time.time()}), encoding="utf-8")
 
     def new_session(self) -> None:
         self.session_id = None
@@ -394,6 +394,7 @@ class GrokBrain:
                 env=env,
                 text=True,
                 bufsize=1,
+                encoding="utf-8",
             )
         proc = self._proc
         diagnostics: list[str] = []
@@ -529,14 +530,14 @@ class GrokBrain:
         }
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            USAGE_FILE.write_text(json.dumps(self.last_usage))
+            USAGE_FILE.write_text(json.dumps(self.last_usage), encoding="utf-8")
         except OSError:
             pass
 
     @staticmethod
     def cached_usage() -> dict | None:
         try:
-            return json.loads(USAGE_FILE.read_text())
+            return json.loads(USAGE_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
 

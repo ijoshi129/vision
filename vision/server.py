@@ -154,7 +154,7 @@ def video_digest(path: str | Path) -> dict | None:
     if path.suffix.lower() not in VIDEO_TYPES:
         return None
     try:
-        return json.loads(path.with_suffix(".json").read_text())
+        return json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
@@ -167,7 +167,7 @@ def digest_video(path: Path, transcribe=None) -> dict:
         raise RuntimeError("ffmpeg is not installed on the laptop")
     probe = json.loads(subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json", str(path)],
-        capture_output=True, text=True, check=True).stdout)
+        capture_output=True, text=True, check=True, encoding="utf-8").stdout)
     duration = float(probe.get("format", {}).get("duration") or 0)
     kinds = {s.get("codec_type") for s in probe.get("streams", [])}
     if "video" not in kinds:
@@ -181,7 +181,7 @@ def digest_video(path: Path, transcribe=None) -> dict:
         ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(path),
          "-vf", f"select='eq(n,0)+gt(scene,{SCENE_THRESHOLD})',showinfo,{fit}", "-fps_mode", "vfr", "-q:v", "3",
          str(frames_dir / "s%04d.jpg")],
-        capture_output=True, text=True)
+        capture_output=True, text=True, encoding="utf-8")
     if run.returncode != 0:
         raise RuntimeError(f"ffmpeg could not read the video: {run.stderr.strip().splitlines()[-1] if run.stderr.strip() else run.returncode}")
     times = [float(line.split("pts_time:")[1].split()[0]) for line in run.stderr.splitlines() if "pts_time:" in line]
@@ -223,7 +223,7 @@ def digest_video(path: Path, transcribe=None) -> dict:
         if wav:
             transcript = (transcribe(wav) or "").strip()
     digest = {"duration": round(duration, 2), "frames": named, "transcript": transcript}
-    path.with_suffix(".json").write_text(json.dumps(digest))
+    path.with_suffix(".json").write_text(json.dumps(digest), encoding="utf-8")
     return digest
 
 TOKEN_FILE = CONFIG_DIR / "remote_token"
@@ -235,14 +235,14 @@ def load_token(regenerate: bool = False) -> str:
     """The shared secret the app must present. Created on first use, 0600, rotated with --new-token."""
     if not regenerate:
         try:
-            tok = TOKEN_FILE.read_text().strip()
+            tok = TOKEN_FILE.read_text(encoding="utf-8").strip()
             if tok:
                 return tok
         except OSError:
             pass
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     tok = secrets.token_urlsafe(24)
-    TOKEN_FILE.write_text(tok + "\n")
+    TOKEN_FILE.write_text(tok + "\n", encoding="utf-8")
     TOKEN_FILE.chmod(0o600)
     return tok
 
@@ -1559,9 +1559,9 @@ def tailscale_url(port: int) -> str | None:
     if not exe:
         return None
     try:
-        r = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=5, encoding="utf-8")
         name = json.loads(r.stdout).get("Self", {}).get("DNSName", "").rstrip(".")
-        r = subprocess.run([exe, "serve", "status", "--json"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run([exe, "serve", "status", "--json"], capture_output=True, text=True, timeout=5, encoding="utf-8")
         published = f":{port}" in r.stdout  # a proxy handler like "http://127.0.0.1:8765"
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None

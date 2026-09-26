@@ -69,7 +69,7 @@ class AppServerTurn:
 
     def __init__(self, exe: str, cwd: str, env: dict):
         self.proc = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     cwd=cwd, env=env, text=True, bufsize=1)
+                                     cwd=cwd, env=env, text=True, bufsize=1, encoding="utf-8")
         self.stderr: list[str] = []
         threading.Thread(target=lambda: self.stderr.append(self.proc.stderr.read() if self.proc.stderr else ""), daemon=True).start()
         self._write_lock = threading.Lock()

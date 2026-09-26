@@ -19,7 +19,7 @@ PR_SET_NAME = 15
 
 def _arg_span() -> tuple[int, int]:
     """(arg_start, arg_end) of this process: fields 48 and 49 of /proc/self/stat."""
-    with open("/proc/self/stat") as f:
+    with open("/proc/self/stat", encoding="utf-8") as f:
         stat = f.read()
     fields = stat[stat.rindex(")") + 2 :].split()  # past `pid (comm)`; comm may hold spaces
     return int(fields[45]), int(fields[46])
@@ -47,7 +47,7 @@ def hide_cmdline(name: str = "vision") -> bool:
 def process_name(pid: int) -> str:
     """The kernel's short name for a process (what ps shows in brackets once cmdline is blank)."""
     try:
-        with open(f"/proc/{pid}/comm") as f:
+        with open(f"/proc/{pid}/comm", encoding="utf-8") as f:
             return f.read().strip()
     except OSError:
         return ""

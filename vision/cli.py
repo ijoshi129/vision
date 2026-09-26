@@ -2814,7 +2814,7 @@ def voices(
         t.add_column("voice"), t.add_column("kind"), t.add_column("description")
         for n, note in choices:
             design = voice_dir(n) / "design.txt"
-            desc = design.read_text().strip() if design.is_file() else ""
+            desc = design.read_text(encoding="utf-8").strip() if design.is_file() else ""
             t.add_row(f"[bold]{n}[/bold]" if n == cfg.voice.voice else n, note, desc[:90] + ("…" if len(desc) > 90 else ""))
         console.print(t)
         console.print("[dim]Make more: `vision voice design <name> \"<description>\"` or `vision voice add <name> --from clip.wav`[/dim]")
@@ -2844,11 +2844,11 @@ def _save_voice(name: str, audio, transcript: str | None, design: str | None) ->
     d.mkdir(parents=True, exist_ok=True)
     sf.write(str(d / "ref.wav"), audio, SAMPLE_RATE)
     if transcript:
-        (d / "ref.txt").write_text(transcript.strip() + "\n")
+        (d / "ref.txt").write_text(transcript.strip() + "\n", encoding="utf-8")
     elif (d / "ref.txt").exists():
         (d / "ref.txt").unlink()
     if design:
-        (d / "design.txt").write_text(design.strip() + "\n")
+        (d / "design.txt").write_text(design.strip() + "\n", encoding="utf-8")
     elif (d / "design.txt").exists():
         (d / "design.txt").unlink()
     return d
@@ -3149,6 +3149,7 @@ def doctor(
         r = subprocess.run(
             [claude_info.path, "-p", "Reply with the single word OK", "--output-format", "json", "--no-session-persistence", "--model", "haiku"],
             capture_output=True, text=True, env=env, cwd=str(WORKSPACE_DIR), timeout=120,
+            encoding="utf-8",
         )
         if r.returncode == 0 and '"is_error":false' in r.stdout:
             console.print(f"{ok} Claude Code login works (headless round-trip succeeded)")
@@ -3158,7 +3159,7 @@ def doctor(
     codex_info = infos["codex"]
     if codex_info.ok:
         try:
-            r = subprocess.run([codex_info.path, "login", "status"], capture_output=True, text=True, timeout=30)
+            r = subprocess.run([codex_info.path, "login", "status"], capture_output=True, text=True, timeout=30, encoding="utf-8")
         except (OSError, subprocess.TimeoutExpired) as e:
             console.print(f"{bad} Codex login check failed: {e}")
         else:
@@ -3171,7 +3172,7 @@ def doctor(
     grok_info = infos["grok"]
     if grok_info.ok:
         try:
-            r = subprocess.run([grok_info.path, "models"], capture_output=True, text=True, timeout=30)
+            r = subprocess.run([grok_info.path, "models"], capture_output=True, text=True, timeout=30, encoding="utf-8")
         except (OSError, subprocess.TimeoutExpired) as e:
             console.print(f"{bad} Grok login check failed: {e}")
         else:
@@ -3197,7 +3198,7 @@ def doctor(
         names = saved_voices()
         console.print(f"{ok if cfg.voice.voice in names else bad} voice {cfg.voice.voice!r} in {VOICES_DIR} (have: {', '.join(names) or 'none'})" + ("" if cfg.voice.voice in names else f"  → vision voice design {cfg.voice.voice}"))
     try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total", "--format=csv,noheader"], capture_output=True, text=True)
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total", "--format=csv,noheader"], capture_output=True, text=True, encoding="utf-8")
         console.print(f"{ok} GPU: {r.stdout.strip()}" if r.returncode == 0 else f"{warn} no NVIDIA GPU; Whisper will use CPU")
     except FileNotFoundError:
         console.print(f"{warn} nvidia-smi not found; Whisper will use CPU")
@@ -3283,7 +3284,7 @@ def config(edit: bool = typer.Option(False, "--edit", "-e", help="Open the confi
         subprocess.call([editor, str(CONFIG_PATH)])
         return
     console.print(f"[dim]{CONFIG_PATH}[/dim]")
-    console.print(Text(CONFIG_PATH.read_text()))
+    console.print(Text(CONFIG_PATH.read_text(encoding="utf-8")))
 
 
 def main():

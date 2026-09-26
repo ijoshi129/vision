@@ -54,7 +54,7 @@ def list_links() -> list[dict]:
     out = []
     for f in files:
         try:
-            info = json.loads(f.read_text())
+            info = json.loads(f.read_text(encoding="utf-8"))
             pid = int(info["pid"])
         except (OSError, ValueError, KeyError, TypeError):
             _sweep(f)
@@ -139,7 +139,7 @@ class LinkHost:
     def _write_descriptor(self) -> None:
         info = {"pid": self.pid, "started": time.time(), "cwd": os.getcwd()}
         tmp = descriptor_path(self.pid).with_suffix(".tmp")
-        tmp.write_text(json.dumps(info))
+        tmp.write_text(json.dumps(info), encoding="utf-8")
         os.replace(tmp, descriptor_path(self.pid))
 
     # -- outgoing

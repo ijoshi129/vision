@@ -40,7 +40,7 @@ WINDOWS_FILE = STATE_DIR / "claude_windows.json"  # model id → context window 
 
 def _saved_windows() -> dict[str, int]:
     try:
-        data = json.loads(WINDOWS_FILE.read_text())
+        data = json.loads(WINDOWS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return {k: int(v) for k, v in data.items() if isinstance(v, int) and v > 0} if isinstance(data, dict) else {}
@@ -49,7 +49,7 @@ def _saved_windows() -> dict[str, int]:
 def _save_window(model_id: str, window: int) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        WINDOWS_FILE.write_text(json.dumps({**_saved_windows(), model_id: window}))
+        WINDOWS_FILE.write_text(json.dumps({**_saved_windows(), model_id: window}), encoding="utf-8")
     except OSError:
         pass
 
@@ -128,8 +128,8 @@ def _shim_dir() -> str:
         d.mkdir(parents=True, exist_ok=True)
         for name in _SHIM_NAMES:
             f = d / name
-            if not f.exists() or f.read_text() != _SHIM:
-                f.write_text(_SHIM)
+            if not f.exists() or f.read_text(encoding="utf-8") != _SHIM:
+                f.write_text(_SHIM, encoding="utf-8")
             f.chmod(0o755)
     except OSError:
         return ""
@@ -417,7 +417,7 @@ def claude_default_model() -> str | None:
         os.path.expanduser("~/.claude/settings.json"),
     ):
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 model = json.load(f).get("model")
         except (OSError, ValueError, AttributeError):
             continue
@@ -500,7 +500,7 @@ class Brain:
     @staticmethod
     def last_session_id() -> str | None:
         try:
-            sid = LAST_SESSION_FILE.read_text().strip()
+            sid = LAST_SESSION_FILE.read_text(encoding="utf-8").strip()
             return sid or None
         except FileNotFoundError:
             return None
@@ -510,7 +510,7 @@ class Brain:
             return  # a voice worker must not replace the typed --continue target
         if self.session_id:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            LAST_SESSION_FILE.write_text(self.session_id)
+            LAST_SESSION_FILE.write_text(self.session_id, encoding="utf-8")
 
     def new_session(self) -> None:
         self.session_id = None
@@ -765,6 +765,7 @@ class Brain:
                 env=env,
                 text=True,
                 bufsize=1,
+                encoding="utf-8",
             )
             self._stdin_open = True
             self._steered = steered
@@ -1138,14 +1139,14 @@ class Brain:
         self.last_usage = {"info": info, "at": time.time()}
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            USAGE_FILE.write_text(json.dumps(self.last_usage))
+            USAGE_FILE.write_text(json.dumps(self.last_usage), encoding="utf-8")
         except OSError:
             pass
 
     @staticmethod
     def cached_usage() -> dict | None:
         try:
-            return json.loads(USAGE_FILE.read_text())
+            return json.loads(USAGE_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -1155,7 +1156,7 @@ class Brain:
         env.pop("CLAUDECODE", None)
         cmd = [self.claude, "-p", "/usage", "--output-format", "json", "--no-session-persistence", "--tools", ""]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, cwd=self.workdir, env=env, timeout=60)
+            r = subprocess.run(cmd, capture_output=True, text=True, cwd=self.workdir, env=env, timeout=60, encoding="utf-8")
             data = json.loads(r.stdout.strip().splitlines()[-1])
         except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
             return None
@@ -1164,7 +1165,7 @@ class Brain:
             return None
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            (STATE_DIR / "usage.txt").write_text(text)
+            (STATE_DIR / "usage.txt").write_text(text, encoding="utf-8")
         except OSError:
             pass
         return text
@@ -1176,7 +1177,7 @@ class Brain:
         cmd = [self.claude, "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
                "--model", "haiku", "--tools", "", "--max-turns", "1"]
         try:
-            r = subprocess.run(cmd, input="Reply with OK.", capture_output=True, text=True, cwd=self.workdir, env=env, timeout=120)
+            r = subprocess.run(cmd, input="Reply with OK.", capture_output=True, text=True, cwd=self.workdir, env=env, timeout=120, encoding="utf-8")
         except (subprocess.TimeoutExpired, OSError):
             return None
         for line in r.stdout.splitlines():

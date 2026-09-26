@@ -35,13 +35,13 @@ def write_serve_descriptor(host: str, port: int) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     info = {"pid": os.getpid(), "url": f"http://{reach}:{port}", "port": port, "started": time.time()}
     tmp = SERVE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(info))
+    tmp.write_text(json.dumps(info), encoding="utf-8")
     os.replace(tmp, SERVE_FILE)
 
 
 def remove_serve_descriptor() -> None:
     try:
-        if json.loads(SERVE_FILE.read_text()).get("pid") == os.getpid():
+        if json.loads(SERVE_FILE.read_text(encoding="utf-8")).get("pid") == os.getpid():
             SERVE_FILE.unlink()
     except (OSError, ValueError):
         pass
@@ -53,7 +53,7 @@ def running_server() -> dict | None:
     from vision.link import pid_alive
 
     try:
-        info = json.loads(SERVE_FILE.read_text())
+        info = json.loads(SERVE_FILE.read_text(encoding="utf-8"))
         pid = int(info["pid"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -66,7 +66,7 @@ def running_server() -> dict | None:
     from vision.server import TOKEN_FILE
 
     try:
-        token = TOKEN_FILE.read_text().strip()
+        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
     except OSError:
         return None
     if not token:

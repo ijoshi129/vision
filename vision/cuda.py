@@ -31,6 +31,7 @@ def gpu_holders() -> list[str]:
         out = subprocess.run(
             ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
+            encoding="utf-8",
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return []

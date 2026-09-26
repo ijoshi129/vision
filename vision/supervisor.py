@@ -391,7 +391,7 @@ class Supervisor:
             entry["note"] = redact(note, 200)
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.log_path, "a") as f:
+            with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError:
             pass

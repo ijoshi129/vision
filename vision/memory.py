@@ -19,7 +19,7 @@ MAX_PROMPT_CHARS = 12_000  # past this the file is truncated in the prompt and t
 def read() -> str:
     """The raw file ("" when it does not exist yet)."""
     try:
-        return MEMORY_FILE.read_text()
+        return MEMORY_FILE.read_text(encoding="utf-8")
     except FileNotFoundError:
         return ""
 
@@ -41,7 +41,7 @@ def remember(fact: str) -> str:
         text = HEADER
     elif not text.endswith("\n"):
         text += "\n"
-    MEMORY_FILE.write_text(text + line + "\n")
+    MEMORY_FILE.write_text(text + line + "\n", encoding="utf-8")
     return line
 
 
@@ -54,7 +54,7 @@ def forget(needle: str) -> list[str]:
     for ln in read().splitlines():
         (gone if ln.startswith("- ") and needle in ln.lower() else kept).append(ln)
     if gone:
-        MEMORY_FILE.write_text("\n".join(kept).rstrip("\n") + "\n")
+        MEMORY_FILE.write_text("\n".join(kept).rstrip("\n") + "\n", encoding="utf-8")
     return gone
 
 

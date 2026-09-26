@@ -174,7 +174,7 @@ def personality() -> str:
     from vision.config import PERSONALITY_PATH
 
     try:
-        text = PERSONALITY_PATH.read_text().strip()
+        text = PERSONALITY_PATH.read_text(encoding="utf-8").strip()
     except OSError:
         text = ""
     return text or DEFAULT_PERSONALITY

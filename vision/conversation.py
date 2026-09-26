@@ -341,6 +341,7 @@ class ClaudeConversation:
                 command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, bufsize=1,
                 cwd=cwd.name, env=brain_env("claude"),
+                encoding="utf-8",
             )
         except BaseException:
             cwd.cleanup()

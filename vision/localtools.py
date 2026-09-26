@@ -208,7 +208,7 @@ def _bash(args: dict, workdir: str, rules: list[str] | None, holder: dict, lock:
         if holder.get("cancelled"):
             return "Error: cancelled.", True
         proc = subprocess.Popen(["bash", "-c", command], cwd=workdir, env=brain_env("local"), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", encoding="utf-8")
         holder["proc"] = proc
     try:
         out, _ = proc.communicate(timeout=timeout)
@@ -233,7 +233,7 @@ def _read(args: dict, workdir: str) -> tuple[str, bool]:
         return f"Error: {p} does not exist.", True
     if p.is_dir():
         return f"Error: {p} is a directory; list it with Bash (ls).", True
-    lines = p.read_text(errors="replace").splitlines()
+    lines = p.read_text(errors="replace", encoding="utf-8").splitlines()
     try:
         offset = max(1, int(args.get("offset") or 1))
         limit = max(1, int(args.get("limit") or READ_LINES))
@@ -254,7 +254,7 @@ def _write(args: dict, workdir: str) -> tuple[str, bool]:
     content = str(args.get("content") if args.get("content") is not None else "")
     p.parent.mkdir(parents=True, exist_ok=True)
     existed = p.exists()
-    p.write_text(content)
+    p.write_text(content, encoding="utf-8")
     return f"{'Overwrote' if existed else 'Wrote'} {p} ({len(content):,} characters).", False
 
 
@@ -265,13 +265,13 @@ def _edit(args: dict, workdir: str) -> tuple[str, bool]:
     old, new = str(args.get("old_string") or ""), str(args.get("new_string") if args.get("new_string") is not None else "")
     if not old:
         return "Error: old_string is empty.", True
-    text = p.read_text(errors="replace")
+    text = p.read_text(errors="replace", encoding="utf-8")
     n = text.count(old)
     if n == 0:
         return f"Error: old_string was not found in {p}. Read the file and copy the text exactly.", True
     if n > 1 and not args.get("replace_all"):
         return f"Error: old_string appears {n} times in {p}; include more surrounding text or set replace_all.", True
-    p.write_text(text.replace(old, new))
+    p.write_text(text.replace(old, new), encoding="utf-8")
     return f"Edited {p}: replaced {n} occurrence{'s' if n > 1 else ''}.", False
 
 

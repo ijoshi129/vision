@@ -123,7 +123,7 @@ def _claude_models_from_cache() -> list[ModelInfo] | None:
     if not CATALOGUES_ON:
         return None
     try:
-        with open(CLAUDE_MODELS_CACHE) as f:
+        with open(CLAUDE_MODELS_CACHE, encoding="utf-8") as f:
             return claude_models_from_catalogue(json.load(f).get("models")) or None
     except (OSError, ValueError, AttributeError):
         return None
@@ -158,7 +158,7 @@ def _codex_models_from_cache() -> list[ModelInfo] | None:
     if not CATALOGUES_ON:
         return None
     try:
-        with open(CODEX_MODELS_CACHE) as f:
+        with open(CODEX_MODELS_CACHE, encoding="utf-8") as f:
             data = json.load(f)
         rows = [m for m in data.get("models", []) if m.get("visibility", "list") == "list" and m.get("slug")]
     except (OSError, ValueError, AttributeError):
@@ -193,7 +193,7 @@ def _grok_models_from_cache() -> list[ModelInfo] | None:
     if not CATALOGUES_ON:
         return None
     try:
-        with open(GROK_MODELS_CACHE) as f:
+        with open(GROK_MODELS_CACHE, encoding="utf-8") as f:
             data = json.load(f)
         raw = data.get("models") or {}
         rows = []
@@ -279,7 +279,7 @@ def set_claude_catalogue(rows) -> bool:
         try:
             os.makedirs(os.path.dirname(CLAUDE_MODELS_CACHE), exist_ok=True)
             tmp = CLAUDE_MODELS_CACHE + ".tmp"
-            with open(tmp, "w") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"models": rows}, f)
             os.replace(tmp, CLAUDE_MODELS_CACHE)
         except OSError:

@@ -47,7 +47,7 @@ class VoiceTiming:
             row = {"id": uuid.uuid4().hex, "events": list(self.events)}
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            with (STATE_DIR / "voice-timing.jsonl").open("a") as out:
+            with (STATE_DIR / "voice-timing.jsonl").open("a", encoding="utf-8") as out:
                 out.write(json.dumps(row) + "\n")
         except OSError:
             pass  # Diagnostics must never interrupt a conversation.

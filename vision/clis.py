@@ -92,7 +92,7 @@ def cli_version(provider: str, timeout: float = 20) -> CliInfo:
         info.error = f"not installed ({e})"
         return info
     try:
-        r = subprocess.run([info.path, "--version"], capture_output=True, text=True, timeout=timeout, env=_env())
+        r = subprocess.run([info.path, "--version"], capture_output=True, text=True, timeout=timeout, env=_env(), encoding="utf-8")
     except (OSError, subprocess.TimeoutExpired) as e:
         info.error = f"`{os.path.basename(info.path)} --version` failed: {e}"
         return info
@@ -195,7 +195,7 @@ def _http_text(url: str, timeout: float) -> str:
 def latest_version(provider: str, timeout: float = 15) -> str:
     """The newest released version of a CLI. Raises (OSError, ValueError, …) when it cannot be found."""
     if provider == "grok":
-        r = subprocess.run([find_cli("grok"), "update", "--check", "--json"], capture_output=True, text=True, timeout=timeout, env=_env())
+        r = subprocess.run([find_cli("grok"), "update", "--check", "--json"], capture_output=True, text=True, timeout=timeout, env=_env(), encoding="utf-8")
         data = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
         if data.get("error"):
             raise ValueError(data["error"])
@@ -273,7 +273,7 @@ def claude_catalogue(timeout: float = 30) -> list[dict]:
            "--tools", "", "--strict-mcp-config", "--no-session-persistence"]
     req = json.dumps({"type": "control_request", "request_id": "vision-models", "request": {"subtype": "initialize"}})
     r = subprocess.run(cmd, input=req + "\n", capture_output=True, text=True, timeout=timeout, env=_env(),
-                       cwd=os.path.expanduser("~"))
+                       cwd=os.path.expanduser("~"), encoding="utf-8")
     for line in r.stdout.splitlines():
         try:
             ev = json.loads(line)
@@ -337,7 +337,7 @@ def update_cli(provider: str, *, stream: bool = False, timeout: float = 600) -> 
         return UpdateResult(provider, None, None, 1, error=before.error)
     cmd = [before.path, *_UPDATE_ARGS[provider]]
     try:
-        r = subprocess.run(cmd, capture_output=not stream, text=True, timeout=timeout, env=_env(), stdin=subprocess.DEVNULL)
+        r = subprocess.run(cmd, capture_output=not stream, text=True, timeout=timeout, env=_env(), stdin=subprocess.DEVNULL, encoding="utf-8")
     except subprocess.TimeoutExpired:
         return UpdateResult(provider, before.version, before.version, 1, error=f"`{os.path.basename(cmd[0])} update` did not finish in {timeout:.0f}s")
     except OSError as e:
