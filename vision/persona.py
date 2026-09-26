@@ -81,6 +81,11 @@ def _tool_notes(
             if "Bash" in tools else
             "You have no shell in plan mode: read files with Read as needed and present the plan in your reply."
         )
+        if "Bash" in tools and sys.platform == "win32":
+            lines.append(
+                "Bash is Git Bash on Windows: it prints paths POSIX-style (/c/Users/..., and the temp folder as /tmp), "
+                "while Read, Write and Edit take Windows paths (C:/Users/...). Convert with `cygpath -w <path>` or `pwd -W`."
+            )
         if "WebSearch" in tools or "WebFetch" in tools:
             lines.append(
                 ("WebSearch finds pages (titles, links, snippets) and " if "WebSearch" in tools else "")

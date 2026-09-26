@@ -173,7 +173,7 @@ def app_server_call(exe: str, method: str, params: dict, timeout: float = APP_SE
         return None
     finally:
         try:
-            proc.kill()
+            compat.kill(proc)  # the tree on Windows: a child left holding stdout would block the close below
             proc.wait(timeout=2)
         except Exception:
             pass
