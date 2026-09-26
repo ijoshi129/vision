@@ -26,7 +26,7 @@ def _taskkill(proc: subprocess.Popen) -> None:
 
 def terminate(proc: subprocess.Popen) -> None:
     """Popen.terminate(), which on Windows also takes the process's children with it."""
-    if WINDOWS:
+    if WINDOWS and getattr(proc, "pid", None) is not None:
         _taskkill(proc)
     else:
         proc.terminate()
@@ -34,7 +34,7 @@ def terminate(proc: subprocess.Popen) -> None:
 
 def kill(proc: subprocess.Popen) -> None:
     """Popen.kill(), which on Windows also takes the process's children with it."""
-    if WINDOWS:
+    if WINDOWS and getattr(proc, "pid", None) is not None:
         _taskkill(proc)
     else:
         proc.kill()
