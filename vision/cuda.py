@@ -99,6 +99,8 @@ class GpuClaim:
 
 
 def cmdline(pid: int) -> list[str]:
+    if sys.platform == "win32":  # no /proc: ask Windows for the process's command line
+        return compat.process_cmdline(pid)
     try:
         argv = [a.decode(errors="replace") for a in open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0") if a]
     except OSError:

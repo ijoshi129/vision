@@ -201,3 +201,24 @@ class CdTargetTests(unittest.TestCase):
             _cd_target("nope", self.root, None)
         with self.assertRaisesRegex(ValueError, "not a directory"):
             _cd_target("file.txt", self.root, None)
+
+
+class DoctorWithoutVoiceTests(unittest.TestCase):
+    def test_a_text_only_install_is_reported_not_fatal(self):
+        import importlib.util
+
+        from typer.testing import CliRunner
+
+        from vision import cli, clis
+
+        real = importlib.util.find_spec
+        missing = lambda name, *a, **k: None if name in ("numpy", "sounddevice", "soundfile", "faster_whisper") else real(name, *a, **k)
+        not_installed = [clis.CliInfo(p, error="not installed") for p in clis.PROVIDERS]
+        with patch("vision.clis.cli_versions", return_value=not_installed), patch("importlib.util.find_spec", missing):
+            result = CliRunner().invoke(cli.app, ["doctor", "--no-usage"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        import re
+
+        text = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())  # a real console: colours and wrapping
+        self.assertIn("voice not installed (optional", text)
+        self.assertIn("pip install -e '.[voice]'", text)

@@ -3,7 +3,8 @@
 One user, several chats. Each chat is an independent conversation with its own agent session, model
 and transcript, and chats run at the same time (like Claude Code sessions in the Claude app); the
 ears and the voice are shared. The server listens on the LAN by default so the phone can reach it
-over the same Wi-Fi; an HTTPS tunnel (Tailscale Funnel, Cloudflare Tunnel) takes it further. Every
+over the same Wi-Fi; Tailscale Serve takes it to the user's other devices anywhere (a public tunnel,
+Tailscale Funnel or Cloudflare Tunnel, to the whole internet). Every
 request carries the bearer token from ~/.config/vision/remote_token; the QR code printed at start-up
 carries the URL and the token so the app can pair with one scan.
 
