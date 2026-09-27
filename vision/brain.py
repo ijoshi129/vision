@@ -175,6 +175,15 @@ def brain_env(provider: str) -> dict[str, str]:
     return env
 
 
+def _claude_deny_rules(denied: list[str]) -> list[str]:
+    """denied_tools as Claude Code takes them. On Windows its PowerShell tool is the main shell and Bash
+    rules don't reach it, so each Bash rule goes in once more as the same PowerShell rule."""
+    rules = list(denied)
+    if compat.WINDOWS:
+        rules += [f"PowerShell({r[5:-1]})" for r in denied if r.startswith("Bash(") and r.endswith(")")]
+    return list(dict.fromkeys(rules))
+
+
 def find_claude() -> str:
     exe = shutil.which("claude")
     if not exe:
@@ -590,7 +599,7 @@ class Brain:
             # Auto mode: the full tool set, nothing needs approval. Deny patterns below still apply.
             cmd += ["--dangerously-skip-permissions"]
         if self.cfg.denied_tools:
-            cmd += ["--disallowedTools", ",".join(self.cfg.denied_tools)]
+            cmd += ["--disallowedTools", ",".join(_claude_deny_rules(self.cfg.denied_tools))]
         if self.session_id:
             cmd += ["--resume", self.session_id]
         return cmd

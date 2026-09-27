@@ -54,9 +54,12 @@ read_cli_logins = false    # Vision never opens ~/.claude/.credentials.json or ~
 - **What `read_cli_logins` changes.** With the default `true`, `/usage` shows Claude's banked limit resets and Grok's allowance. It gets them from
   undocumented endpoints, using the logins those CLIs saved on disk. With `false`, `/usage` shows only what the CLIs report themselves.
 - **Auto mode.** Auto mode is Claude Code's `--dangerously-skip-permissions`: tools run without asking.
-- **`denied_tools` offers little protection on Windows.** It is a prefix match on Bash commands, and the default list only
-  names POSIX commands (`sudo`, `rm -rf /`, `mkfs`…). Nothing in it covers `Remove-Item`, `rd /s`, `format`
-  or PowerShell. Treat plan mode as the protection, not this list.
+- **`denied_tools` on Windows.** Claude Code's PowerShell tool is its main shell on Windows, and Bash rules don't
+  reach it. So Vision passes every `Bash(x:*)` rule to Claude a second time, as `PowerShell(x:*)`.
+  - **The default list on Windows** adds the catastrophic cases: `format`, `diskpart`, `Format-Volume`, `Clear-Disk`, `Remove-Partition`,
+    `bcdedit`, `vssadmin delete`, `Stop-Computer` and `Restart-Computer`, and elevation (`runas`, `Start-Process -Verb RunAs`).
+  - **It is still a prefix match, not a sandbox.** A command can be reworded or wrapped to get past it. Treat plan mode as the
+    protection, and the list as a guard against accidents.
 
 ## What works
 
