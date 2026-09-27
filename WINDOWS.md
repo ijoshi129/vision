@@ -117,9 +117,9 @@ Ported, but not tested on real installs:
   - `vision setup` loads Whisper right after designing a voice, while that model still holds VRAM, so setup may report "Whisper ready on cpu/small.en".
   - A normal session loads Whisper on CUDA. Close other GPU-heavy apps if the voice falls back to the CPU.
 - **`vision doctor` without the voice extra** exits with an install hint at the voice checks (as on Linux).
-- **Test suite on Windows.** It passes, with one test skipped for a Linux-only feature (the process
-  title).
-  - Run it from a real console, not a piped shell such as the Git Bash window: the chat-screen tests need a Windows console.
-  - It needs the `all` extra plus pytest and httpx2.
+- **Test suite on Windows.** It passes, and CI (`.github/workflows/tests.yml`) runs it on Windows and Linux for every
+  push and pull request. To run it locally the way CI does:
+  `uv sync --extra serve --extra weather`, then `uv pip install numpy soundfile pillow pytest httpx2`, then
+  `uv run --no-sync python -m unittest discover -s tests`.
 - **Quiet speech.** Very quiet speech can lose its first word to the voice detector. Speak at normal volume,
   or pick a closer microphone with `/mic` or `[listen] input_device`.
