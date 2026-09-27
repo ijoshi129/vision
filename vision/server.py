@@ -53,6 +53,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import Future
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # Module-level on purpose: with `from __future__ import annotations` FastAPI resolves the endpoint
@@ -1324,27 +1325,25 @@ class Hub:
 
 # ---------------------------------------------------------------- app
 def create_app(hub: Hub) -> FastAPI:
-    app = FastAPI(title="Vision Remote", version=__version__, docs_url=None, redoc_url=None)
-
-    def bearer(request: Request) -> None:
-        auth = request.headers.get("authorization", "")
-        token = auth[7:].strip() if auth.lower().startswith("bearer ") else request.query_params.get("token")
-        if not hub.authorized(token):
-            raise HTTPException(status_code=401, detail="bad token")
-
-    @app.on_event("startup")
-    async def _startup() -> None:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
         hub.loop = asyncio.get_running_loop()
         hub.events = asyncio.Queue()
         asyncio.create_task(hub.pump())
         asyncio.create_task(hub._watch_links())
         asyncio.create_task(hub._watch_schedule())
         hub.warm_up()
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
+        yield
         # The voice transport stays alive between requests; reap it when the server stops.
         await asyncio.to_thread(hub.cancel)
+
+    app = FastAPI(title="Vision Remote", version=__version__, docs_url=None, redoc_url=None, lifespan=lifespan)
+
+    def bearer(request: Request) -> None:
+        auth = request.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else request.query_params.get("token")
+        if not hub.authorized(token):
+            raise HTTPException(status_code=401, detail="bad token")
 
     @app.get("/health", dependencies=[Depends(bearer)])
     async def health() -> dict:
