@@ -18,7 +18,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0  # setup-uv publishes full versions only, no major-version tag
         with:
           python-version: "3.12"
       # Text chat plus the serve and weather extras. The voice extra (torch, CUDA, ~6 GB) stays out: the
