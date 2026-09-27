@@ -84,7 +84,8 @@ with the wake word on): `"wake"` (the default) means say "Vision" — a tiny CPU
 over Vision's own voice, so it works on speakers, and "Vision, what about Mars?" runs straight away, while
 "Vision" alone stops it and it listens; `"speech"` means just start talking (a quarter second of voice
 cuts in, so it needs headphones or PipeWire echo cancellation: `pactl load-module module-echo-cancel`,
-then `input_device = "echo-cancel"`); `"off"` leaves it to Esc / Ctrl-C.
+then `input_device = "echo-cancel"`; on Windows Vision cancels its own voice itself, `[listen] echo_cancel`);
+`"off"` leaves it to Esc / Ctrl-C.
 Typing `/` pops up the command menu above the input box and it narrows as you type (`/mo` → `/model`);
 ↑/↓ choose, Enter runs the highlighted command, Tab fills it in, Esc hides the menu. After a command
 that takes an argument (`/model `, `/effort `, `/voice `, `/session `) the menu switches to its choices.

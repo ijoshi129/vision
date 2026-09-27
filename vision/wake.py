@@ -164,6 +164,8 @@ class WakeListener:
                         )
                     continue
                 last = time.monotonic()
+                if hasattr(mic, "clean"):
+                    pcm = mic.clean(pcm)  # every frame, paused or not, so the echo canceller keeps its place
                 if paused is not None and paused():
                     if started or frames or preroll:
                         reset()

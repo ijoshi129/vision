@@ -88,6 +88,16 @@ Tested on the machine above:
 - **Blocking other brains.** A Claude shell cannot start `claude`, `codex` or `grok`. There are `.cmd` shims for
   cmd/PowerShell and `#!/bin/sh` shims for Git Bash.
 - **Clipboard copy** from the chat screen, through the Windows clipboard API.
+- **Echo cancellation.** Windows has no PipeWire echo-cancel module, so Vision cancels its own voice itself.
+  Every block it plays is fed to WebRTC's echo canceller (the `livekit` package, part of the voice
+  extra), and the microphone's audio passes through it before the voice detector, the wake word and
+  Whisper hear it.
+  - **Tested through speakers:** in an acoustic loop, its own voice came back about 27 dB quieter, and the voice
+    detector stopped mistaking it for you. A second voice in the room still came through and was
+    transcribed word for word.
+  - **The first reply:** the canceller learns the room from the first second or two of Vision talking, so the very
+    first reply of a session can still cut itself off with `barge_in = "speech"`; later ones don't.
+  - **Settings:** `[listen] echo_cancel = "auto"` (on for Windows) / `"on"` / `"off"`.
 
 Ported, but not tested on real installs:
 
@@ -118,8 +128,6 @@ Ported, but not tested on real installs:
   - Grok always runs with `--always-approve`, and its sandbox is Linux/macOS kernel machinery.
   - Rather than run "read-only" with nothing enforcing it, Vision says so and does not run the turn.
   - Grok in auto mode with `sandbox = "off"` is allowed (the same as the Linux default), but untested.
-- **Echo cancellation: none.** There is no PipeWire echo-cancel module on Windows. Use headphones, or keep
-  `barge_in = "wake"` so only the wake word interrupts a reply.
 - **Hiding the command line in the process list** (`proctitle`): Linux only, and harmless to skip.
 
 ## Known issues
