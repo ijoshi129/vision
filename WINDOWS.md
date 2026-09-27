@@ -18,6 +18,16 @@ You need:
 - **uv.** Install it with `winget install astral-sh.uv`.
 - **For voice:** an NVIDIA GPU with 8 GB+ and a driver new enough for CUDA 13.
 
+The quick way, from a clone, is the setup script. It installs uv for your user if it is missing (after
+asking), needs no administrator rights, and is safe to re-run:
+
+```powershell
+git clone https://github.com/domdevz/vision.git; cd vision
+powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1 -All -AddToPath   # or -Voice, -Serve; nothing for text only
+```
+
+The same by hand:
+
 ```powershell
 git clone https://github.com/domdevz/vision.git; cd vision
 uv venv --python 3.12 .venv
