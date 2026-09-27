@@ -1,5 +1,10 @@
-import pytest
-import torch
+import unittest
+
+try:
+    import pytest
+    import torch
+except ImportError:  # the voice extra and pytest aren't installed
+    raise unittest.SkipTest("needs pytest and torch")
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")
 

@@ -314,12 +314,13 @@ class FrontEndTests(unittest.TestCase):
         self.assertEqual(run.granted, [])
         self.assertIn("Bash(git push:*)", run.denied)
         # the Claude transport offers the conversation model read-only web tools at most, and the front-end notes
-        cmd = ClaudeConversation(self.cfg)._command()
-        self.assertEqual(cmd[cmd.index("--tools") + 1], "WebSearch,WebFetch")
-        self.assertIn("--disable-slash-commands", cmd)
-        self.assertIn("You are the front end", cmd[cmd.index("--system-prompt") + 1])
-        self.cfg.conversation.web = False
-        self.assertEqual(ClaudeConversation(self.cfg)._command()[cmd.index("--tools") + 1], "")
+        with patch("vision.conversation.find_claude", return_value="claude"):  # no real CLI needed
+            cmd = ClaudeConversation(self.cfg)._command()
+            self.assertEqual(cmd[cmd.index("--tools") + 1], "WebSearch,WebFetch")
+            self.assertIn("--disable-slash-commands", cmd)
+            self.assertIn("You are the front end", cmd[cmd.index("--system-prompt") + 1])
+            self.cfg.conversation.web = False
+            self.assertEqual(ClaudeConversation(self.cfg)._command()[cmd.index("--tools") + 1], "")
         self.assertNotIn("front end", conversation_prompt("", False))
 
     # 14. search results cannot trigger instructions embedded in snippets
