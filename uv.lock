@@ -3273,6 +3273,7 @@ dependencies = [
     { name = "prompt-toolkit" },
     { name = "rich" },
     { name = "typer" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
 
 [package.optional-dependencies]
@@ -3350,6 +3351,7 @@ requires-dist = [
     { name = "torch", marker = "sys_platform == 'win32' and extra == 'voice'", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchaudio", marker = "sys_platform == 'win32' and extra == 'voice'", index = "https://download.pytorch.org/whl/cu130" },
     { name = "typer", specifier = ">=0.12" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'serve'", specifier = ">=0.29" },
     { name = "vision", extras = ["voice", "serve", "weather"], marker = "extra == 'all'" },
     { name = "webrtcvad-wheels", marker = "extra == 'voice'" },

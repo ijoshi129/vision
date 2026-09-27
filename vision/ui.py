@@ -1115,7 +1115,10 @@ WHEEL_LINES = 3  # transcript lines per mouse-wheel notch
 def render_ansi(renderable, width: int) -> str:
     """Render a rich renderable to an ANSI string at the given width."""
     buf = io.StringIO()
-    c = Console(file=buf, width=max(20, width), force_terminal=True, color_system="truecolor", highlight=False, soft_wrap=False)
+    # legacy_windows=False: this renders to a string for prompt_toolkit, so rich's old-console fallbacks
+    # (square boxes instead of rounded ones) never apply, whatever the process's stdout is.
+    c = Console(file=buf, width=max(20, width), force_terminal=True, color_system="truecolor", highlight=False,
+                soft_wrap=False, legacy_windows=False)
     c.print(renderable)
     return buf.getvalue()
 
@@ -1681,7 +1684,11 @@ def _private_output():
             # A dup'd fd would be written byte-wise in the console's code page (mojibake); CONOUT$ is a
             # console stream of its own, Unicode like sys.stdout and untouched by fd 1's redirection.
             if not sys.stdout.isatty():
-                return None
+                # prompt_toolkit would still want a console here (NoConsoleScreenBufferError); elsewhere
+                # a non-terminal stdout gets plain text, so give Windows the same.
+                from prompt_toolkit.output.plain_text import PlainTextOutput
+
+                return PlainTextOutput(sys.stdout)
             tty = open("CONOUT$", "w", encoding="utf-8", errors="replace")
         else:
             tty = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding=sys.stdout.encoding or "utf-8", errors="replace")
