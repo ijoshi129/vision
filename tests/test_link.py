@@ -210,13 +210,15 @@ class LinkTests(unittest.TestCase):
              patch.object(server.Hub, "LINK_POLL", 0.1), \
              patch("vision.sessions.session_history", lambda provider, sid: []):
             term = _Terminal()
-            term.host.start()
             hub = self._hub()
             copy = next(iter(hub.chats.values()))
             copy.brain.session_id = term.session
             try:
                 with TestClient(server.create_app(hub)) as tc, tc.websocket_connect("/ws?token=tok") as ws:
                     ws.receive_json()
+                    # Only now: the first sweep can find the terminal and close the copy before this socket
+                    # connects, and a frame posted to no one is never seen here.
+                    term.host.start()
                     seen = self._drain(ws, lambda ev, _: ev["type"] == "chat_closed")
                     tid = next(e["chat"] for e in seen if e["type"] == "chat" and e.get("source") == "terminal")
                     self.assertEqual(seen[-1], {"type": "chat_closed", "chat": copy.id, "moved_to": tid})
