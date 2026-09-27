@@ -1217,22 +1217,18 @@ class ToolRowTests(unittest.TestCase):
         out = console.file.getvalue()
         self.assertIn("⠋ Grep(load_config  in ~/Repos/vision)", out)
         self.assertIn("⏺ Bash(git status --short)", out)
-        self.assertNotIn("file0.py", out)  # none of the result until a click: just how much there is
-        self.assertIn("  ⎿  5 lines · click to expand", out)
+        self.assertNotIn("file0.py", out)  # none of the result until a click
         self.assertIn("⏺ Read(~/nope)", out)
         self.assertNotIn("File does not exist.", out)  # even a one-line result stays behind the click
-        self.assertIn("  ⎿  1 line · click to expand", out)
-        self.assertIn("  ⎿  (no output)", out)  # nothing to show: no hint either
-        self.assertEqual(out.count("click to expand"), 2)
-        # expanded: the whole result, then the way back
+        self.assertNotIn("⎿", out)  # one row per call, nothing under it
+        self.assertEqual(len(out.strip().splitlines()), 4)
+        # expanded: the whole result under its row
         console = Console(width=70, force_terminal=False, file=io.StringIO())
         console.print(tool_activity([done, failed], "⠋", expanded={"b"}))
         out = console.file.getvalue()
         self.assertIn("  ⎿   M file0.py", out)
         self.assertIn("      M file4.py", out)
-        self.assertIn("     click to show less", out)
-        self.assertIn("  ⎿  1 line · click to expand", out)  # the other call is still folded
-        self.assertEqual(out.count("click to expand"), 1)
+        self.assertNotIn("File does not exist.", out)  # the other call is still folded
 
 
     def test_click_on_a_tool_row_expands_and_collapses_its_result(self):
@@ -1255,7 +1251,6 @@ class ToolRowTests(unittest.TestCase):
         rows = e.lines(80)
         text = plain(rows)
         self.assertTrue(any("Bash(ls)" in t for t in text))
-        self.assertTrue(any("6 lines · click to expand" in t for t in text))
         self.assertFalse(any("line0" in t for t in text))  # nothing of the result until a click
         # every fragment of the tool rows carries the handler; the reply text's do not
         handlers = list({f[2] for r in rows if "Bash(ls)" in "".join(f[1] for f in r) for f in r if len(f) == 3})
@@ -1269,11 +1264,11 @@ class ToolRowTests(unittest.TestCase):
         self.assertEqual(redraws, [1])
         text = plain(e.lines(80))
         self.assertTrue(all(any(f"line{i}" in t for t in text) for i in range(6)))
-        self.assertTrue(any("click to show less" in t for t in text))
+        # the result's rows carry the handler too, so a click on them folds it back
+        self.assertTrue(all(len(f) == 3 for r in e.lines(80) if any("line3" in f[1] for f in r) for f in r))
         handler(click(MouseEventType.MOUSE_UP))
         text = plain(e.lines(80))
         self.assertFalse(any("line0" in t for t in text))
-        self.assertTrue(any("click to expand" in t for t in text))
 
     def test_tool_summary_counts_calls_by_kind(self):
         from vision.brain import ToolCall
@@ -1366,7 +1361,6 @@ class ToolRowTests(unittest.TestCase):
             "● Steam is the monster.",
             "",
             "⏺ Bash(du -sh ~/.steam)",
-            "  ⎿  1 line · click to expand",
             "",
             "● Uninstall CS:GO.",
         ])
@@ -1458,7 +1452,7 @@ class ToolRowTests(unittest.TestCase):
         handler(click)
         rows = e.lines(80)
         self.assertEqual(len(rows), folded)
-        self.assertTrue(any("click to expand" in t for t in plain(rows)))
+        self.assertFalse(any("line0" in t or "⎿" in t for t in plain(rows)))
         self.assertTrue(plain(rows)[-1].strip())  # the live `thinking…` line is last, not padding
         self.assertEqual(e._floor[80], folded - 1)  # the floor tracks the new height from here (less the blank line above the reply)
 

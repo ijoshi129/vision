@@ -321,15 +321,17 @@ class RemoteBrain:
                 # for the screen to pick up once connect() returns (see pending_turn).
                 self._incoming = mine["user_text"]
                 self._frames.put({"type": "start", "text": mine["user_text"]})
-                # What has streamed so far, with the agent rows slotted in where each started (`at`),
-                # their timers running from their real start.
+                # What has streamed so far, with the agent rows and tool calls slotted in where each
+                # started (`at`), agent timers running from their real start.
                 partial, pos = mine.get("partial") or "", 0
-                for frame in sorted(mine.get("agents") or [], key=lambda a: a.get("at", 0)):
+                rows = [{**f, "type": "agent"} for f in mine.get("agents") or []]
+                rows += [{**f, "type": "tool"} for f in mine.get("tools") or []]
+                for frame in sorted(rows, key=lambda a: int(a.get("at") or 0)):  # stable: agents first on a tie
                     at = min(max(pos, int(frame.get("at") or 0)), len(partial))
                     if at > pos:
                         self._frames.put({"type": "delta", "text": partial[pos:at]})
                         pos = at
-                    self._frames.put({**frame, "type": "agent"})
+                    self._frames.put(frame)
                 if partial[pos:]:
                     self._frames.put({"type": "delta", "text": partial[pos:]})
                 if mine.get("waiting") and mine.get("questions"):

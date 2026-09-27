@@ -297,12 +297,11 @@ def _one_row() -> Text:
 
 
 def tool_activity(calls, spin: str = "", expanded: set | None = None) -> Group:
-    """The main conversation's tool calls, drawn as Claude Code draws its own: `⏺ Bash(git status)`
-    (a spinner while it runs, a red dot when it failed), then under a `⎿` only how much came back,
-    `12 lines · click to expand`, until a click puts the call's id in `expanded`, which shows the
-    whole result (see _ReplyEntry.lines). None of the work is shown otherwise. Once the reply is
-    done the block folds to one summary row (tool_fold). Lines are truncated, not wrapped, so a long
-    command or output line stays one row."""
+    """The main conversation's tool calls, one row each: `⏺ Bash(git status)` (a spinner while it
+    runs, a green dot once done, a red one when it failed). A click on the row puts the call's id in
+    `expanded`, which shows the whole result under a `⎿` (see _ReplyEntry.lines); nothing sits under
+    it otherwise. Once the reply is done the block folds to one summary row (tool_fold). Lines are
+    truncated, not wrapped, so a long command or output line stays one row."""
     text = _one_row()
     expanded = expanded or set()
     for call in list(calls):
@@ -314,21 +313,16 @@ def tool_activity(calls, spin: str = "", expanded: set | None = None) -> Group:
         if call.detail:
             text.append(f"({call.detail})", style="dim")
         text.append("\n")
-        if call.done:
+        if call.done and call.id in expanded:
             lines = [ln for ln in call.output.splitlines() if ln.strip()]
             body_style = "red" if call.is_error else "dim"
             text.append("  ⎿  ", style="dim")
             if not lines:
-                # Nothing to show or hide: say so on the result row and leave it at that.
                 text.append(("(error)" if call.is_error else "(no output)") + "\n", style=body_style)
-            elif call.id not in expanded:
-                text.append(f"{len(lines)} line{'s' if len(lines) != 1 else ''} · click to expand\n", style="dim italic")
-            else:
-                for i, ln in enumerate(lines):
-                    if i:
-                        text.append("     ", style="dim")
-                    text.append(ln.rstrip() + "\n", style=body_style)
-                text.append("     click to show less\n", style="dim italic")
+            for i, ln in enumerate(lines):
+                if i:
+                    text.append("     ", style="dim")
+                text.append(ln.rstrip() + "\n", style=body_style)
     text.rstrip()
     return Group(text)
 
@@ -1402,6 +1396,18 @@ class _ReplyEntry(_Entry):
         if item.id not in table:
             self.marks.append((len(self.buf), item))
         table[item.id] = item
+
+    def take_running_agents(self) -> list:
+        """Unmark the subagents still at work and hand them back (see ChatScreen.split_reply)."""
+        running = [r for r in self.agents.values() if not r.done]
+        if running:
+            ids = {r.id for r in running}
+            self.marks = [m for m in self.marks if _is_tool(m[1]) or m[1].id not in ids]
+            for i in ids:
+                del self.agents[i]
+            self._floor.clear()
+            self.invalidate()
+        return running
 
     def reveal_all(self) -> None:
         self.shown = 1 << 30
@@ -2583,11 +2589,30 @@ class ChatScreen:
         threading.Thread(target=self._pace, args=(e,), daemon=True).start()
         return e
 
+    def add_past_reply(self, text: str, marks: list[tuple[int, object]], markdown: bool = True) -> _ReplyEntry:
+        """Restore a finished reply with its tool and agent rows at their original text offsets."""
+        e = _ReplyEntry(markdown)
+        e.on_click = self.app.invalidate
+        e.buf = text
+        e.marks = sorted(((min(max(0, at), len(text)), item) for at, item in marks), key=lambda m: m[0])
+        e.tools = {item.id: item for _, item in e.marks if _is_tool(item)}
+        e.agents = {item.id: item for _, item in e.marks if not _is_tool(item)}
+        e.finished = e.done = True
+        e.ended = time.monotonic()
+        e.reveal_all()
+        with self._lock:
+            self.entries.append(e)
+        self.scroll_top = None
+        self.app.invalidate()
+        return e
+
     def split_reply(self, e: _ReplyEntry, *renderables) -> _ReplyEntry:
         """Close reply `e`, put `renderables` under it and open a fresh reply for what follows: a
         question's answer is a transcript block of its own (as in Claude Code), not a line inside
         the reply. A reply that had not said anything yet is dropped rather than left behind as a
-        stray empty block."""
+        stray empty block. Subagents still at work (a workflow's, a background Agent's) go with the
+        fresh reply: left in `e`, their rows would fold away with it the moment it closes."""
+        running = e.take_running_agents()
         with self._lock:
             dropped = not e.buf.strip() and not e.agents and not e.tools and e in self.entries
             if dropped:
@@ -2595,7 +2620,10 @@ class ChatScreen:
         self.end_reply(e)
         for i, r in enumerate(renderables):
             self.add(r, gap_before=dropped and i == 0)  # a finished reply already ends in a blank line
-        return self.start_reply(markdown=e.markdown)
+        fresh = self.start_reply(markdown=e.markdown)
+        for run in running:
+            fresh.place(run)
+        return fresh
 
     def update_reply(self, e: _ReplyEntry, delta: str = "", status: str | None = None, agent=None, tool=None, force: bool = False) -> None:
         if delta and not e.buf:

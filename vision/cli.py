@@ -19,7 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from vision import __version__
-from vision.brain import BrainError, agent_frame, cache_figure, context_figure
+from vision.brain import BrainError, agent_frame, cache_figure, context_figure, tool_frame
 from vision.buddy import Buddy
 from vision.warmup import WarmupProgress, warm_voice
 from vision import usage as usage_ui
@@ -929,31 +929,28 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             if turn["role"] == "user":
                 screen.add(user_grid(turn["text"]), gap_before=True)
             else:
-                screen.add(reply_grid(turn["text"]))
-                if turn.get("agents"):
-                    screen.add(past_agents(turn["agents"]))
+                marks = past_marks(turn)
+                if marks:
+                    screen.add_past_reply(turn["text"], marks)
+                else:
+                    screen.add(reply_grid(turn["text"]))
 
-    def past_agents(frames: list[dict]):
-        """A past reply's subagents (kept by vision.agentlog): their rows, or one summary line for a
-        batch of more than three, as the phone folds them."""
-        from rich.text import Text
-
-        from vision.brain import run_from_frame
+    def past_marks(turn: dict) -> list[tuple[int, object]]:
+        """Rebuild the rows a past reply ran, in the order they appeared beside its text."""
+        from vision.brain import ToolCall, run_from_frame
         from vision.remote import RemoteAgentRun
-        from vision.ui import agent_activity, tool_summary
 
-        runs = []
-        for f in frames:
+        marks = []
+        for f in turn.get("agents") or []:
             run = run_from_frame({**f, "done": True}, RemoteAgentRun(f.get("id", ""), "agent", ""))
             run.failed, run.cut_off = bool(f.get("failed")), bool(f.get("cut_off"))
             run.status_text = f.get("status") or ""
-            runs.append(run)
-        if len(runs) <= 3:
-            return agent_activity(runs)
-        line = Text(no_wrap=True, overflow="ellipsis")
-        line.append("⏺ ", style="red" if any(r.failed for r in runs) else "green")
-        line.append(tool_summary(runs), style="dim")
-        return line
+            marks.append((int(f.get("at") or 0), run))
+        for f in turn.get("tools") or []:
+            call = ToolCall(f.get("id", ""), f.get("name", ""), f.get("detail", ""), done=True,
+                            is_error=bool(f.get("is_error")), output=f.get("output") or "")
+            marks.append((int(f.get("at") or 0), call))
+        return marks
 
     if brain.session_id:  # --continue: the picked-up conversation is on screen from the start
         show_history(brain.provider, brain.session_id)
@@ -994,7 +991,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
 
         streamed = []  # the reply as it streamed (where steered messages split it, what agents keep)
         homes = {}  # agent id → the reply entry its row lives in (a steered message splits the reply)
+        tool_homes = {}  # a call that finishes after a split still belongs to its starting reply
         agent_frames = {}
+        tool_frames = {}
         steers = []
 
         def on_text(d):
@@ -1047,10 +1046,12 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             return answers
 
         def on_agent(run):
+            if run.id in entry.agents:  # still at work when a question or steer split the reply: it moved down
+                homes[run.id] = entry
             home = homes.setdefault(run.id, entry)
             if home is entry:
                 screen.update_reply(entry, agent=run)
-            else:  # it started before a steered message split the reply: its row stays up there
+            else:  # it finished before a question or steered message split the reply: its row stays up there
                 home.invalidate()
                 screen.app.invalidate()
             frame = agent_frame(run)
@@ -1059,7 +1060,17 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             link_post(dict(frame))
 
         def on_tool(call):
-            screen.update_reply(entry, tool=call)
+            home = tool_homes.setdefault(call.id, entry)
+            if home is entry:
+                screen.update_reply(entry, tool=call)
+            else:
+                home.place(call)
+                home.invalidate()
+                screen.app.invalidate()
+            frame = tool_frame(call)
+            frame["at"] = tool_frames.get(call.id, {}).get("at", len("".join(streamed)))
+            tool_frames[call.id] = frame
+            link_post(dict(frame))  # the phone draws it as a row too
 
         turn = None
         cancelled = False
@@ -1083,14 +1094,15 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 buddy.fail()
         finally:
             state["driver"] = state["steered"] = None
-            if agent_frames and not joined():
+            if (agent_frames or tool_frames) and not joined():
                 # The rows stay with the conversation (the server keeps a joined chat's itself).
                 from vision import agentlog
 
                 reply = (turn.text if turn is not None else "") or ""
                 try:
                     agentlog.record_turn(brain.provider, (turn.session_id if turn is not None else None) or brain.session_id,
-                                         agentlog.turn_entries(text, reply, "", "".join(streamed), list(agent_frames.values()), steers))
+                                         agentlog.turn_entries(text, reply, "", "".join(streamed), list(agent_frames.values()), steers,
+                                                               list(tool_frames.values())))
                 except Exception:  # noqa: BLE001  (a history nicety must never break a turn)
                     pass
             link_post({
@@ -3047,13 +3059,14 @@ def serve(
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     effort: Optional[str] = typer.Option(None, "--effort"),
     voice: Optional[str] = typer.Option(None, "--voice", "-v"),
-    new: bool = typer.Option(False, "--new", help="Start a fresh conversation instead of continuing the last one."),
+    cont: bool = typer.Option(False, "--continue", "-c", help="Continue the last Vision conversation."),
+    new: bool = typer.Option(False, "--new", help="Open a fresh chat on startup."),
 ):
     """Serve Vision to the Vision Remote iOS app (chat + voice over HTTP/WebSocket). Pair by scanning the QR code."""
     from vision.server import TOKEN_FILE, pairing_info, qr_lines, serve as run_server
 
     cfg = _cfg(model, voice, effort)
-    brain = _brain(cfg, voice_mode=False, cont=True, new=new)
+    brain = _brain(cfg, voice_mode=False, cont=cont, new=new)
     info = pairing_info(cfg, host, port, public_url, regenerate_token=new_token)
     show_header(
         console,
@@ -3083,7 +3096,7 @@ def serve(
     def log(msg: str):
         console.print(Text("  " + msg, style="dim"))
 
-    run_server(cfg, brain, info, log=log, follow_defaults=not (model or effort))
+    run_server(cfg, brain, info, log=log, follow_defaults=not (model or effort), open_initial=cont or new)
 
 
 # ---------------------------------------------------------------- setup / doctor / config

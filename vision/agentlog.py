@@ -1,4 +1,4 @@
-"""The subagent rows of past replies, kept with the conversation so they are still there after a
+"""The subagent and tool rows of past replies, kept with the conversation so they are still there after a
 restart, a reconnect or on the other device.
 
 Claude Code's transcript has the Agent calls but not a workflow's agents, and Codex and Grok keep
@@ -30,9 +30,10 @@ def _key(text: str) -> str:
     return " ".join((text or "").split())[:KEY_CHARS]
 
 
-def record(provider: str, session_id: str | None, user_text: str, reply: str, agents: list[dict]) -> None:
-    """Keep one reply's agent rows. Rows still running are saved as cut off: nothing will finish them."""
-    if not session_id or not agents:
+def record(provider: str, session_id: str | None, user_text: str, reply: str, agents: list[dict],
+           tools: list[dict] | None = None) -> None:
+    """Keep one reply's rows. Agent rows still running are saved as cut off."""
+    if not session_id or not (agents or tools):
         return
     rows = []
     for frame in agents:
@@ -40,7 +41,8 @@ def record(provider: str, session_id: str | None, user_text: str, reply: str, ag
         if not row.get("done"):
             row.update({"done": True, "failed": True, "cut_off": True})
         rows.append(row)
-    line = json.dumps({"t": time.time(), "user": _key(user_text), "reply": _key(reply), "agents": rows})
+    calls = [{k: v for k, v in frame.items() if k not in ("chat", "type")} for frame in tools or []]
+    line = json.dumps({"t": time.time(), "user": _key(user_text), "reply": _key(reply), "agents": rows, "tools": calls})
     try:
         with _lock:
             AGENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -62,13 +64,13 @@ def load(provider: str, session_id: str) -> list[dict]:
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(entry, dict) and entry.get("agents"):
+        if isinstance(entry, dict) and (entry.get("agents") or entry.get("tools")):
             out.append(entry)
     return out
 
 
 def attach(history: list[dict], provider: str, session_id: str) -> list[dict]:
-    """Give each assistant message of `history` the agent rows kept for it (an `agents` list),
+    """Give each assistant message of `history` the rows kept for it (`agents` and `tools`),
     matching kept replies to messages in order. Messages that already carry rows keep them."""
     kept = load(provider, session_id) if session_id else []
     if not kept or not history:
@@ -85,30 +87,36 @@ def attach(history: list[dict], provider: str, session_id: str) -> list[dict]:
             if (reply and text.startswith(reply[:KEY_CHARS]) and text) or (
                 not reply and before is not None and _key(before.get("text") or "").endswith(user[-80:]) and user
             ):
-                if not m.get("agents"):
-                    m["agents"] = entry["agents"]
+                for kind in ("agents", "tools"):
+                    if entry.get(kind) and not m.get(kind):
+                        m[kind] = entry[kind]
                 start = i + 1
                 break
     return history
 
 
-def assistant_entry(reply: str, error: str, agents: list[dict] | None = None) -> dict:
+def assistant_entry(reply: str, error: str, agents: list[dict] | None = None, tools: list[dict] | None = None) -> dict:
     """A transcript row that keeps a failed turn's error, so a /history refetch (the phone does one
     right after `done`) does not replace the failure bubble with an empty reply, and the reply's
-    subagent rows (`agents`, agent frames with `at`)."""
+    subagent rows (`agents`, agent frames with `at`) and tool calls (`tools`, tool frames with `at`;
+    kept with the session)."""
     entry = {"role": "assistant", "text": reply}
     if error and error != "cancelled":
         entry["error"] = error
     if agents:
         entry["agents"] = [{k: v for k, v in a.items() if k != "chat"} for a in agents]
+    if tools:
+        entry["tools"] = [{k: v for k, v in t.items() if k not in ("chat", "type")} for t in tools]
     return entry
 
 
-def turn_entries(user_text: str, reply: str, error: str, partial: str, agents: list[dict], steers: list[tuple]) -> list[dict]:
+def turn_entries(user_text: str, reply: str, error: str, partial: str, agents: list[dict], steers: list[tuple],
+                 tools: list[dict] | None = None) -> list[dict]:
     """One turn's transcript rows: the message and its reply, the reply split where messages were
-    sent into it (steered), each part with the agent rows that started in it (`at` made relative).
-    `steers`: (reply characters so far, text, how many agent rows existed then), in order; `agents`
-    in the order they started."""
+    sent into it (steered), each part with the agent rows and tool calls that started in it (`at`
+    made relative). `steers`: (reply characters so far, text, how many agent rows existed then), in
+    order; `agents` in the order they started. A tool call goes to the part its `at` falls in."""
+    tools = tools or []
     rows: list[dict] = [{"role": "user", "text": user_text}]
     # The split points count characters of the streamed reply; a reply that arrived otherwise stays whole.
     cuts = [(s[0], s[1], s[2] if len(s) > 2 else len(agents)) for s in steers if 0 <= s[0] <= len(reply)] if reply == partial else []
@@ -116,7 +124,9 @@ def turn_entries(user_text: str, reply: str, error: str, partial: str, agents: l
     for i in range(len(bounds) - 1):
         (lo, first), (hi, end), last = bounds[i], bounds[i + 1], i == len(bounds) - 2
         mine = [{**a, "at": max(0, a.get("at", 0) - lo)} for a in agents[first:end]]
-        rows.append(assistant_entry(reply[lo:hi].strip(), error if last else "", mine))
+        calls = [{**t, "at": max(0, t.get("at", 0) - lo)} for t in tools
+                 if lo <= t.get("at", 0) and (last or t.get("at", 0) < hi)]
+        rows.append(assistant_entry(reply[lo:hi].strip(), error if last else "", mine, calls))
         if not last:
             rows.append({"role": "user", "text": cuts[i][1]})
     if not cuts and reply != partial:
@@ -125,10 +135,10 @@ def turn_entries(user_text: str, reply: str, error: str, partial: str, agents: l
 
 
 def record_turn(provider: str, session_id: str | None, entries: list[dict]) -> None:
-    """Keep each reply part's agent rows with the conversation (vision.agentlog)."""
+    """Keep each reply part's agent and tool rows with the conversation."""
     user = ""
     for row in entries:
         if row.get("role") == "user":
             user = row.get("text") or ""
-        elif row.get("agents"):
-            record(provider, session_id, user, row.get("text") or "", row["agents"])
+        elif row.get("agents") or row.get("tools"):
+            record(provider, session_id, user, row.get("text") or "", row.get("agents") or [], row.get("tools") or [])

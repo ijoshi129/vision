@@ -358,6 +358,10 @@ contribution breakdown, or Grok's per-product split, when available.
 
 ## Remote (`vision serve`)
 
+`vision serve` starts with no chat open. The phone can open a new chat with its first message or
+the new-chat button. Use `--new` to open a fresh chat at startup, or `--continue` to reopen the
+last conversation for the selected model's provider.
+
 `vision serve` puts the brain, ears and voice behind an HTTP + WebSocket server on port 8765
 for a remote client (the author's **Vision Remote** iPhone app, which is not part of this repository): text chat with streamed replies, dictation
 through the laptop's Whisper, replies read aloud sentence by sentence through the voice engine, AskUserQuestion

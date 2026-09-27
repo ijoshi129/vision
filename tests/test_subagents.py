@@ -107,6 +107,23 @@ class AgentLogTests(_Tmp):
         self.assertEqual([[a["id"] for a in r.get("agents", [])] for r in rows if r["role"] == "assistant"], [["a1"], ["a2"]])
         self.assertEqual(rows[3]["agents"][0]["at"], 12)  # relative to its own part
 
+    def test_tool_calls_go_to_the_part_they_ran_in(self):
+        reply = "Looking at it now.Right, the other file then."
+        tools = [{"type": "tool", "id": "t1", "name": "Read", "at": 0}, {"type": "tool", "id": "t2", "name": "Bash", "at": 44}]
+        rows = agentlog.turn_entries("check brain.py", reply, "", reply, [], [(18, "use cli.py instead", 0)], tools)
+        self.assertEqual([[t["id"] for t in r.get("tools", [])] for r in rows if r["role"] == "assistant"], [["t1"], ["t2"]])
+        self.assertEqual(rows[3]["tools"][0], {"id": "t2", "name": "Bash", "at": 26})  # relative, and no wire `type`
+
+    def test_tool_rows_survive_a_history_reload(self):
+        tools = [{"type": "tool", "id": "t1", "name": "Bash", "detail": "git status", "at": 8,
+                  "done": True, "output": "clean"}]
+        entries = agentlog.turn_entries("check the repo", "Checking. All clean.", "", "Checking. All clean.", [], [], tools)
+        agentlog.record_turn("claude", "s-tools", entries)
+        history = [{"role": "user", "text": "check the repo"}, {"role": "assistant", "text": "Checking. All clean."}]
+        agentlog.attach(history, "claude", "s-tools")
+        self.assertEqual(history[1]["tools"], [{"id": "t1", "name": "Bash", "detail": "git status", "at": 8,
+                                                 "done": True, "output": "clean"}])
+
 
 if __name__ == "__main__":
     unittest.main()

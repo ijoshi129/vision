@@ -16,6 +16,11 @@ Wire format: one JSON object per line, both ways.
   server → terminal   hello · message {text, speak} · answer {answers} · cancel · model {model, effort} · quit
   terminal → server   chat {…summary…} on hello and whenever the state changes, then the same
                       frames a server-owned chat posts (start, delta, status, agent, question, done, note)
+
+A server that connects mid-reply (the phone chat opened late, or `vision serve` restarted during a
+long workflow) gets the reply so far replayed after the summary: start, the text, steers and answers
+in order, then every agent and tool row as it stands. Rows only post when they change, so without
+this the ones already finished never reached it.
 """
 from __future__ import annotations
 
@@ -100,6 +105,8 @@ class LinkHost:
         self._tcp = _TCP
         self._port: int | None = None
         self._secret: str | None = None
+        self._turn: list[dict] = []  # the running reply's frames, for a server that connects mid-reply
+        self._rows: dict[tuple[str, str], dict] = {}  # its agent and tool rows, newest frame of each
 
     # -- lifecycle
     def start(self) -> None:
@@ -164,6 +171,7 @@ class LinkHost:
     # -- outgoing
     def post(self, ev: dict) -> None:
         with self._lock:
+            self._remember(ev)
             if not self._clients:
                 return
             data = (json.dumps(ev) + "\n").encode()
@@ -179,6 +187,25 @@ class LinkHost:
                     c.close()
                 except OSError:
                     pass
+
+    def _remember(self, ev: dict) -> None:
+        """Keep the running reply replayable (under the lock, so a replay never misses or repeats a frame)."""
+        kind = ev.get("type")
+        if kind == "start":
+            self._turn, self._rows = [{**ev, "speak": False}], {}  # a replay never starts the voice
+        elif kind == "done":
+            self._turn, self._rows = [], {}
+        elif not self._turn:
+            return
+        elif kind in ("agent", "tool") and ev.get("id"):
+            self._rows[(kind, ev["id"])] = dict(ev)
+        elif kind == "delta" and self._turn[-1].get("type") == "delta":
+            self._turn[-1] = {**self._turn[-1], "text": self._turn[-1].get("text", "") + ev.get("text", "")}
+        elif kind in ("delta", "steered", "answered"):
+            self._turn.append(dict(ev))
+
+    def _replay(self) -> list[dict]:
+        return [*self._turn, *self._rows.values()] if self._turn else []
 
     def post_summary(self, force: bool = False) -> None:
         try:
@@ -234,8 +261,9 @@ class LinkHost:
                         continue
                     if frame.get("type") == "hello":
                         with self._lock:
+                            frames = [{"type": "chat", **self.summary()}, *self._replay()]
                             try:
-                                conn.sendall((json.dumps({"type": "chat", **self.summary()}) + "\n").encode())
+                                conn.sendall("".join(json.dumps(f) + "\n" for f in frames).encode())
                             except OSError:
                                 return
                         continue

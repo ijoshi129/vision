@@ -204,6 +204,57 @@ class JoinTests(unittest.TestCase):
                 for p in patches:
                     p.stop()
 
+    def test_joining_mid_reply_brings_the_tool_calls_already_run(self):
+        from vision.brain import ToolCall
+        from vision.config import BrainConfig
+
+        go_on = threading.Event()
+
+        class Tools(_StubBrain):
+            def ask(self, text, on_text=None, on_status=None, on_question=None, on_agent=None, on_tool=None):
+                self.session_id = "s1"
+                on_text("Looking. ")
+                call = ToolCall("t1", "Bash", "ls")
+                on_tool(call)
+                call.done, call.output = True, "a.py"
+                on_tool(call)
+                on_text("Found it.")
+                go_on.wait(5)
+                return _Turn("Looking. Found it.", "s1")
+
+        hub = _hub(Tools(BrainConfig()))
+        chat_id = next(iter(hub.chats))
+        with tempfile.TemporaryDirectory() as d:
+            patches = _quiet(d) + (patch("vision.agentlog.AGENTS_DIR", Path(d) / "agents"),)
+            for p in patches:
+                p.start()
+            try:
+                with _Live(hub) as info:
+                    phone = _Phone(info)
+                    phone.until(lambda ev: ev["type"] == "hello")
+                    phone.send({"type": "message", "chat": chat_id, "text": "find it"})
+                    phone.until(lambda ev: ev["type"] == "delta" and ev["text"] == "Found it.")
+                    rb = remote.RemoteBrain(info, {"chat": chat_id}, BrainConfig())
+                    rb.connect()
+                    order = []
+                    result = {}
+                    t = threading.Thread(target=lambda: result.update(turn=rb.ask(
+                        "find it", on_text=lambda d: order.append(("text", d)),
+                        on_tool=lambda c: order.append(("tool", c.id, c.done)))))
+                    t.start()
+                    for _ in range(50):
+                        if len(order) >= 3:
+                            break
+                        time.sleep(0.05)
+                    go_on.set()
+                    t.join(5)
+                    self.assertEqual(order[:3], [("text", "Looking. "), ("tool", "t1", True), ("text", "Found it.")])
+                    self.assertEqual(result["turn"].tools[0].output, "a.py")
+                    phone.close()
+            finally:
+                for p in patches:
+                    p.stop()
+
     def test_agents_keep_their_timers_across_a_join_and_a_steered_message_splits_the_reply(self):
         from vision.brain import AgentRun
         from vision.config import BrainConfig

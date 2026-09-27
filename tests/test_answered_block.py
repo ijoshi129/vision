@@ -78,6 +78,22 @@ class SplitReplyTests(unittest.TestCase):
     def _screen(self) -> ChatScreen:
         return _chat_screen(self)
 
+    def test_past_tool_calls_keep_their_place_and_can_be_opened(self):
+        from vision.brain import ToolCall
+
+        screen = self._screen()
+        call = ToolCall("t1", "Bash", "git status", done=True, output="clean")
+        entry = screen.add_past_reply("Checking. All clean.", [(10, call)])
+        self.assertIn("Ran 1 command", "".join(fragment[1] for row in entry.lines(80) for fragment in row))
+        entry.toggle_fold()
+        rows = entry.lines(80)
+        rendered = "".join(fragment[1] for row in rows for fragment in row)
+        self.assertLess(rendered.index("Checking."), rendered.index("Bash(git status)"))
+        self.assertLess(rendered.index("Bash(git status)"), rendered.index("All clean."))
+        entry.expanded.add("t1")
+        entry.invalidate()
+        self.assertIn("clean", "".join(fragment[1] for row in entry.lines(80) for fragment in row))
+
     def test_split_keeps_a_reply_that_said_something(self):
         s = self._screen()
         e = s.start_reply()
@@ -98,6 +114,23 @@ class SplitReplyTests(unittest.TestCase):
         self.assertNotIn(e, s.entries)
         self.assertTrue(s.entries[-2].gap_before)
         self.assertIs(s.entries[-1], n)
+
+    def test_split_carries_running_agents_into_the_fresh_reply(self):
+        """A workflow launched just before a question: its agents still at work must not fold away
+        with the reply the answer closes off."""
+        from vision.brain import AgentRun
+
+        s = self._screen()
+        e = s.start_reply()
+        s.update_reply(e, delta="Launching the analysts.")
+        done, running = AgentRun("w#1", "Analyse", "a", done=True), AgentRun("w#2", "Analyse", "b")
+        s.update_reply(e, agent=done)
+        s.update_reply(e, agent=running)
+        n = s.split_reply(e, answered_grid(QS[:1], {"Which library?": "dayjs"}))
+        self.assertEqual(list(e.agents), ["w#1"])
+        self.assertEqual([m[1].id for m in e.marks], ["w#1"])
+        self.assertIs(n.agents["w#2"], running)
+        self.assertEqual(n.marks, [(0, running)])
 
     def test_fresh_reply_ignores_the_leading_block_gap(self):
         s = self._screen()

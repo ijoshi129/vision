@@ -348,6 +348,16 @@ class ToolCall:
     output: str = ""  # the text the model got back (the UI shows it on a click)
 
 
+TOOL_OUTPUT_CHARS = 4000  # the tail of a tool result a `tool` frame carries (shown on a click or tap)
+
+
+def tool_frame(call: ToolCall) -> dict:
+    """The wire form of a main-conversation tool call: what the server sends the phone and a
+    terminal sends the server (the phone draws it as a row, as the terminal does)."""
+    return {"type": "tool", "id": call.id, "name": call.name, "detail": call.detail, "done": call.done,
+            "is_error": call.is_error, "output": (call.output or "")[-TOOL_OUTPUT_CHARS:]}
+
+
 def context_figure(brain) -> dict | None:
     """How full the chat's context is, `{"tokens": read, "window": size}`, for the phone's gauge
     and its switch-model warning. None for brains that don't report it (Codex, Grok) or before

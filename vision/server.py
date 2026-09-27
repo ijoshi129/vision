@@ -60,14 +60,13 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from vision import __version__
 from vision import agentlog
-from vision.brain import agent_frame, cache_figure, context_figure
+from vision.brain import agent_frame, cache_figure, context_figure, tool_frame
 from vision.config import CONFIG_DIR, Config, save_brain_defaults, saved_brain_defaults
 from vision.sessions import claude_history
 from vision.reply import status_label
 from vision.tts import SAMPLE_RATE, Speaker, StreamingSpeaker
 
 UPLOAD_DIR = Path.home() / ".local" / "share" / "vision" / "uploads"
-TOOL_OUTPUT_CHARS = 4000  # the tail of a tool result a `tool` frame carries (a terminal shows it on a click)
 
 
 def open_terminal(chat_id: str, workdir: str) -> str:
@@ -330,6 +329,7 @@ class Chat:
         # This turn's subagent rows as agent frames (with `at`, where in the reply each started): in the
         # summary while busy, so a phone that (re)connects mid-turn rebuilds them with their real timers.
         self.agents: dict[str, dict] = {}
+        self.tools: dict[str, dict] = {}  # …and its tool calls as tool frames, the same way
         self._steers: list[tuple] = []  # (reply chars so far, text, agent rows so far) of messages sent into this turn
         self._driver = None  # what answers this turn (the brain, or the conversation model on a call)
 
@@ -383,6 +383,7 @@ class Chat:
             "partial": self.partial if self.busy else "",
             "user_text": self.user_text if self.busy else "",
             "agents": list(self.agents.values()) if self.busy else [],
+            "tools": list(self.tools.values()) if self.busy else [],
             "created": self.created,
             "updated": self.updated,
         }
@@ -507,7 +508,7 @@ class Chat:
     async def _run_one_turn(self, text: str, speak: bool, voice: bool, talk: bool = False) -> None:
         loop = asyncio.get_running_loop()
         self.busy, self.partial, self.user_text = True, "", text
-        self.agents, self._steers = {}, []
+        self.agents, self.tools, self._steers = {}, {}, []
         self.updated = time.time()
         if not self.title:
             self.title = _title_from(text)
@@ -545,9 +546,11 @@ class Chat:
             self.post(dict(frame))
 
         def on_tool(call) -> None:
-            # The main conversation's tool calls, for a terminal following this chat (the phone shows `status`).
-            self.post({"type": "tool", "id": call.id, "name": call.name, "detail": call.detail, "done": call.done,
-                       "is_error": call.is_error, "output": (call.output or "")[-TOOL_OUTPUT_CHARS:]})
+            # The main conversation's tool calls, drawn as rows by the phone and a terminal following this chat.
+            frame = tool_frame(call)
+            frame["at"] = self.tools.get(call.id, {}).get("at", len(self.partial))
+            self.tools[call.id] = frame
+            self.post(dict(frame))
 
         def on_question(questions: list[dict]) -> dict[str, str] | None:
             fut: Future = Future()
@@ -586,7 +589,7 @@ class Chat:
             self.post({"type": "audio_end"})
         self._wire = None
         self._driver = None
-        entries = _turn_entries(text, reply, error, self.partial, list(self.agents.values()), self._steers)
+        entries = _turn_entries(text, reply, error, self.partial, list(self.agents.values()), self._steers, list(self.tools.values()))
         with self._lock:
             if self._transcript is None:
                 self._transcript = []
@@ -648,6 +651,7 @@ class LinkedChat:
         self._started = 0.0
         self.link = None
         self.agents: dict[str, dict] = {}  # this turn's agent rows, as Chat.agents (from the terminal's frames)
+        self.tools: dict[str, dict] = {}  # …and its tool calls, as Chat.tools
         self._steers: list[tuple] = []
 
     # -- what the hub reads
@@ -685,6 +689,7 @@ class LinkedChat:
             "history_id": self.history_id,
             "busy": self.busy,
             "agents": list(self.agents.values()) if self.busy else [],
+            "tools": list(self.tools.values()) if self.busy else [],
             "waiting": self.waiting,
             "questions": self._questions if self.waiting else [],
             "partial": self.partial if self.busy else "",
@@ -781,7 +786,7 @@ class LinkedChat:
             self._questions = []
         if kind == "start":
             self.busy, self.partial, self.user_text = True, "", ev.get("text", "")
-            self.agents, self._steers = {}, []
+            self.agents, self.tools, self._steers = {}, {}, []
             self.updated = self._started = time.time()
             if not self.title and self.user_text:
                 self.title = _title_from(self.user_text)
@@ -819,7 +824,8 @@ class LinkedChat:
                 self.post({"type": "audio_end"})
             reply = ev.get("text") or self.partial
             # (the terminal keeps the agent rows with the conversation itself: vision.agentlog)
-            entries = _turn_entries(self.user_text, reply, ev.get("error") or "", self.partial, list(self.agents.values()), self._steers)
+            entries = _turn_entries(self.user_text, reply, ev.get("error") or "", self.partial, list(self.agents.values()), self._steers,
+                                    list(self.tools.values()))
             with self._lock:
                 if self._transcript is None:
                     self._transcript = []
@@ -837,9 +843,14 @@ class LinkedChat:
             frame = {k: v for k, v in ev.items() if k != "chat"}
             frame["at"] = self.agents.get(ev["id"], {}).get("at", frame.get("at", len(self.partial)))
             self.agents[ev["id"]] = frame
+        elif kind == "tool" and ev.get("id"):
+            frame = {k: v for k, v in ev.items() if k != "chat"}
+            frame["at"] = self.tools.get(ev["id"], {}).get("at", frame.get("at", len(self.partial)))
+            self.tools[ev["id"]] = frame
+            ev = {**ev, "at": frame["at"]}
         elif kind == "steered":
             self._steers.append((len(self.partial), ev.get("text") or "", len(self.agents)))
-        self.post(ev)  # agent, steered, question, note, error: straight through
+        self.post(ev)  # agent, tool, steered, question, note, error: straight through
 
     def _seed(self) -> None:
         try:
@@ -852,7 +863,8 @@ class LinkedChat:
 class Hub:
     """Owns the chats, the speech models and the connected sockets."""
 
-    def __init__(self, cfg: Config, brain, token: str, log=print, follow_defaults: bool = False):
+    def __init__(self, cfg: Config, brain, token: str, log=print, follow_defaults: bool = False,
+                 open_initial: bool = True):
         self.cfg = cfg
         # New chats re-read the saved default model/effort, so /default elsewhere applies without a
         # restart. Off when `vision serve --model/--effort` pinned them for this run.
@@ -871,8 +883,9 @@ class Hub:
         from vision.scheduled import Schedule
 
         self.schedule = Schedule()
-        # The chat the CLI opened with (a continued session, unless `vision serve --new`).
-        self.open_chat(brain, copy.deepcopy(cfg))
+        # Only an explicit --new or --continue opens a chat at startup.
+        if open_initial:
+            self.open_chat(brain, copy.deepcopy(cfg))
 
     # -- chats
     def open_chat(self, brain=None, cfg: Config | None = None, title: str = "") -> Chat:
@@ -1099,6 +1112,23 @@ class Hub:
         if kind == "resume":
             await self.resume(ws, msg)
             return
+        if kind == "model" and not self.chats and not msg.get("chat"):
+            # The phone's model picker is usable before its first chat. Its choice becomes the
+            # default for the chat it opens when the first message arrives.
+            from vision.models import coerce_effort, find
+
+            model = str(msg.get("model") or "")
+            if not find(model):
+                await ws.send_json({"type": "error", "text": f"unknown model {model!r}"})
+                return
+            effort, _ = coerce_effort(model, str(msg.get("effort") or self.cfg.brain.effort or ""))
+            try:
+                save_brain_defaults(model, effort)
+            except Exception as e:  # noqa: BLE001
+                await ws.send_json({"type": "error", "text": f"could not save the model: {e}"})
+                return
+            self.cfg.brain.model, self.cfg.brain.effort = model, effort
+            return
         chat = self.chat(msg.get("chat"))
         if chat is None:
             await ws.send_json({"type": "error", "text": "that chat is gone"})
@@ -1264,7 +1294,12 @@ def create_app(hub: Hub) -> FastAPI:
     async def models(chat: str | None = None) -> dict:
         from vision.models import MODEL_TABS, effort_choices
 
-        c = chat_or_404(chat)
+        c = hub.chat(chat)
+        if c is None:
+            if chat:
+                raise HTTPException(status_code=404, detail="no such chat")
+            model, effort = (saved_brain_defaults() or (hub.cfg.brain.model, hub.cfg.brain.effort)) if hub.follow_defaults else (hub.cfg.brain.model, hub.cfg.brain.effort)
+            return defaults_payload(model, effort)
         tabs = [
             {"tab": tab, "models": [{"id": v, "label": label, "description": desc} for v, label, desc in entries]}
             for tab, entries, _ in MODEL_TABS
@@ -1627,12 +1662,14 @@ def pairing_info(cfg: Config, host: str | None, port: int | None, public_url: st
     return {"host": host, "port": port, "local": local, "url": url, "token": token, "payload": pairing_payload(url, token)}
 
 
-def serve(cfg: Config, brain, info: dict, log=print, follow_defaults: bool = True) -> None:
+def serve(cfg: Config, brain, info: dict, log=print, follow_defaults: bool = True,
+          open_initial: bool = False) -> None:
     import uvicorn
 
     from vision.remote import remove_serve_descriptor, write_serve_descriptor
 
-    hub = Hub(cfg, brain, info["token"], log=log, follow_defaults=follow_defaults)
+    hub = Hub(cfg, brain, info["token"], log=log, follow_defaults=follow_defaults,
+              open_initial=open_initial)
     try:
         write_serve_descriptor(info["host"], info["port"])
     except OSError as e:

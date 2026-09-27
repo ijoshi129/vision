@@ -69,6 +69,48 @@ class LinkTests(unittest.TestCase):
             self.assertEqual(link.list_links(), [])
             self.assertEqual(os.listdir(d), [])
 
+    def test_server_connecting_mid_reply_gets_the_reply_so_far(self):
+        # `vision serve` restarted during a workflow: the rows that had already finished never post
+        # again, so the terminal replays the running reply (text, steers, every row as it stands).
+        with tempfile.TemporaryDirectory() as d, patch.object(link, "LIVE_DIR", Path(d)):
+            term = _Terminal()
+            term.host.start()
+            try:
+                term.busy = True
+                post = term.host.post
+                post({"type": "start", "text": "port it", "speak": True})
+                post({"type": "delta", "text": "Starting "})
+                post({"type": "delta", "text": "the run."})
+                post({"type": "agent", "id": "wf#0", "label": "critic", "done": False, "at": 17})
+                post({"type": "agent", "id": "wf#0", "label": "critic", "done": True, "at": 17})
+                post({"type": "agent", "id": "wf#1", "label": "fill", "done": False, "at": 17})
+                post({"type": "steered", "text": "hurry up"})
+                post({"type": "delta", "text": " On it."})
+                post({"type": "tool", "id": "t1", "name": "Bash", "done": True, "at": 24})
+                info = link.list_links()[0]
+                if term.host._tcp:
+                    c = socket.create_connection(("127.0.0.1", info["port"]))
+                    hello = {"type": "hello", "secret": info["secret"]}
+                else:
+                    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    c.connect(info["sock"])
+                    hello = {"type": "hello"}
+                c.sendall((json.dumps(hello) + "\n").encode())
+                buf = b""
+                c.settimeout(2)
+                while buf.count(b"\n") < 8:
+                    buf += c.recv(65536)
+                c.close()
+                frames = [json.loads(line) for line in buf.decode().splitlines()]
+                self.assertEqual([f["type"] for f in frames], ["chat", "start", "delta", "steered", "delta", "agent", "agent", "tool"])
+                self.assertFalse(frames[1]["speak"])
+                self.assertEqual(frames[2]["text"], "Starting the run.")
+                self.assertEqual({f["id"]: f["done"] for f in frames if f["type"] == "agent"}, {"wf#0": True, "wf#1": False})
+                post({"type": "done", "text": "", "error": "", "busy": False})
+                self.assertEqual(term.host._replay(), [])  # a finished reply is not replayed
+            finally:
+                term.host.stop()
+
     def test_late_phone_gets_terminal_question_in_hello(self):
         from fastapi.testclient import TestClient
 
@@ -231,4 +273,3 @@ class TcpLinkTests(LinkTests):
                 self.assertEqual(got[0]["type"], "chat")
             finally:
                 term.host.stop()
-

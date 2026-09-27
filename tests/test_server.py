@@ -259,6 +259,28 @@ class MultiChatTests(unittest.TestCase):
                 return seen
         raise AssertionError(f"never saw the frame; got {[e['type'] for e in seen]}")
 
+    def test_startup_can_leave_the_phone_without_an_open_chat(self):
+        from fastapi.testclient import TestClient
+        from vision.config import Config
+
+        cfg = Config()
+        cfg.brain.model, cfg.brain.effort = "opus", "high"
+        hub = server.Hub(cfg, _StubBrain(cfg.brain), "tok", log=lambda *_: None,
+                         follow_defaults=False, open_initial=False)
+        with tempfile.TemporaryDirectory() as live, patch("vision.link.LIVE_DIR", __import__("pathlib").Path(live)), \
+             patch.object(server.Hub, "warm_up", lambda self: None), \
+             patch("vision.brain.create_brain", side_effect=lambda cfg, **kw: _StubBrain(cfg)), \
+             patch.object(server, "save_brain_defaults"):
+            with TestClient(server.create_app(hub)) as tc, tc.websocket_connect("/ws?token=tok") as ws:
+                self.assertEqual(ws.receive_json()["chats"], [])
+                auth = {"Authorization": "Bearer tok"}
+                self.assertEqual(tc.get("/chats", headers=auth).json(), [])
+                self.assertEqual(tc.get("/models", headers=auth).json()["current"], "opus")
+                ws.send_json({"type": "model", "model": "sonnet", "effort": "low"})
+                ws.send_json({"type": "new"})
+                opened = self._drain(ws, lambda ev, _: ev["type"] == "chat" and ev.get("opened"))[-1]
+                self.assertEqual(hub.chats[opened["chat"]].brain.cfg.model, "sonnet")
+
     def test_two_chats_run_concurrently_and_frames_carry_chat_ids(self):
         from fastapi.testclient import TestClient
 
