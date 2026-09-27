@@ -874,7 +874,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         parts.append("wake on" if state["wake"] else "wake off")
         return "  ·  ".join(parts)
 
-    buddy = Buddy(cfg.buddy.name) if cfg.buddy.enabled else None
+    buddy = Buddy(cfg.buddy.name, slide_in=cfg.buddy.slide_in) if cfg.buddy.enabled else None
     screen = ChatScreen(str(STATE_DIR / "history"), status_line, buddy=buddy, mode=lambda: cfg.brain.mode, status_right=wake_status,
                         corner=corner_label)
     if buddy:

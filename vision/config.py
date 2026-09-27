@@ -316,6 +316,7 @@ follow_up_s = 8
 # Pip, the pocket robot in the bottom-left input gutter. Set enabled = false to hide him.
 name = "Pip"
 enabled = true
+slide_in = true         # he slides in from the left when a chat opens; false = he is just there
 
 [remote]
 # `vision serve`: the HTTP + WebSocket server the Vision Remote iOS app talks to.
@@ -536,6 +537,7 @@ class WakeConfig:
 class BuddyConfig:
     name: str = "Pip"
     enabled: bool = True
+    slide_in: bool = True
 
 
 @dataclass

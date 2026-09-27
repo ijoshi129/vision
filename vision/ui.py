@@ -2793,4 +2793,14 @@ class ChatScreen:
 
     def run(self, pre_run=None):
         self._sync_title()
+        if self.buddy and not self.buddy.slid_in():
+            threading.Thread(target=self._slide_frames, daemon=True, name="buddy-slide").start()
         return self.app.run(pre_run=pre_run)
+
+    def _slide_frames(self) -> None:
+        """Repaint at 60 fps while Pip slides in; the usual 10 fps refresh would step him across in
+        four jumps. Gives up after a few seconds: a narrow terminal never draws him, so never starts."""
+        deadline = time.time() + 5
+        while time.time() < deadline and not self.buddy.slid_in():
+            time.sleep(1 / 60)
+            self.app.invalidate()
