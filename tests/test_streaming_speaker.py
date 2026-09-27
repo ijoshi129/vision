@@ -186,5 +186,70 @@ class StreamingSpeakerRevealTests(unittest.TestCase):
         self.assertGreaterEqual(ss.spoken, 1 << 30)
 
 
+class RecordingSpeaker(StreamingSpeaker):
+    """Records what goes to the voice, and when, without the voice being fast enough to matter."""
+
+    def __init__(self, *a, **k):
+        self.emitted: list[tuple[str, str]] = []
+        super().__init__(*a, **k)
+
+    def _emit(self, text, kind="sentence"):
+        self.emitted.append((text, kind))
+        super()._emit(text, kind)
+
+
+class TailFlushTests(unittest.TestCase):
+    """A reply's last sentence has no space after it; it must not wait for the turn to end."""
+
+    def test_finished_last_sentence_is_spoken_once_the_text_goes_quiet(self):
+        ss = RecordingSpeaker(FakeSpeaker())
+        ss.feed("Right, that is sorted now. ")
+        ss.feed("Give it a go")
+        ss.feed(" and tell me how it reads.")
+        self.assertEqual([t for t, _ in ss.emitted], ["Right, that is sorted now. "])
+        time.sleep(ss.TAIL_IDLE_S + 0.2)  # no finish(), no tool call: the brain is still wrapping up
+        self.assertEqual([t for t, _ in ss.emitted], ["Right, that is sorted now. ", "Give it a go and tell me how it reads."])
+        ss.flush()  # a tool call or the turn's end afterwards adds nothing
+        ss.finish()
+        self.assertEqual(len(ss.emitted), 2, "no sentence twice")
+
+    def test_a_pause_inside_a_number_does_not_split_it(self):
+        ss = RecordingSpeaker(FakeSpeaker())
+        ss.feed("It costs about 3.")
+        time.sleep(ss.TAIL_IDLE_S / 3)
+        ss.feed("5 dollars a month.")
+        time.sleep(ss.TAIL_IDLE_S + 0.2)
+        self.assertEqual([t for t, _ in ss.emitted], ["It costs about 3.5 dollars a month."])
+        ss.finish()
+        self.assertEqual(len(ss.emitted), 1)
+
+    def test_unfinished_tail_waits_longer_but_not_for_the_turn(self):
+        ss = RecordingSpeaker(FakeSpeaker())
+        ss.feed("- the last item on the list")
+        time.sleep(ss.TAIL_IDLE_S + 0.2)
+        self.assertEqual(ss.emitted, [], "a tail with no full stop gets longer to carry on")
+        time.sleep(ss.IDLE_S)
+        self.assertEqual([t for t, _ in ss.emitted], ["- the last item on the list"])
+        ss.finish()
+        self.assertEqual(len(ss.emitted), 1)
+
+    def test_abbreviation_at_the_end_is_not_a_sentence_end(self):
+        ss = RecordingSpeaker(FakeSpeaker())
+        ss.feed("Ask Dr.")
+        time.sleep(ss.TAIL_IDLE_S + 0.2)
+        self.assertEqual(ss.emitted, [])
+        ss.feed(" Smith about it. ")
+        self.assertEqual([t for t, _ in ss.emitted], ["Ask Dr. Smith about it. "])
+        ss.finish()
+
+    def test_stop_cancels_a_pending_tail(self):
+        ss = RecordingSpeaker(FakeSpeaker())
+        ss.feed("This one is cut off.")
+        ss.stop()
+        time.sleep(ss.TAIL_IDLE_S + 0.2)
+        self.assertEqual(ss.emitted, [])
+        ss.finish()
+
+
 if __name__ == "__main__":
     unittest.main()

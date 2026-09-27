@@ -56,6 +56,11 @@ MODE_BADGES = {"auto": "⏵⏵ auto", "plan": "⏸ plan"}  # what the bottom-lef
 # sequences in one read, so a short wait is plenty and Esc closes menus without the lag.
 ESC_TIMEOUT = 0.05
 
+# prompt_toolkit only draws 24-bit colour when told to; on 256 colours the diff's dark red and green
+# (and other dark tints) snap to the same greys. Terminals that say they do truecolor get it.
+if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+    os.environ.setdefault("PROMPT_TOOLKIT_COLOR_DEPTH", "DEPTH_24_BIT")
+
 
 def _snappy(app):
     """Set the short Esc wait on an Application and hand it back."""
@@ -327,6 +332,12 @@ def tool_activity(calls, spin: str = "", expanded: set | None = None) -> Group:
     return Group(text)
 
 
+def tool_live(calls, spin: str = "", expanded: set | None = None) -> Group:
+    """A run of tool calls still in progress as one row that changes as they go: the latest call's
+    row (see tool_activity), no count; the run folds to its total (tool_fold) as soon as prose follows it."""
+    return tool_activity(list(calls)[-1:], spin, expanded)
+
+
 _TOOL_VERBS = {  # how the folded line counts each tool: (verb, noun); tools sharing a pair are added together
     "Read": ("read", "file"), "Edit": ("edited", "file"), "Write": ("edited", "file"), "NotebookEdit": ("edited", "file"),
     "Bash": ("ran", "command"), "Grep": ("searched", "pattern"), "Glob": ("searched", "pattern"),
@@ -363,6 +374,74 @@ def tool_fold(calls) -> Group:
     text.append("⏺ ", style="red" if any(c.is_error if _is_tool(c) else c.failed for c in calls) else "green")
     text.append(tool_summary(calls), style="dim")
     text.append(" · click or ctrl-o to expand", style="dim italic")
+    return Group(text)
+
+
+EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")  # as vision.brain.EDIT_TOOLS (ui does not import it)
+DIFF_SHOWN = 16  # diff lines under an edit before `… +N lines (click to expand)`
+_DIFF_STYLE = {"-": "on #4a1f23", "+": "on #1d3b26"}  # removed and added lines, Claude Code's dark red and green
+
+
+def _is_edit(item) -> bool:
+    """A tool call that changes a file: a block of its own with its diff (tool_diff)."""
+    return _is_tool(item) and item.name in EDIT_TOOLS
+
+
+def edit_summary(call) -> str:
+    """The line under an edit, as Claude Code words it: `Updated ~/a.py with 3 additions and 1
+    removal`, or `Wrote 40 lines to ~/b.py` for a new file."""
+    lines = [ln for h in call.diff for ln in h["lines"]]
+    added, removed = sum(ln[:1] == "+" for ln in lines), sum(ln[:1] == "-" for ln in lines)
+    if call.name == "Write" and added == len(lines):
+        return f"Wrote {added} line{'s' * (added != 1)} to {call.detail}"
+    bits = [f"{added} addition{'s' * (added != 1)}"] if added else []
+    bits += [f"{removed} removal{'s' * (removed != 1)}"] if removed else []
+    return f"Updated {call.detail}" + (" with " + " and ".join(bits) if bits else "")
+
+
+def tool_diff(call, spin: str = "", width: int = 80, full: bool = False) -> Group:
+    """An edit as Claude Code shows one: `⏺ Update(~/a.py)`, under it `⎿  Updated ~/a.py with 2
+    additions and 1 removal`, then the changed lines with their numbers, removals on dark red and
+    additions on dark green, the whole row wide. Past DIFF_SHOWN lines it stops at `… +N lines`
+    unless `full` (a click on the block). Still running, failed or without a diff: the header and,
+    for a failure, the error."""
+    text = _one_row()
+    if not call.done:
+        text.append((spin or "⏺") + " ", style=ACCENT)
+    else:
+        text.append("⏺ ", style="red" if call.is_error else "green")
+    text.append("Update" if call.name in ("Edit", "MultiEdit") else call.name, style="bold")
+    if call.detail:
+        text.append(f"({call.detail})", style="dim")
+    if call.done and call.is_error:
+        first = next((ln for ln in call.output.splitlines() if ln.strip()), "(error)")
+        text.append("\n  ⎿  ", style="dim")
+        text.append(first, style="red")
+    elif call.done and call.diff:
+        text.append("\n  ⎿  ", style="dim")
+        text.append(edit_summary(call), style="dim")
+        rows: list[tuple[str, str, str]] = []  # (number, sign, text) per line; ("", "…", "") between hunks
+        for i, hunk in enumerate(call.diff):
+            if i:
+                rows.append(("", "…", ""))
+            old, new = hunk["old"], hunk["new"]
+            for ln in hunk["lines"]:
+                sign, body = ln[:1], ln[1:].replace("\t", "    ")
+                num = old if sign == "-" else new
+                rows.append((str(num) if num else "", sign, body))
+                old += sign != "+"
+                new += sign != "-"
+        pad = max((len(r[0]) for r in rows), default=0)
+        cut = rows if full else rows[:DIFF_SHOWN]
+        for num, sign, body in cut:
+            text.append("\n")
+            if sign == "…":
+                text.append("       " + " " * pad + "…", style="dim")
+                continue
+            line = f"       {num.rjust(pad)} {sign if sign != ' ' else ' '} {body}"
+            text.append(line.ljust(width), style=_DIFF_STYLE.get(sign, ""))
+        if len(rows) > len(cut):
+            text.append(f"\n       … +{len(rows) - len(cut)} lines (click to expand)", style="dim italic")
     return Group(text)
 
 
@@ -1378,6 +1457,7 @@ class _ReplyEntry(_Entry):
         self._spin: tuple = ()  # (spinner frame, timer text) the cached lines were built with
         self._line_progress = -1.0
         self._floor: dict[int, int] = {}  # per width: most rows shown so far (never shrink mid-reply)
+        self._static_marks: dict[tuple, list[list]] = {}
 
     def full(self, width: int, fresh: bool = True) -> _Segments:
         """The rendered whole buffer at `width`, in pieces around the marks. With fresh=False a
@@ -1399,6 +1479,7 @@ class _ReplyEntry(_Entry):
         if item.id not in table:
             self.marks.append((len(self.buf), item))
         table[item.id] = item
+        self._static_marks.clear()
 
     def take_running_agents(self) -> list:
         """Unmark the subagents still at work and hand them back (see ChatScreen.split_reply)."""
@@ -1422,6 +1503,7 @@ class _ReplyEntry(_Entry):
             if mouse_event.event_type != MouseEventType.MOUSE_UP:
                 return NotImplemented  # presses, drags and the wheel are not clicks
             action()
+            self._static_marks.clear()
             # A deliberate collapse is a new baseline, not a reflow bounce to pad over (see the floor
             # in lines): left in place, the padding would fill the bottom-anchored view with blank
             # rows until the turn ended.
@@ -1436,29 +1518,74 @@ class _ReplyEntry(_Entry):
     def _toggle(self, call_id: str) -> Callable:
         return self._click(lambda: self.expanded.__ixor__({call_id}))
 
-    def _mark_rows(self, ks: list[int], spin: str, inner: int) -> list[list]:
-        """The rows of a run of marks with no prose between them: each subagent's two rows and each
-        tool call's block, every fragment of a tool's carrying a mouse handler (the third element)
-        so a click on any of them shows or hides the whole result. Once the reply is done the run
-        folds into one summary row (tool_fold) that a click unfolds, with the way back under the
-        last run when they are unfolded on purpose."""
+    def _mark_rows(self, ks: list[int], spin: str, inner: int, settled: bool = False) -> list[list]:
+        """The rows of a run of marks with no prose between them. Each edit (Edit, Write…) is a block
+        of its own with its diff, as Claude Code shows them, folded or not (tool_diff); the calls
+        around it make groups (see _group_rows). Every fragment of a tool's row carries a mouse
+        handler (the third element), so a click shows or hides the whole result."""
+        stable = all(self.marks[k][1].done for k in ks)
+        versions = tuple((id(self.marks[k][1]), self.marks[k][1].done,
+                          getattr(self.marks[k][1], "is_error", None),
+                          getattr(self.marks[k][1], "failed", None),
+                          id(getattr(self.marks[k][1], "output", None)),
+                          id(getattr(self.marks[k][1], "diff", None)),
+                          getattr(self.marks[k][1], "summary", None),
+                          len(getattr(self.marks[k][1], "steps", ()))) for k in ks)
+        key = (tuple(ks), inner, settled, self.done, self.unfolded, tuple(sorted(self.expanded)), versions)
+        if stable and key in self._static_marks:
+            return self._static_marks[key]
         rows: list[list] = []
-        if self.folded:
-            handler = self._click(self.toggle_fold)
-            for row in _rows(render_ansi(tool_fold([self.marks[k][1] for k in ks]), inner)):
-                rows.append([(style, txt, handler) for style, txt, *_ in row])
-            return rows
+        groups: list[list] = []
         for k in ks:
             item = self.marks[k][1]
+            if _is_edit(item) or not groups or _is_edit(groups[-1][0]):
+                groups.append([item])
+            else:
+                groups[-1].append(item)
+        for n, group in enumerate(groups):
+            if _is_edit(group[0]):
+                call = group[0]
+                handler = self._toggle(call.id)
+                block = render_ansi(tool_diff(call, spin, inner, full=call.id in self.expanded), inner)
+                rows += [[(style, txt, handler) for style, txt, *_ in row] for row in _rows(block)]
+            else:
+                rows += self._group_rows(group, spin, inner, settled or n < len(groups) - 1)
+        if self.unfolded and ks[-1] == len(self.marks) - 1:
+            handler = self._click(self.toggle_fold)
+            for row in _styled_rows("     click or ctrl-o to fold", "dim italic", inner):
+                rows.append([(style, txt, handler) for style, txt, *_ in row])
+        if stable:
+            self._static_marks[key] = rows
+        return rows
+
+    def _group_rows(self, items: list, spin: str, inner: int, settled: bool) -> list[list]:
+        """A group of calls and subagents with no prose or edit between them. While it is going, each
+        subagent's two rows and one row for its tool calls that changes to the latest (tool_live);
+        once something follows it (`settled`) and everything in it is done, or the reply is done,
+        it folds into one summary row (tool_fold) that a click unfolds. Unfolded on purpose, each
+        tool call gets its own block."""
+        rows: list[list] = []
+        if self.folded or (settled and not self.unfolded and all(i.done for i in items)):
+            handler = self._click(self.toggle_fold)
+            for row in _rows(render_ansi(tool_fold(items), inner)):
+                rows.append([(style, txt, handler) for style, txt, *_ in row])
+            return rows
+        if not self.unfolded:
+            calls = [i for i in items if _is_tool(i)]
+            for item in items:
+                if not _is_tool(item):
+                    rows += _rows(render_ansi(agent_activity([item], spin), inner))
+                elif item is calls[-1]:  # the group's one tool row, where its latest call arrived
+                    handler = self._toggle(item.id)
+                    for row in _rows(render_ansi(tool_live(calls, spin, self.expanded), inner)):
+                        rows.append([(style, txt, handler) for style, txt, *_ in row])
+            return rows
+        for item in items:
             if not _is_tool(item):
                 rows += _rows(render_ansi(agent_activity([item], spin), inner))
                 continue
             handler = self._toggle(item.id)
             for row in _rows(render_ansi(tool_activity([item], spin, self.expanded), inner)):
-                rows.append([(style, txt, handler) for style, txt, *_ in row])
-        if self.done and ks[-1] == len(self.marks) - 1:
-            handler = self._click(self.toggle_fold)
-            for row in _styled_rows("     click or ctrl-o to fold", "dim italic", inner):
                 rows.append([(style, txt, handler) for style, txt, *_ in row])
         return rows
 
@@ -1469,10 +1596,11 @@ class _ReplyEntry(_Entry):
         return bool(self.marks) and self.done and not self.unfolded
 
     def toggle_fold(self) -> None:
-        """Ctrl-o: unfold the done reply's tool calls and subagents, or fold them again."""
-        if not self.marks or not self.done:
+        """Ctrl-o: unfold the reply's tool calls and subagents, or fold them again."""
+        if not self.marks:
             return
         self.unfolded = not self.unfolded
+        self._static_marks.clear()
         self._floor.clear()
         self.invalidate()
         if self.on_click:
@@ -1509,14 +1637,15 @@ class _ReplyEntry(_Entry):
             inner = max(20, width - 1)
             mark = _styled_rows(REPLY_MARK, f"bold {ACCENT}")[0]
             rows: list[list] = []
-            for kind, payload in self.full(width, fresh=self.done).cut(shown):
+            parts = self.full(width, fresh=self.done).cut(shown)
+            for n, (kind, payload) in enumerate(parts):
                 if kind == "text":
                     # The `●` gutter: the mark on the first row of each run of prose, two blanks under it.
                     block = [[*mark, *payload[0]], *[[("", " " * GUTTER), *row] for row in payload[1:]]]
                 else:
                     # The subagents' and tool calls' rows where they happened, flush left so their
                     # dot lines up with the mark.
-                    block = self._mark_rows(payload, spin, inner)
+                    block = self._mark_rows(payload, spin, inner, settled=n < len(parts) - 1)
                 rows += [[], *block] if rows else block  # a blank line between prose and the rows
             if self.ended is None:
                 # Live line while the brain works: `⠋ having a look… · 3.2s · ↓ 1.2k · esc to stop`, or
@@ -1771,7 +1900,7 @@ class ChatScreen:
         self.on_submit: Callable[[str], None] = lambda text: None
         # Ctrl-X mid-reply: send the message into the running turn now rather than queue it behind
         # it ("" = send the queued ones now). Without a reply running it is a plain send.
-        self.on_steer: Callable[[str], None] = lambda text: self.on_submit(text) if text else None
+        self.on_steer: Callable[..., None] = lambda text, queued_id=None: self.on_submit(text) if text else None
         self.on_cancel: Callable[[], None] = lambda: None
         self.on_toggle_mode: Callable[[], None] = lambda: None  # Shift-Tab: auto ⇄ plan
         # Esc / Ctrl-C while nothing is being replied (e.g. to leave a voice conversation); True = consumed
@@ -2422,10 +2551,14 @@ class ChatScreen:
 
     def _queue_send_now(self) -> None:
         item = self._queue_selected()
-        if item is None or self.turns.take(item.id) is None:
+        if item is None:
             return self._queue_done()
-        self._queue_done()
-        self.on_steer(item.text)
+        # Keep the queue held until the chat has taken and journalled this message. Releasing
+        # first lets the turn worker pop it as a new turn before Send now can steer it.
+        try:
+            self.on_steer(item.text, queued_id=item.id)
+        finally:
+            self._queue_done()
 
     def _queue_edit_finish(self, text: str | None) -> None:
         """Enter (the new text; empty drops it) or Esc (None: the original) while editing a queued message."""
@@ -2576,7 +2709,7 @@ class ChatScreen:
 
     def toggle_tools(self) -> None:
         """Ctrl-O: unfold (or fold again) the tool calls and subagents of the latest reply that had
-        any, as in Claude Code. A reply still in progress shows them one per row anyway."""
+        any, as in Claude Code."""
         with self._lock:
             e = next((x for x in reversed(self.entries) if isinstance(x, _ReplyEntry) and x.marks), None)
         if e is not None:
@@ -2671,7 +2804,8 @@ class ChatScreen:
             w = self._width()
             r = e.full(w, fresh=False)
             if r.stale(e.buf, e.marks) and (
-                r.total - e.shown < self.reveal_cps * 0.5 or now - r.at > 0.5 or e.finished
+                (e.gate is not None and r.total - e.shown < self.reveal_cps * 0.5)
+                or now - r.at > (0.05 if e.gate is None else 0.5) or e.finished
             ):
                 # Re-render only when the reveal is about to catch up with the last render (or
                 # it is half a second old): the markdown pass is O(reply) and the lag hides it.

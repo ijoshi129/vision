@@ -141,9 +141,9 @@ timing = false      # optional stage durations in ~/.local/state/vision/voice-ti
 task's worker runs on it instead: "get Opus to fix the tests", "use Codex for this", "have Haiku do it at
 low effort". The worker shows as a row above the reply, agent · model effort · description · time · tokens: a
 live timer and output tokens so far while it runs, total time and tokens in and out once done. A model name
-that is not in the catalogue fails the task rather than quietly running on the default. `[conversation]`
-controls the separate voice model; `/voicemodel` picks one for the session (a Claude, or a Local model on the
-llama-server), `/voicemodel qwen3.6 save` makes it the default. Its conversation history stays in memory for the current Vision process, with a bounded
+that is not in the catalogue fails the task rather than quietly running on the default. In talk mode the
+chat's own model does the talking when it is a Claude, Codex or Local model; a Grok chat talks through
+`[conversation].model` instead (set it in the config) and keeps its model as the worker. Its conversation history stays in memory for the current Vision process, with a bounded
 recent context; `/new` or resuming a different session resets it. `--continue` continues the typed
 agent's native history, which the voice model can read as context. Private worker sessions do not
 replace that continue target or appear in `/session`. The remote server keeps a combined typed/voice
@@ -362,6 +362,12 @@ contribution breakdown, or Grok's per-product split, when available.
 `vision serve` starts with no chat open. The phone can open a new chat with its first message or
 the new-chat button. Use `--new` to open a fresh chat at startup, or `--continue` to reopen the
 last conversation for the selected model's provider.
+
+To pick up new code without cutting anyone off, restart it gracefully: `vision restart`, `r` in the
+`vision serve` window, or `/restart` on the phone. It waits until every chat has finished its reply,
+then relaunches itself in the same window on the same port; the phone reconnects on its own and chats
+come back from their journals. A message that lands in the last instant runs in the new process. `c`
+clears the window.
 
 `vision serve` puts the brain, ears and voice behind an HTTP + WebSocket server on port 8765
 for a remote client (the author's **Vision Remote** iPhone app, which is not part of this repository): text chat with streamed replies, dictation

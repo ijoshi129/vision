@@ -324,10 +324,10 @@ def _resolve(alias: str) -> str:
     return provider_default(NICKNAMES[a.lower()]) or a if a.lower() in NICKNAMES else a
 
 
-# The conversation model (what answers spoken input, `[conversation].model`) talks through Claude Code or
-# straight to llama-server: Codex and Grok have no tool-free structured-output mode, so /conversation offers these two.
-CONVERSATION_PROVIDERS = ("claude", "local")
-CONVERSATION_TABS = [tab for tab in MODEL_TABS if tab[0] in ("Claude", "Local")]
+# The conversation model (what answers spoken input, `[conversation].model`) talks through Claude Code,
+# `codex app-server` (vision/codex_voice.py) or straight to llama-server: Grok has no tool-free
+# structured-output mode, so only these three can talk.
+CONVERSATION_PROVIDERS = ("claude", "codex", "local")
 
 
 def find(alias: str) -> ModelInfo | None:

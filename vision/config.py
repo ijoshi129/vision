@@ -148,8 +148,11 @@ transport = "app-server"
 # "workspace" (write only inside the working directory), "read-only" or "strict".
 # Plan mode is always read-only. Grok enforces this with its kernel sandbox.
 sandbox = "auto"
-# Optional extra `grok` CLI flags for each turn. Most users should leave this empty.
+# Optional extra `grok` CLI flags for each headless turn. Most users should leave this empty.
 extra_args = []
+# How turns run: "acp" (`grok agent stdio`: messages can go into a running reply, live tool rows) or
+# "headless" (`grok -p`, one message per turn). Worker turns always run headless.
+transport = "acp"
 
 [local]
 # llama-server hosting the Local models (see deploy/local-model): spoken to directly, no CLI, nothing
@@ -166,10 +169,9 @@ brave_api_key = ""
 [conversation]
 # Voice input goes to a conversation model with tools, hooks, skills and MCP disabled. It decides
 # when to delegate and speaks the worker's results. It is the chat's own /model whenever that is a
-# Claude or a Local model, so one model answers the whole chat; the model below talks only for chats
-# on Codex or Grok, which cannot hold a voice conversation. A Claude model uses your Claude
-# subscription; a Local model (qwen3.6) runs on the llama-server in [local] for free.
-# /voicemodel <model> switches this one for the session (add "save" to write it here).
+# Claude, Codex or Local model, so one model answers the whole chat; the model below talks only for
+# chats on Grok, which cannot hold a voice conversation. A Claude model uses your Claude subscription,
+# a Codex model your ChatGPT one; a Local model (qwen3.6) runs on the llama-server in [local] for free.
 model = "sonnet"
 # A Local conversation model never thinks (its replies are grammar-constrained), so its effort is always off.
 effort = "low"
@@ -401,6 +403,7 @@ class CodexConfig:
 class GrokConfig:
     sandbox: str = "auto"
     extra_args: list[str] = field(default_factory=list)
+    transport: str = "acp"  # or "headless" (see vision/grok_acp.py)
 
 
 @dataclass

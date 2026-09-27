@@ -318,6 +318,60 @@ class JoinTests(unittest.TestCase):
                 for p in patches:
                     p.stop()
 
+    def test_phone_send_now_splits_a_queued_message_and_runs_the_remaining_queue(self):
+        from vision.config import BrainConfig
+
+        release = threading.Event()
+        steered = []
+        calls = []
+
+        class Streaming(_StubBrain):
+            def steer(self, text):
+                steered.append(text)
+                release.set()
+                return True
+
+            def ask(self, text, on_text=None, on_status=None, on_question=None, on_agent=None, on_tool=None):
+                calls.append(text)
+                self.session_id = "s1"
+                if text == "first":
+                    on_text("Before.")
+                    if not release.wait(5):
+                        raise AssertionError("Send now did not reach the running turn")
+                    on_text(" After.")
+                    return _Turn("Before. After.", "s1")
+                on_text("Next reply.")
+                return _Turn("Next reply.", "s1")
+
+        hub = _hub(Streaming(BrainConfig()))
+        chat_id = next(iter(hub.chats))
+        with tempfile.TemporaryDirectory() as d:
+            patches = _quiet(d)
+            for p in patches:
+                p.start()
+            try:
+                with _Live(hub) as info:
+                    phone = _Phone(info)
+                    phone.until(lambda ev: ev["type"] == "hello")
+                    phone.send({"type": "message", "chat": chat_id, "text": "first"})
+                    phone.until(lambda ev: ev["type"] == "delta" and ev["text"] == "Before.")
+                    phone.send({"type": "message", "chat": chat_id, "text": "steer this"})
+                    phone.send({"type": "message", "chat": chat_id, "text": "next"})
+                    phone.send({"type": "steer", "chat": chat_id, "text": "steer this"})
+                    phone.until(lambda ev: ev["type"] == "steered" and ev["text"] == "steer this")
+                    phone.until(lambda ev: ev["type"] == "done")
+                    phone.until(lambda ev: ev["type"] == "start" and ev["text"] == "next")
+                    phone.until(lambda ev: ev["type"] == "done")
+                    self.assertEqual(steered, ["steer this"])
+                    self.assertEqual(calls, ["first", "next"])
+                    self.assertEqual([(m["role"], m["text"]) for m in hub.chats[chat_id].history()[-6:]], [
+                        ("user", "first"), ("assistant", "Before."), ("user", "steer this"),
+                        ("assistant", "After."), ("user", "next"), ("assistant", "Next reply.")])
+                    phone.close()
+            finally:
+                for p in patches:
+                    p.stop()
+
     def test_a_question_answered_on_the_phone_closes_the_terminal_form(self):
         from vision.config import BrainConfig
 

@@ -17,6 +17,7 @@ turn/interrupt {threadId, turnId}. `[codex].transport = "exec"` goes back to `co
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
 import threading
 import time
@@ -28,7 +29,7 @@ from vision import compat
 from vision.reply import READING, THINKING, ReplyText, dedupe_status, retry_label
 
 if TYPE_CHECKING:
-    from vision.brain import Turn
+    from vision.brain import unified_diff_hunks, Turn
     from vision.codex import CodexBrain
 
 RESPONSE_TIMEOUT = 60.0  # seconds for the app-server to answer a setup request (initialize, thread/start…)
@@ -68,7 +69,7 @@ class AppServerTurn:
     The ask thread pumps stdout (`pump`), handling notifications as they come and filing responses
     for whoever waits on them: itself during setup, another thread for a steer or an interrupt."""
 
-    def __init__(self, exe: str, cwd: str, env: dict):
+    def __init__(self, exe: str, cwd: str, env: dict, stall_s: float = 180):
         self.proc = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      cwd=cwd, env=env, text=True, bufsize=1, encoding="utf-8")
         self.stderr: list[str] = []
@@ -81,6 +82,16 @@ class AppServerTurn:
         self.thread_id: str | None = None
         self.turn_id: str | None = None
         self.closed = False
+        self.stall_s = stall_s
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+
+    def _read_stdout(self) -> None:
+        try:
+            while line := self.proc.stdout.readline():
+                self._lines.put(line)
+        finally:
+            self._lines.put(None)
 
     # -- writing
     def _send(self, obj: dict) -> bool:
@@ -114,10 +125,18 @@ class AppServerTurn:
     def pump(self, on_notification: Callable[[str, dict], None], until: Callable[[], bool]) -> bool:
         """Read messages until `until()` holds (True) or stdout ends (False)."""
         self.pump_thread = threading.current_thread()
+        last_line = time.monotonic()
         while not until():
-            line = self.proc.stdout.readline()
-            if not line:
+            try:
+                line = self._lines.get(timeout=0.25)
+            except queue.Empty:
+                if self.stall_s > 0 and time.monotonic() - last_line > self.stall_s:
+                    self.kill()
+                    raise AppServerError("codex app-server stopped responding")
+                continue
+            if line is None:
                 return False
+            last_line = time.monotonic()
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:
@@ -201,7 +220,7 @@ class AppServerTurn:
 
 def run_turn(brain: "CodexBrain", prompt: str, *, on_text=None, on_status=None, on_agent=None, on_tool=None) -> "Turn":
     """One Codex turn over the app-server, with the same results and side effects as the exec path."""
-    from vision.brain import ToolCall, Turn, brain_env, inject_handoff, one_line
+    from vision.brain import ToolCall, Turn, brain_env, inject_handoff, one_line, unified_diff_hunks
     from vision.codex import LAST_SESSION_FILE, _is_uuid, sandbox_for
     from vision.subagents import AgentTracker, codex_item
 
@@ -249,6 +268,9 @@ def run_turn(brain: "CodexBrain", prompt: str, *, on_text=None, on_status=None, 
             if call is not None:
                 call.output = item.get("aggregatedOutput") or ""
                 call.is_error = item.get("status") == "failed" or (item.get("exitCode") not in (None, 0))
+                if kind == "fileChange":  # each change may carry its unified diff
+                    call.diff = unified_diff_hunks("\n".join(
+                        c.get("diff") or "" for c in item.get("changes") or [] if isinstance(c, dict)))
                 call.done = True
                 tool_changed(call)
             if on_status:
@@ -302,7 +324,7 @@ def run_turn(brain: "CodexBrain", prompt: str, *, on_text=None, on_status=None, 
                 state["error"] = (err.get("message") if isinstance(err, dict) else str(err or "")) or ""
 
     sandbox = sandbox_for(brain.cfg)
-    rpc = AppServerTurn(brain.codex, brain.workdir, brain_env("codex"))
+    rpc = AppServerTurn(brain.codex, brain.workdir, brain_env("codex"), brain.cfg.stall_s)
     with brain._lock:
         brain._rpc = rpc
     try:

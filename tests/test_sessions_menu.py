@@ -317,10 +317,10 @@ class TranscriptTests(unittest.TestCase):
                 prompt = inject_handoff(brain, user)
                 save_turn(brain, f"session-{i}", prompt, reply)
                 earlier.extend((user, reply))
-                # Visible history and input recall still show the actual new message, even when
-                # several provider transfers are nested inside its saved prompt.
+                # Visible history unfolds every nested provider transfer into the earlier turns, so
+                # the chat reads as one conversation after each switch.
                 self.assertEqual(sessions.session_history(brain.provider, brain.session_id), [
-                    {"role": "user", "text": user}, {"role": "assistant", "text": reply},
+                    {"role": "user" if n % 2 == 0 else "assistant", "text": text} for n, text in enumerate(earlier)
                 ])
                 restored = sessions.format_transcript(sessions.session_history(
                     brain.provider, brain.session_id, limit=0, include_context=True,

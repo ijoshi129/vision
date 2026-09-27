@@ -1,4 +1,7 @@
-"""Grok brain: drives xAI's Grok models through the Grok CLI in headless mode.
+"""Grok brain: drives xAI's Grok models through the Grok CLI.
+
+Turns run over agent mode (`grok agent stdio`, vision/grok_acp.py) so a message can go into a running
+reply; `[grok].transport = "headless"`, and every worker turn, use headless mode as described below.
 
 Uses `grok --prompt-file … --output-format streaming-json` as documented for scripting, on the
 normal grok.com login. Conversation continuity uses Grok's own session store via `--resume <id>`.
@@ -251,6 +254,8 @@ class GrokBrain:
         self.task_mode = False
         self.session_id = session_id
         self._proc: subprocess.Popen | None = None
+        self._acp = None  # the running agent-mode turn (vision.grok_acp.AgentSession), for steer and cancel
+        self._killed = False
         self._lock = threading.Lock()
         self.grok = find_grok()
         self.workdir = os.path.abspath(os.path.expanduser(cfg.workdir)) if cfg.workdir else os.getcwd()
@@ -313,17 +318,23 @@ class GrokBrain:
         return _cli_model(self.cfg.model) or self.cfg.model or None
 
     # -- main entry point -------------------------------------------------
-    def _command(self, prompt_path: str) -> list[str]:
-        sandbox = sandbox_for(self.cfg)
-        persona = system_prompt(
+    def _persona(self, sandbox: str) -> str:
+        if self.task_mode:
+            from vision.delegation import worker_prompt
+
+            return worker_prompt(self.cfg, self.workdir, self.provider, sandbox)
+        return system_prompt(
             self.voice_mode, self.cfg.address_user_as, self.workdir, self.cfg.allowed_tools,
             provider="grok", sandbox=sandbox, denied_tools=self.cfg.denied_tools, mode=self.cfg.mode,
             weather=weather_ready(self.cfg),
         )
-        if self.task_mode:
-            from vision.delegation import worker_prompt
 
-            persona = worker_prompt(self.cfg, self.workdir, self.provider, sandbox)
+    def _transport(self) -> str:
+        return getattr(getattr(self.cfg, "grok", None), "transport", "acp") or "acp"
+
+    def _command(self, prompt_path: str) -> list[str]:
+        sandbox = sandbox_for(self.cfg)
+        persona = self._persona(sandbox)
         cmd = [
             self.grok,
             "--prompt-file", prompt_path,
@@ -362,7 +373,7 @@ class GrokBrain:
         on_status: Callable[[str], None] | None = None,
         on_question: Callable[[list[dict]], dict[str, str] | None] | None = None,  # Claude-only
         on_agent: Callable | None = None,  # sub-agent rows, from its spawn_subagent calls (vision.subagents)
-        on_tool: Callable | None = None,  # Claude-only; grok tool_calls are status labels
+        on_tool: Callable | None = None,  # live tool rows in agent mode; headless tool_calls are status labels only
     ) -> Turn:
         from vision.brain import Turn, brain_env, inject_handoff
 
@@ -377,6 +388,11 @@ class GrokBrain:
                           + ("in plan mode. Switch to auto (Shift-Tab) or use Claude for planning."
                              if self.cfg.mode == "plan" else "with it. Set [grok] sandbox = \"off\" to run Grok unrestricted."))
             return turn
+        if self._transport() != "headless" and not self.task_mode:
+            from vision.grok_acp import run_turn
+
+            self._killed = False
+            return run_turn(self, prompt, on_text=on_text, on_status=on_status, on_agent=on_agent, on_tool=on_tool)
         prompt = inject_handoff(self, prompt)
         reply = ReplyText(on_text)
         on_status = dedupe_status(on_status)
@@ -591,9 +607,20 @@ class GrokBrain:
             parts.append(Text(" · ".join(extras), style="dim"))
         return usage_ui.usage_group(*parts)
 
+    def steer(self, text: str) -> bool:
+        """Send a message into the running turn (agent mode only; headless can't take one): False and
+        the caller queues it when nothing is running or the turn has stopped taking them."""
+        with self._lock:
+            rpc = self._acp
+        return bool(rpc and rpc.steer(text))
+
     def cancel(self) -> None:
         with self._lock:
-            proc = self._proc
+            proc, rpc = self._proc, self._acp
+        if rpc is not None:
+            self._killed = True
+            rpc.interrupt()
+            return
         if proc and proc.poll() is None:
             self._killed = True
             try:

@@ -493,6 +493,8 @@ class RemoteBrain:
         call.is_error = bool(ev.get("is_error"))
         if "output" in ev:
             call.output = ev.get("output") or ""
+        if ev.get("diff"):
+            call.diff = ev["diff"]
         return call
 
     def steer(self, text: str) -> bool:

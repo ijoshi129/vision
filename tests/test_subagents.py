@@ -74,6 +74,25 @@ class GrokAgentTests(_Tmp):
 
 
 class AgentFrameTests(unittest.TestCase):
+    def test_detail_snapshot_survives_reconnect_and_completion(self):
+        run = AgentRun("a1", "Explore", "Map", prompt="Find every config entry point")
+        run.steps = [("Read", "config.py"), ("Bash", "pytest"), ("Bash", "pytest")]
+        frame = agent_frame(run)
+        copy = run_from_frame(frame)
+        run_from_frame(frame, copy)  # reconnect snapshots replace history, including repeated calls
+        self.assertEqual(copy.steps, run.steps)
+        self.assertEqual(copy.prompt, run.prompt)
+        run.done, run.summary = True, "Found two entry points."
+        run.details = ["Tests passed"]
+        run_from_frame(agent_frame(run), copy)
+        self.assertEqual((copy.steps, copy.summary, copy.details, copy.done),
+                         (run.steps, run.summary, run.details, True))
+
+    def test_old_frames_keep_the_available_steps(self):
+        copy = run_from_frame({"id": "a1", "step": {"tool": "Read", "detail": "config.py"}})
+        run_from_frame({"id": "a1", "done": True}, copy)
+        self.assertEqual(copy.steps, [("Read", "config.py")])
+
     def test_a_frame_rebuilds_the_row_with_its_real_start(self):
         run = AgentRun("a1", "Explore", "Map the tests", model="", started=time.monotonic() - 125, tool_uses=4)
         frame = agent_frame(run)
@@ -87,6 +106,16 @@ class AgentFrameTests(unittest.TestCase):
 
 
 class AgentLogTests(_Tmp):
+    def test_agent_details_survive_saved_history(self):
+        run = AgentRun("a1", "Explore", "Map", prompt="Find the config loader", done=True,
+                       steps=[("Read", "config.py")], summary="Found it", details=["Checked"])
+        agentlog.record("claude", "s-detail", "Find config", "Done.", [agent_frame(run)])
+        history = [{"role": "user", "text": "Find config"}, {"role": "assistant", "text": "Done."}]
+        agentlog.attach(history, "claude", "s-detail")
+        copy = run_from_frame(history[1]["agents"][0])
+        self.assertEqual((copy.prompt, copy.steps, copy.summary, copy.details),
+                         (run.prompt, run.steps, run.summary, run.details))
+
     def test_rows_come_back_with_their_reply(self):
         rows = [{"type": "agent", "id": "a1", "kind": "Explore", "label": "Map", "done": True, "status": "3 tools · 4.0s", "at": 12},
                 {"type": "agent", "id": "a2", "kind": "Review", "label": "bugs", "done": False, "at": 12}]

@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from vision.brain import Brain, BrainError, Turn
+from vision.brain import Brain, BrainError, ToolCall, Turn
 from vision.codex import CodexBrain
 from vision.config import Config, load_config
 from vision.conversation import ClaudeConversation, SpeechStream, VoiceConversation, validate_response
@@ -131,16 +131,35 @@ class ConversationTests(unittest.TestCase):
         create.assert_called_once_with(self.cfg.brain, voice_mode=False)
         self.assertTrue(worker.task_mode)
         self.assertEqual(json.loads(worker.ask.call_args.args[0]), {"type": "vision_task", "task": TASK})
-        self.assertEqual(worker.ask.call_args.kwargs, {"on_question": on_question, "on_tool": on_tool})
+        self.assertIs(worker.ask.call_args.kwargs["on_question"], on_question)
         runs = [c.args[0] for c in on_agent.call_args_list]  # the worker's own row: started, then done
         self.assertEqual(states, [("agent", False), ("agent", True)])
         self.assertIs(runs[0], runs[1])
         self.assertEqual(runs[0].label, "Fix the failing check")
-        on_tool.assert_not_called()  # a Mock worker calls no tools; a real one's calls reach the display
+        on_tool.assert_not_called()  # the worker's calls belong to its row, never the reply's tool line
         self.assertEqual("".join(spoken), "I'll check that.\n\nSorted. The parser tests pass now.")
         self.assertNotIn("PRIVATE", turn.text)
         self.assertEqual(self.voice.model.packets[1]["turn"]["events"][-1], {"worker_result": RESULT})
         self.agent.ask.assert_not_called()
+
+    def test_worker_tool_calls_are_steps_on_its_row_not_the_replys_tools(self):
+        self.voice.model = FakeModel(dict(speech="On it.", task=TASK), dict(speech="Done.", task=None))
+        worker = Mock()
+
+        def ask(prompt, on_question=None, on_tool=None):
+            on_tool(ToolCall("t1", "Bash"))
+            on_tool(ToolCall("t1", "Bash", detail="cd ~/Repos/vision && ls"))
+            on_tool(ToolCall("t1", "Bash", detail="cd ~/Repos/vision && ls", done=True))
+            on_tool(ToolCall("t2", "Read", detail="stt.py"))
+            return Turn(text="", data=RESULT)
+
+        worker.ask.side_effect = ask
+        on_agent, on_tool = Mock(), Mock()
+        with patch("vision.conversation.create_brain", return_value=worker):
+            self.voice.ask("Fix it", on_agent=on_agent, on_tool=on_tool)
+        on_tool.assert_not_called()
+        row = on_agent.call_args.args[0]
+        self.assertEqual(row.steps, [("Bash", "cd ~/Repos/vision && ls"), ("Read", "stt.py")])
 
     def test_named_model_and_effort_get_their_own_worker(self):
         task = {**TASK, "model": "Haiku", "effort": "LOW"}
@@ -272,14 +291,14 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual([c.args[0].model for c in create.call_args_list], ["opus", "haiku", "opus"])
 
 
-class SetModelTests(unittest.TestCase):
-    """The voice model: the chat's own pick when it is a Claude or a Local model; [conversation].model
-    (/voicemodel) only for chats on Codex or Grok."""
+class VoiceModelTests(unittest.TestCase):
+    """The voice model: the chat's own pick when it is a Claude, Codex or Local model; [conversation].model
+    (set only in the config) for chats on Grok."""
 
     def setUp(self):
         self.cfg = Config()
-        self.cfg.brain.model = "gpt-5.6-sol"  # a Codex chat: the voice is the fallback, /voicemodel's
-        self.agent = SimpleNamespace(cfg=self.cfg.brain, provider="codex", session_id="s", workdir="/tmp", ask=Mock())
+        self.cfg.brain.model = "grok-4.6"  # a Grok chat: the voice is the config's fallback
+        self.agent = SimpleNamespace(cfg=self.cfg.brain, provider="grok", session_id="s", workdir="/tmp", ask=Mock())
         self.voice = VoiceConversation(self.cfg, self.agent)
         self.voice.history.append({"id": "1", "user": "hello", "events": []})
 
@@ -287,25 +306,25 @@ class SetModelTests(unittest.TestCase):
         from vision.local import LocalConversation
 
         old = self.voice.model = Mock()
-        self.voice.set_model("qwen3.6")
+        self.cfg.brain.model = "qwen3.6"
+        self.voice.follow()
         old.close.assert_called_once()
         self.assertIsInstance(self.voice.model, LocalConversation)
         self.assertEqual((self.cfg.conversation.model, self.cfg.conversation.effort), ("qwen3.6", "off"))
         self.assertEqual(len(self.voice.history), 1)  # the transcript carries over; every turn resends it
 
-    def test_local_back_to_claude_restores_an_effort(self):
-        self.voice.set_model("qwen3.6")
-        self.voice.set_model("sonnet")
+    def test_a_grok_chat_talks_through_the_fallback(self):
         self.assertIsInstance(self.voice.model, ClaudeConversation)
-        self.assertEqual((self.cfg.conversation.model, self.cfg.conversation.effort), ("sonnet", "low"))
-        self.voice.set_model("opus", effort="medium")
-        self.assertEqual(self.cfg.conversation.effort, "medium")
+        self.assertEqual(self.cfg.conversation.model, "sonnet")
 
-    def test_codex_and_grok_are_refused(self):
-        for bad in ("gpt-5.6-sol", "grok-4.6", ""):
-            with self.assertRaises(BrainError):
-                self.voice.set_model(bad)
-        self.assertEqual(self.cfg.conversation.model, "sonnet")  # untouched
+    def test_a_codex_chat_talks_through_its_own_model(self):
+        from vision.codex_voice import CodexConversation
+
+        self.cfg.brain.model = "gpt-5.6-luna"
+        self.voice.follow()
+        self.assertIsInstance(self.voice.model, CodexConversation)
+        self.assertEqual((self.cfg.conversation.model, self.cfg.conversation.effort), ("gpt-5.6-luna", "low"))
+        self.assertEqual(len(self.voice.history), 1)
 
     def test_a_claude_or_local_chat_talks_through_its_own_model(self):
         self.cfg.brain.model = "opus"
@@ -320,19 +339,19 @@ class SetModelTests(unittest.TestCase):
         self.assertEqual((self.cfg.conversation.model, self.cfg.conversation.effort), ("sonnet", "low"))
         self.assertEqual(len(self.voice.history), 1)
 
+    def test_haiku_talks_with_no_effort_and_sonnet_gets_low_back(self):
+        self.cfg.brain.model = "haiku"
+        self.voice.follow()
+        self.assertEqual((self.cfg.conversation.model, self.cfg.conversation.effort), ("haiku", ""))
+        self.assertNotIn("--effort", self.voice.model._command())
+        self.cfg.brain.model = "sonnet"
+        self.voice.follow()
+        self.assertEqual(self.cfg.conversation.effort, "low")
+
     def test_follow_leaves_a_matching_model_running(self):
         old = self.voice.model = Mock()
         self.voice.follow()
         old.close.assert_not_called()
-
-    def test_voicemodel_on_a_claude_chat_waits_for_a_codex_or_grok_one(self):
-        self.cfg.brain.model = "sonnet"
-        self.voice.follow()
-        self.voice.set_model("qwen3.6")
-        self.assertEqual(self.cfg.conversation.model, "sonnet")  # the chat's own pick still talks
-        self.cfg.brain.model = "gpt-5.6-sol"
-        self.voice.follow()
-        self.assertEqual(self.cfg.conversation.model, "qwen3.6")
 
     def test_a_new_chat_starts_on_its_own_model(self):
         cfg = Config()
@@ -446,6 +465,23 @@ for line in sys.stdin:
         self.assertEqual(result["speech"], "reply 1")
         self.assertIn("speech_stream", [e["stage"] for e in model.timing.events])
         self.assertEqual(model.complete(self.packet(), threading.Event())["speech"], "reply 2")  # no callback: fine
+
+    def test_a_retried_structured_reply_is_not_spoken_twice(self):
+        state: dict = {}
+
+        def block(index, *parts):
+            said = [ClaudeConversation._speech_piece({"type": "content_block_start", "index": index,
+                                                       "content_block": {"type": "tool_use", "name": "StructuredOutput"}}, state)]
+            for p in parts:
+                said.append(ClaudeConversation._speech_piece({"type": "content_block_delta", "index": index,
+                                                               "delta": {"type": "input_json_delta", "partial_json": p}}, state))
+            return "".join(said)
+
+        self.assertEqual(block(0, '{"speech": "Right, getting', ' Opus on it."'), "Right, getting Opus on it.")
+        # The CLI rejected the first attempt; the model writes it again, then goes further.
+        self.assertEqual(block(1, '{"speech": "Right, getting Opus', ' on it. Back soon."'), " Back soon.")
+        # A retry that says something else is not said at all.
+        self.assertEqual(block(2, '{"speech": "Something else entirely, and longer too."'), "")
 
     def test_warmup_starts_process_without_sending_a_model_request(self):
         model, path = self.model()

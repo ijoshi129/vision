@@ -432,16 +432,26 @@ class ClaudeConversation:
     @staticmethod
     def _speech_piece(event: dict, state: dict) -> str:
         """The speech text newly written in one stream event, "" if it carries none. `state` remembers which
-        content block is the structured reply: a web tool call streams its own JSON, which is never spoken."""
+        content block is the structured reply: a web tool call streams its own JSON, which is never spoken.
+        A reply the CLI rejects is written again in a new block; only what goes past the speech already
+        said is new, and a retry that says something else stays unsaid (what was said cannot be unsaid)."""
         kind = event.get("type")
         if kind == "content_block_start":
             block = event.get("content_block") or {}
             if block.get("type") == "tool_use" and block.get("name") == "StructuredOutput":
-                state["index"], state["parser"] = event.get("index"), SpeechStream()
+                state["index"], state["parser"], state["block"] = event.get("index"), SpeechStream(), ""
         elif kind == "content_block_delta" and state.get("parser") is not None and event.get("index") == state["index"]:
             delta = event.get("delta") or {}
             if delta.get("type") == "input_json_delta":
-                return state["parser"].feed(delta.get("partial_json") or "")
+                piece = state["parser"].feed(delta.get("partial_json") or "")
+                if not piece:
+                    return ""
+                state["block"] += piece
+                said, text = state.get("said", ""), state["block"]
+                if len(text) <= len(said) or not text.startswith(said):
+                    return ""
+                state["said"] = text
+                return text[len(said):]
         return ""
 
     def complete(self, packet: dict, cancel: threading.Event, on_speech=None) -> dict:
@@ -564,9 +574,9 @@ class VoiceConversation:
 
     def voice_model(self) -> str:
         """The model that talks: the chat's own pick (/model) when it can hold a voice conversation, a
-        Claude or a Local model, so one model answers typed and spoken turns alike. Codex and Grok have
-        no tool-free structured-output mode, so their chats talk through [conversation].model (the
-        fallback, /voicemodel) and keep the picked model as the worker."""
+        Claude, Codex or Local model, so one model answers typed and spoken turns alike. Grok has no
+        tool-free structured-output mode, so its chats talk through [conversation].model (the fallback,
+        set only in the config) and keep the picked model as the worker."""
         from vision.models import CONVERSATION_PROVIDERS, provider_for
 
         chat = str(getattr(getattr(self.agent, "cfg", None), "model", "") or "")
@@ -580,24 +590,12 @@ class VoiceConversation:
         if model != self.cfg.conversation.model:
             self._switch(model)
 
-    def set_model(self, model: str, effort: str = "") -> None:
-        """/voicemodel: the model that talks for chats on Codex or Grok. A Claude or Local chat keeps
-        talking through its own model, so the choice waits until the chat is on one of those."""
-        from vision.models import CONVERSATION_PROVIDERS, provider_for, provider_label
-
-        provider = provider_for(model)
-        if not model.strip() or provider not in CONVERSATION_PROVIDERS:
-            allowed = " or ".join(provider_label(x) for x in CONVERSATION_PROVIDERS)
-            raise BrainError(f"the conversation model must be a {allowed} model, not {provider_label(provider)}.")
-        self.fallback = model
-        if self.voice_model() == model:
-            self._switch(model, effort)
-
-    def _switch(self, model: str, effort: str = "") -> None:
+    def _switch(self, model: str) -> None:
         """Swap the conversation model: the running connection closes and the next turn opens the new
         one with the whole history, which every turn resends anyway. Local models never think, so their
-        effort is always off; a Claude model keeps the current level unless one is given."""
-        from vision.models import THINKING_OFF, provider_for
+        effort is always off; a Claude or Codex model keeps the current level, fitted to the model's own
+        levels (Haiku has none, so none is sent)."""
+        from vision.models import THINKING_OFF, coerce_effort, provider_for
 
         provider = provider_for(model)
         if self.model is not None:
@@ -605,14 +603,18 @@ class VoiceConversation:
         self.cfg.conversation.model = model
         if provider == "local":
             self.cfg.conversation.effort = THINKING_OFF
-        elif effort:
-            self.cfg.conversation.effort = effort
-        elif self.cfg.conversation.effort == THINKING_OFF:
-            self.cfg.conversation.effort = "low"  # coming back from a local model: the config default
+        else:
+            # Back from a local model or Haiku (no level): the config default, not the model's resting one.
+            effort = self.cfg.conversation.effort if self.cfg.conversation.effort not in (THINKING_OFF, "") else "low"
+            self.cfg.conversation.effort, _ = coerce_effort(model, effort)
         if provider == "local":
             from vision.local import LocalConversation
 
             self.model = LocalConversation(self.cfg)
+        elif provider == "codex":
+            from vision.codex_voice import CodexConversation
+
+            self.model = CodexConversation(self.cfg)
         else:
             self.model = ClaudeConversation(self.cfg)
 
@@ -813,6 +815,27 @@ class VoiceConversation:
         allow_more = True
         dispatched: set[str] = set()
 
+        def worker_tools(row: AgentRun, who: str = ""):
+            """The worker's tool calls as steps on its agent row, as a native subagent's are: the reply's
+            own tool line is for the front end, and the worker's calls there read as if Vision made them."""
+            seen: dict[str, int] = {}
+
+            def tool_seen(call):
+                if who and on_status and not call.done:
+                    on_status(progress_label(who, call))
+                step = (call.name, call.detail)
+                if call.id in seen:
+                    if row.steps[seen[call.id]] == step:
+                        return
+                    row.steps[seen[call.id]] = step
+                else:
+                    seen[call.id] = len(row.steps)
+                    row.steps.append(step)
+                if on_agent:
+                    on_agent(row)
+
+            return tool_seen
+
         def run_agent(task: dict, *, agent: str | None, model: str | None, effort: str, allowlist: bool, n: int, key: str = "") -> object:
             """Launch through the supervisor and show the run as an agent row; returns the Run."""
             nonlocal allow_more
@@ -832,14 +855,9 @@ class VoiceConversation:
             if timing:
                 timing.event("worker_start")
 
-            def tool_seen(call):
-                if on_status and not call.done:
-                    on_status(progress_label(row.kind if allowlist else "The worker", call))
-                if on_tool:
-                    on_tool(call)
-
             run = self.supervisor.launch(task, agent=agent, model=model, effort=effort, allowlist=allowlist, row=row, key=key,
-                                         on_agent=on_agent, on_question=on_question, on_tool=tool_seen if on_status else on_tool,
+                                         on_agent=on_agent, on_question=on_question,
+                                         on_tool=worker_tools(row, row.kind if allowlist else "The worker"),
                                          on_status=on_status, channel=channel)
             if run.worker is not None and row.tokens_fn is None:
                 row.tokens_fn = lambda w=run.worker: getattr(w, "output_tokens", 0) or 0
@@ -858,7 +876,8 @@ class VoiceConversation:
                     waiting.row.done = False
                     if on_agent:
                         on_agent(waiting.row)
-                run = self.supervisor.answer(waiting.id, text, on_agent=on_agent, on_question=on_question, on_tool=on_tool, on_status=on_status)
+                run = self.supervisor.answer(waiting.id, text, on_agent=on_agent, on_question=on_question,
+                                             on_tool=worker_tools(waiting.row) if waiting.row is not None else None, on_status=on_status)
                 if run.state == "waiting_for_user":
                     return relay_question(run)
                 current["events"].append({"worker_result": run.result})

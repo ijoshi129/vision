@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from vision.config import DATA_DIR, STATE_DIR, WORKSPACE_DIR, BrainConfig, weather_ready
-from vision import cachettl, clis, compat, models
+from vision import clis, compat, models
 from vision.persona import system_prompt
 from vision.reply import READING, THINKING, dedupe_status, retry_label
 
@@ -263,6 +263,7 @@ class AgentRun:
     # The supervisor's report once a launched agent stops (vision/supervisor.py): its state, the
     # result's summary, what changed, what was checked, what is open. Shown under the row.
     details: list[str] = field(default_factory=list)
+    prompt: str = ""  # the task as given to the child, when the provider exposes it
 
     @property
     def started_at(self) -> float:
@@ -303,6 +304,8 @@ def agent_frame(run: AgentRun) -> dict:
     frame = {"type": "agent", "id": run.id, "kind": run.kind, "label": run.label, "done": run.done,
              "tools": run.tool_uses or len(run.steps), "model": models.model_label(run.model) if run.model else "", "effort": run.effort,
              "started": round(run.started_at, 3)}
+    frame.update({"steps": [{"tool": tool, "detail": detail} for tool, detail in run.steps],
+                  "prompt": run.prompt, "summary": run.summary})
     tokens = run.tokens or (run.tokens_fn() if run.tokens_fn and not run.done else 0)
     if tokens:
         frame["tokens"] = tokens
@@ -327,8 +330,13 @@ def run_from_frame(frame: dict, run: AgentRun | None = None) -> AgentRun:
     run.tokens = int(frame.get("tokens") or run.tokens)
     if frame.get("started"):
         run.started = time.monotonic() - max(0.0, time.time() - float(frame["started"]))
+    run.prompt = frame.get("prompt", run.prompt)
+    run.summary = frame.get("summary", run.summary)
+    steps = frame.get("steps")
     step = frame.get("step")
-    if isinstance(step, dict):
+    if isinstance(steps, list):
+        run.steps = [(s.get("tool") or "", s.get("detail") or "") for s in steps if isinstance(s, dict)]
+    elif isinstance(step, dict):
         pair = (step.get("tool") or "", step.get("detail") or "")
         if pair[0] and (not run.steps or run.steps[-1] != pair):
             run.steps.append(pair)
@@ -355,16 +363,83 @@ class ToolCall:
     done: bool = False
     is_error: bool = False
     output: str = ""  # the text the model got back (the UI shows it on a click)
+    diff: list = field(default_factory=list)  # an edit's hunks, see edit_diff; the UI draws them as Claude Code does
 
 
 TOOL_OUTPUT_CHARS = 4000  # the tail of a tool result a `tool` frame carries (shown on a click or tap)
+DIFF_LINES = 400  # most diff lines a `tool` frame carries (a new file's first lines, a huge rewrite's start)
+EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
 
 
 def tool_frame(call: ToolCall) -> dict:
     """The wire form of a main-conversation tool call: what the server sends the phone and a
     terminal sends the server (the phone draws it as a row, as the terminal does)."""
-    return {"type": "tool", "id": call.id, "name": call.name, "detail": call.detail, "done": call.done,
-            "is_error": call.is_error, "output": (call.output or "")[-TOOL_OUTPUT_CHARS:]}
+    frame = {"type": "tool", "id": call.id, "name": call.name, "detail": call.detail, "done": call.done,
+             "is_error": call.is_error, "output": (call.output or "")[-TOOL_OUTPUT_CHARS:]}
+    if call.diff:
+        frame["diff"] = call.diff
+    return frame
+
+
+def _cap_hunks(hunks: list[dict]) -> list[dict]:
+    """The hunks cut to DIFF_LINES lines in all, dropping any left empty."""
+    out, left = [], DIFF_LINES
+    for h in hunks:
+        if left <= 0:
+            break
+        lines = [str(ln) for ln in h.get("lines") or []][:left]
+        if lines:
+            out.append({"old": int(h.get("old") or 0), "new": int(h.get("new") or 0), "lines": lines})
+            left -= len(lines)
+    return out
+
+
+def edit_diff(result) -> list[dict]:
+    """An edit's hunks from Claude Code's structured tool result: `[{"old": 12, "new": 12, "lines":
+    [" context", "-gone", "+added"]}]`, the line numbers where each hunk starts in the old and new
+    file. A newly written file is one hunk of added lines. Empty when the result has neither."""
+    if not isinstance(result, dict):
+        return []
+    patch = result.get("structuredPatch")
+    if isinstance(patch, list) and patch:
+        return _cap_hunks([{"old": h.get("oldStart"), "new": h.get("newStart"), "lines": h.get("lines")}
+                           for h in patch if isinstance(h, dict)])
+    if result.get("type") == "create" and isinstance(result.get("content"), str):
+        return _cap_hunks([{"old": 0, "new": 1, "lines": ["+" + ln for ln in result["content"].splitlines()]}])
+    return []
+
+
+def input_diff(name: str, args) -> list[dict]:
+    """The same from the call's own input, for when the result carries no patch: Edit's old and new
+    strings, MultiEdit's edits, Write's content. Line numbers are unknown here (0: the UI shows none)."""
+    import difflib
+
+    if not isinstance(args, dict):
+        return []
+    if name == "Write" and isinstance(args.get("content"), str):
+        return _cap_hunks([{"old": 0, "new": 0, "lines": ["+" + ln for ln in args["content"].splitlines()]}])
+    edits = args.get("edits") if name == "MultiEdit" else [args] if name == "Edit" else []
+    hunks = []
+    for e in edits or []:
+        if not isinstance(e, dict):
+            continue
+        old, new = str(e.get("old_string") or "").splitlines(), str(e.get("new_string") or "").splitlines()
+        lines = [ln for ln in difflib.ndiff(old, new) if ln[:1] in " -+"]
+        if lines:
+            hunks.append({"old": 0, "new": 0, "lines": [ln[0] + ln[2:] for ln in lines]})
+    return _cap_hunks(hunks)
+
+
+def unified_diff_hunks(text: str) -> list[dict]:
+    """Hunks from a unified diff (`@@ -12,3 +12,4 @@` headers), as Codex reports a file change."""
+    hunks: list[dict] = []
+    for line in str(text or "").splitlines():
+        m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+        if m:
+            hunks.append({"old": int(m.group(1)), "new": int(m.group(2)), "lines": []})
+        elif hunks and line[:1] in (" ", "-", "+") and not line.startswith(("--- ", "+++ ")):
+            hunks[-1]["lines"].append(line)
+    return _cap_hunks(hunks)
 
 
 def context_figure(brain) -> dict | None:
@@ -375,19 +450,6 @@ def context_figure(brain) -> dict | None:
     if not ctx or not ctx[1]:
         return None
     return {"tokens": int(ctx[0]), "window": int(ctx[1])}
-
-
-def cache_figure(brain) -> dict | None:
-    """When the chat's prompt cache goes cold, `{"expires": epoch seconds, "ttl": 300 or 3600}`, for
-    the phone to count down on its own clock. Claude only (the others don't promise a lifetime),
-    and None before the session's first reply. Expired already (or cached for another model): 0."""
-    if getattr(brain, "provider", "") != "claude":
-        return None
-    state = cachettl.cache_state(brain.session_id)
-    if state is None:
-        return None
-    left = cachettl.seconds_left(brain.session_id, brain.resolved_model(), time.time())
-    return {"expires": state.expires if left else 0, "ttl": state.ttl}
 
 
 def usage_summary(usage: dict) -> str:
@@ -641,6 +703,7 @@ class Brain:
         tools: dict[str, ToolCall] = {}  # the main conversation's tool calls, by tool_use_id
         child_tools: set[str] = set()  # subagents' tool calls (their rows are AgentRun.steps), by tool_use_id
         agent_models: dict[str, str] = {}  # model override seen on an Agent call before its AgentRun exists
+        agent_prompts: dict[str, str] = {}
         workflows: dict[str, list[AgentRun]] = {}  # a Workflow call's tool_use_id → the agents its script spawned
         open_workflows: set[str] = set()  # Workflow calls whose task_notification has not come yet
         ended_workflows: set[str] = set()
@@ -718,7 +781,7 @@ class Brain:
             """A subagent's row: its model override if the Agent call had one, else the model it
             inherits from us; the effort is always ours (a native subagent has no effort knob)."""
             run = agents[pid] = AgentRun(pid, kind, label, model=agent_models.get(pid) or self.cfg.model or "", effort=self.cfg.effort or "",
-                                         started=time.monotonic())  # the row's live timer runs from here
+                                         started=time.monotonic(), prompt=agent_prompts.get(pid, ""))
             turn.agents.append(run)
             return run
 
@@ -967,11 +1030,14 @@ class Brain:
                     # (parallel calls each get their own result), the model is thinking again.
                     results = [b for b in ev.get("message", {}).get("content", []) if isinstance(b, dict) and b.get("type") == "tool_result"]
                     pending.difference_update(b.get("tool_use_id") for b in results)
+                    structured = ev.get("tool_use_result") or ev.get("toolUseResult")
                     for b in results:
                         call = tools.get(b.get("tool_use_id"))
                         if call is not None:
                             call.output = result_text(b.get("content"))
                             call.is_error = bool(b.get("is_error"))
+                            if call.name in EDIT_TOOLS and len(results) == 1:
+                                call.diff = [] if call.is_error else edit_diff(structured) or call.diff
                             call.done = True
                             tool_changed(call)
                     if on_status and results and not pending:
@@ -998,18 +1064,24 @@ class Brain:
                         elif block.get("type") == "tool_use" and block.get("id") in tools:
                             call = tools[block["id"]]  # the input streamed as JSON deltas; here it is whole
                             call.detail = tool_detail(call.name, block.get("input") or {})
+                            if call.name in EDIT_TOOLS:
+                                call.diff = input_diff(call.name, block.get("input"))  # the result's patch replaces it
                             tool_changed(call)
                         elif block.get("type") == "tool_use" and block.get("name") in ("Agent", "Task"):
                             # An Agent/Task call's own input carries the model override, if any (no
                             # effort knob exists for a native subagent, unlike the voice worker's).
                             # Its AgentRun usually doesn't exist yet (task_started follows this
                             # message), so stash it for whichever creation site runs first.
-                            model = (block.get("input") or {}).get("model")
-                            if model and block.get("id"):
-                                agent_models[block["id"]] = model
+                            inp = block.get("input") or {}
+                            model = inp.get("model")
+                            if block.get("id"):
+                                if model:
+                                    agent_models[block["id"]] = model
+                                agent_prompts[block["id"]] = inp.get("prompt") or ""
                                 run = agents.get(block["id"])
                                 if run is not None:
-                                    run.model = model
+                                    run.model = model or run.model
+                                    run.prompt = agent_prompts[block["id"]]
                                     agent_changed(run)
                 elif t == "result":
                     got_result = True
@@ -1056,6 +1128,15 @@ class Brain:
             idle[0] = False  # no timers from here: the process is gone
             if grace[0]:
                 grace[0].cancel()
+            # A callback (including the durable journal) can raise while Claude is
+            # still waiting on stdin. Reap it before dropping the only reference.
+            if proc.poll() is None:
+                try:
+                    compat.terminate(proc)
+                    proc.wait(timeout=3)
+                except Exception:  # noqa: BLE001
+                    proc.kill()
+                    proc.wait()
             with self._lock:
                 self._proc = None
             with self._stdin_lock:

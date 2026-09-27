@@ -37,6 +37,7 @@ from vision.config import (
 SAMPLE_RATE = 24000  # both engines speak 24 kHz mono
 _SENTENCE_END = re.compile(r"(?<=[.!?…])[\"')\]]?\s+|\n+")
 _ABBREV = re.compile(r"\b(e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|St|No|approx)\.$", re.I)
+_TAIL_END = re.compile(r"[.!?…][\"')\]]?\s*$")  # a buffer that ends on a finished sentence
 
 
 class TTSError(RuntimeError):
@@ -1274,6 +1275,13 @@ class StreamingSpeaker:
     MAX_CHUNK_CHARS = 320  # ~20 s of speech; keeps stop responsive and the continuation context short
     CPS = 14.0  # starting guess at source chars per second of speech, refined per chunk
     BLEND_S = 2.0  # seconds over which the reveal eases onto a chunk's exact timing once it is known
+    # A reply's last sentence has no space after it, so _SENTENCE_END cannot see it end: it used to
+    # wait for a tool call or finish(), which comes only once the brain's process has exited (seconds
+    # after the text, minutes on a turn held open for background agents). Once the text goes quiet
+    # the tail is spoken anyway: soon if it ends like a sentence (the wait keeps "3." + "5" whole),
+    # later if it does not (a list item, a code block).
+    TAIL_IDLE_S = 0.35
+    IDLE_S = 1.5
     # A styled voice picks its style (conversational / expressive / reassuring) per chunk, judged from
     # the whole chunk's text, so a reply can open flat, get excited and settle again. A chunk in a new
     # style starts cold from that style's reference clip (continuity would otherwise carry the old
@@ -1312,6 +1320,9 @@ class StreamingSpeaker:
         self._filler_lock = threading.Lock()  # orders "first sentence queued" against "filler due"
         self._filler_timer: threading.Timer | None = None
         self._closed = False
+        self._buf_lock = threading.RLock()  # feed/flush run on the brain's thread, the idle flush on a timer's
+        self._idle_timer: threading.Timer | None = None
+        self._fed = 0  # feed() calls so far: an idle timer only flushes if nothing came after it
         self._synth_thread = threading.Thread(target=self._synth_loop, daemon=True)
         self._play_thread = threading.Thread(target=self._play_loop, daemon=True)
         self.speaker._stop.clear()
@@ -1319,13 +1330,34 @@ class StreamingSpeaker:
         self._play_thread.start()
 
     def feed(self, delta: str) -> None:
-        self._buf += delta
-        self._flush(final=False)
+        with self._buf_lock:
+            self._buf += delta
+            self._fed += 1
+            self._flush(final=False)
+            self._cancel_idle()
+            if self._buf.strip() and not self._closed:
+                done = _TAIL_END.search(self._buf) and not _ABBREV.search(self._buf.rstrip().rstrip("\"')]"))
+                self._idle_timer = threading.Timer(self.TAIL_IDLE_S if done else self.IDLE_S, self._idle_flush, args=(self._fed,))
+                self._idle_timer.daemon = True
+                self._idle_timer.start()
+
+    def _cancel_idle(self) -> None:  # under _buf_lock
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _idle_flush(self, fed: int) -> None:
+        with self._buf_lock:
+            if fed == self._fed and not self._closed and not self.speaker._stop.is_set():
+                self._idle_timer = None
+                self._flush(final=True, tail="sentence")
 
     def flush(self, tail: str = "paragraph") -> None:
         """Speak the buffered tail now. The model's text block ended without a trailing space (it went
         off to use a tool), so its last sentence would otherwise wait for the next block or finish()."""
-        self._flush(final=True, tail=tail)
+        with self._buf_lock:
+            self._cancel_idle()
+            self._flush(final=True, tail=tail)
 
     def _flush(self, final: bool, tail: str = "end") -> None:
         while True:
@@ -1626,7 +1658,9 @@ class StreamingSpeaker:
 
     def finish(self) -> None:
         """Flush remaining text and wait until playback completes (or stop() was called)."""
-        self._flush(final=True)
+        with self._buf_lock:
+            self._cancel_idle()
+            self._flush(final=True)
         with self._filler_lock:
             self._closed = True  # a filler still on its clock is not wanted after the reply
             self._cancel_filler()
@@ -1636,6 +1670,8 @@ class StreamingSpeaker:
         self._floor = 1 << 30  # everything is said (or dropped by stop): nothing stays hidden
 
     def stop(self) -> None:
+        with self._buf_lock:
+            self._cancel_idle()
         with self._filler_lock:
             self._closed = True
             self._cancel_filler()

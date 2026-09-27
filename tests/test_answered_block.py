@@ -221,6 +221,28 @@ class QueuedStripTests(unittest.TestCase):
         self.assertEqual(len(screen.entries), 0)  # not in the transcript yet
         self.assertIn("goes when this reply ends", self._strip(self._screen("later", can_steer=False)))
 
+    def test_mid_reply_enter_queues_and_send_now_holds_the_selected_message(self):
+        from vision.turnqueue import QueuedTurn
+
+        screen = self._screen()
+        screen.start_reply()
+        screen.on_submit = lambda text: screen.turns.put(QueuedTurn(text, shown=True))
+        seen = []
+
+        def steer(text, queued_id=None):
+            seen.append((text, screen.turns.held, queued_id))
+            screen.turns.take(queued_id)
+
+        screen.on_steer = steer
+        screen._submit("follow up")
+        self.assertEqual(screen.queued, ["follow up"])
+        queued_id = screen.turns.shown()[0].id
+        screen._queue_pick()
+        screen._queue_send_now()
+        self.assertEqual(seen, [("follow up", True, queued_id)])
+        self.assertEqual(screen.queued, [])
+        self.assertFalse(screen.turns.held)
+
     def test_picking_holds_the_queue_and_removes_one(self):
         screen = self._screen("one", "two", "three")
         screen._queue_pick()

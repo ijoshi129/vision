@@ -19,11 +19,11 @@ from rich.table import Table
 from rich.text import Text
 
 from vision import __version__
-from vision.brain import BrainError, agent_frame, cache_figure, context_figure, tool_frame
+from vision.brain import agent_frame, context_figure, tool_frame
 from vision.buddy import Buddy
 from vision.warmup import WarmupProgress, warm_voice
 from vision import usage as usage_ui
-from vision import cachettl, clis
+from vision import clis
 from vision.config import (
     CONFIG_PATH,
     LLAMA_DIR,
@@ -48,7 +48,7 @@ from vision.config import (
     voice_choices,
     voice_dir,
 )
-from vision.models import CONVERSATION_TABS, MODEL_TABS, THINKING_OFF, coerce_effort, effort_choices, model_label, provider_default, provider_for, provider_label, replace_retired_models, supports_effort
+from vision.models import MODEL_TABS, THINKING_OFF, coerce_effort, effort_choices, model_label, provider_default, provider_for, provider_label, replace_retired_models, supports_effort
 from vision.reply import status_label
 from rich.markup import escape
 from vision.ui import PLACEHOLDER, ChatScreen, ReplyView, SlashCommand, answered_grid, header_renderable, notice_grid, pick, short_path, show_header, show_user, user_grid, reply_grid, hearing_grid
@@ -134,20 +134,36 @@ def _split_model_arg(arg: str) -> tuple[str, bool]:
     return (words[0] if words else ""), full
 
 
-def _switch_model(cfg: Config, brain, model: str, voice_mode: bool, effort: str | None = None, full: bool = False):
+def _handoff_text(brain, history: list[dict] | None) -> str | None:
+    """The conversation to hand the next provider: the outgoing session as saved on disk, or the chat's
+    own transcript when that has turns the session never saw (replies from the conversation model, or
+    a turn that failed before the provider saved anything). None if there is nothing to carry."""
+    from vision.sessions import format_transcript, session_history
+
+    def asked(messages: list[dict]) -> int:
+        return sum(1 for m in messages if m.get("role") == "user" and (m.get("text") or "").strip())
+
+    saved = session_history(brain.provider, brain.session_id, limit=0, include_context=True) if brain.session_id else []
+    chat = history or []
+    return format_transcript(saved if asked(saved) >= asked(chat) else chat) or None
+
+
+def _switch_model(cfg: Config, brain, model: str, voice_mode: bool, effort: str | None = None, full: bool = False,
+                  history: list[dict] | None = None):
     """Apply a model (and optionally effort), replacing the driver when providers differ.
 
-    Same-provider switches keep the existing session. Cross-provider switches read the saved
-    conversation text without calling the outgoing model. `full` is a compatibility-only argument.
+    Same-provider switches keep the existing session. Cross-provider switches carry the conversation
+    as text without calling the outgoing model: the saved session, or `history` (the chat's own
+    transcript, as the user saw it) when that is the fuller one. `full` is a compatibility-only argument.
     """
-    from vision.brain import create_brain, local_handoff
+    from vision.brain import create_brain
 
     old_provider = brain.provider
     new_provider = provider_for(model)
     changed = model != cfg.brain.model
     transcript = getattr(brain, "handoff", None)
-    if new_provider != old_provider and brain.session_id:
-        transcript = local_handoff(brain)
+    if new_provider != old_provider:
+        transcript = _handoff_text(brain, history) or transcript
     cfg.brain.model = model
     if new_provider == "claude" and model != "opus" and cfg.brain.fast:
         cfg.brain.fast = False  # Claude fast mode is Opus-only; /model away from Opus turns it off.
@@ -609,16 +625,6 @@ def _voice_summary(cfg: Config, sep: str = " · ") -> str:
     return sep.join([model_label(model) or model, _effort_word(cfg.conversation.effort)])
 
 
-def _voicemodel_note(cfg: Config, choice: str, saved: bool) -> str:
-    """What /voicemodel did: it names the voice for Codex and Grok chats; a Claude or Local chat keeps
-    talking through its own model (VoiceConversation.voice_model)."""
-    tail = " (saved)" if saved else ""
-    if cfg.conversation.model == choice:
-        return f"voice model → {_voice_summary(cfg)}{tail}"
-    return (f"voice for Codex and Grok chats → {model_label(choice) or choice}{tail} · "
-            f"this chat talks through its own model, {_voice_summary(cfg)}")
-
-
 def _corner_label(cfg: Config, brain) -> str:
     """'Sonnet 5 (high) · fast': the model typed input goes to, in the input box's bottom-right
     border like the Grok CLI's `Grok 4.6 (xhigh)`. Effort off leaves the parenthesis out."""
@@ -688,9 +694,7 @@ HELP_TEXT = (
     "[bold]/weather [place][/bold] · [bold]/cancel[/bold] stop the running or waiting agent · "
     "[bold]/router off|audit|on [save][/bold] the front end: off = the voice model decides delegation itself; audit = routes are logged "
     "and shown, nothing changes; on = basic questions stay with the conversation model, the weather and current facts come as data, "
-    "everything else goes to the default agent (Opus 5 · medium, high for hard tasks) · "
-    "[bold]/voicemodel [model] [save][/bold] the voice for Codex and Grok chats (a Claude, or a Local model on the llama-server; "
-    "a Claude or Local chat talks through its own /model; /voicemodel qwen3.6 save keeps it as the default)\n"
+    "everything else goes to the default agent (Opus 5 · medium, high for hard tasks)\n"
     "[dim]Type / for the command menu (↑/↓ choose · Enter runs · Tab fills in · Esc hides) · "
     "Enter sends (mid-reply it queues) · Ctrl-X sends it into the running reply now (empty box: the queued ones) · "
     "↑ on an empty box picks a queued message: Enter edits, Del removes, Esc leaves (the queue waits meanwhile) · "
@@ -765,8 +769,6 @@ def _menu_commands(cfg: Config, brain_ref: Callable[[], object]) -> list[SlashCo
         SlashCommand("search", "a search-only web lookup (results as data, no page opened)"),
         SlashCommand("weather", "the weather from Apple WeatherKit (/weather <place>)"),
         SlashCommand("cancel", "stop the agent that is running or waiting for an answer"),
-        SlashCommand("voicemodel", "the voice for Codex and Grok chats: a Claude or a Local model (add save to keep it)",
-                     lambda: [(v, f"{l} · {d}") for _, rows, _ in CONVERSATION_TABS for v, l, d in rows]),
         SlashCommand("router", "the front end: off, audit or on (add save to keep it)", lambda: [("off", "the voice model decides delegation itself"), ("audit", "log and show routes, change nothing"), ("on", "enforce: basic → local, weather, search, else the default agent")]),
         SlashCommand("clear", "clear the screen"),
         SlashCommand("help", "show the command list"),
@@ -781,10 +783,36 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
     from vision.brain import PLAN_QUESTION
     from vision.config import STATE_DIR
     from vision.conversation import VoiceConversation
-    from vision.sessions import LiveTitle
+    from vision.sessions import LiveTitle, session_history
+    from vision.turnjournal import ChatJournal, latest_terminal_recovery, recovery_context
+    import uuid
 
     cfg = _cfg(model, voice, effort, quiet=True)
-    brain = _brain(cfg, voice_mode=False, cont=cont, new=False)
+    recovery = latest_terminal_recovery() if not (cont or join or model or effort) else None
+    turn_journal = ChatJournal(recovery[0] if recovery else f"terminal-{uuid.uuid4().hex}")
+    if not turn_journal.claim():  # another window opened the same crashed chat a moment ago
+        recovery = None
+        turn_journal = ChatJournal(f"terminal-{uuid.uuid4().hex}")
+        turn_journal.claim()
+    if recovery:
+        from vision.brain import create_brain
+
+        recovered = recovery[1]
+        for lost_text in recovered["pending"]:
+            turn_journal.append("unqueued", text=lost_text)
+            turn_journal.append("steer_failed", text=lost_text)
+        cfg.brain.model = recovered["model"] or cfg.brain.model
+        cfg.brain.effort = recovered["effort"] or cfg.brain.effort
+        sid = recovered["session_id"]
+        # The local provider saves its model context only after a complete turn. Carry
+        # the journal's transcript into a fresh context when it stopped mid-turn.
+        if provider_for(cfg.brain.model) == "local":
+            sid = None
+        brain = create_brain(cfg.brain, voice_mode=False, session_id=sid)
+        if not sid:
+            brain.handoff = recovery_context(recovered["history"], recovered["recovery_rows"])
+    else:
+        brain = _brain(cfg, voice_mode=False, cont=cont, new=False)
     conversation = VoiceConversation(cfg, agent=brain)
     state = {"speak": speak, "speaker": None, "mic": None, "stt": None, "ss": None}
     # Voice modes run on a worker thread inside the screen (see voice_loop): `talk` is on while a
@@ -814,6 +842,24 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
     # Joined to a chat `vision serve` runs (remote.py): `home` is the local brain (and its model,
     # effort, directory) to return to when the chat closes or /new leaves it.
     state.update({"server": None, "home": None})
+    if not recovery:
+        turn_journal.append("chat", source="terminal", model=cfg.brain.model, effort=cfg.brain.effort,
+                            session_id=brain.session_id)
+        turn_journal.append("base", history=session_history(brain.provider, brain.session_id or ""))
+
+    def journal_event(kind: str, **fields):
+        if state["server"] is None:  # a joined server chat has its own durable journal
+            turn_journal.append(kind, **fields)
+
+    def reset_turn_journal():
+        nonlocal turn_journal
+        turn_journal.append("close")
+        turn_journal.release()
+        turn_journal = ChatJournal(f"terminal-{uuid.uuid4().hex}")
+        turn_journal.claim()
+        turn_journal.append("chat", source="terminal", model=cfg.brain.model, effort=cfg.brain.effort,
+                            session_id=brain.session_id)
+        turn_journal.append("base", history=session_history(brain.provider, brain.session_id or ""))
     if speak:
         state["speaker"] = _speaker(cfg)
         threading.Thread(target=state["speaker"]._load, daemon=True).start()
@@ -864,13 +910,11 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             parts.append(u)
         return "  ·  ".join(parts)
 
-    def wake_status() -> str:  # bottom-right corner: `34% ctx  ·  cache 58:12  ·  wake off` (the figures the brain has)
+    def wake_status() -> str:  # bottom-right corner: `34% ctx  ·  wake off` (the figures the brain has)
         parts = []
         ctx = getattr(brain, "context", None)
         if ctx and ctx[1]:
             parts.append(f"{min(100, round(100 * ctx[0] / ctx[1]))}% ctx")
-        if brain.provider == "claude" and (cache := cachettl.label(cachettl.seconds_left(brain.session_id, brain.resolved_model(), time.time()))):
-            parts.append(cache)  # repainted every refresh_interval, so it ticks
         parts.append("wake on" if state["wake"] else "wake off")
         return "  ·  ".join(parts)
 
@@ -942,28 +986,38 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
 
         marks = []
         for f in turn.get("agents") or []:
+            cut_off = not f.get("done", True)
             run = run_from_frame({**f, "done": True}, RemoteAgentRun(f.get("id", ""), "agent", ""))
-            run.failed, run.cut_off = bool(f.get("failed")), bool(f.get("cut_off"))
+            run.failed, run.cut_off = bool(f.get("failed")) or cut_off, bool(f.get("cut_off")) or cut_off
             run.status_text = f.get("status") or ""
             marks.append((int(f.get("at") or 0), run))
         for f in turn.get("tools") or []:
+            cut_off = not f.get("done", True)
             call = ToolCall(f.get("id", ""), f.get("name", ""), f.get("detail", ""), done=True,
-                            is_error=bool(f.get("is_error")), output=f.get("output") or "")
+                            is_error=bool(f.get("is_error")) or cut_off,
+                            output=f.get("output") or ("Interrupted while this tool was running" if cut_off else ""),
+                            diff=f.get("diff") or [])
             marks.append((int(f.get("at") or 0), call))
         return marks
 
-    if brain.session_id:  # --continue: the picked-up conversation is on screen from the start
+    if recovery:
+        paint_turns(recovery[1]["history"])
+        screen.set_history([row["text"] for row in recovery[1]["history"]
+                            if row.get("role") == "user" and row.get("text")])
+        note("The last reply was interrupted. Check any tool changes, then type to continue.", "warn")
+    elif brain.session_id:  # --continue: the picked-up conversation is on screen from the start
         show_history(brain.provider, brain.session_id)
     else:
         paint_open()
 
     # ---- one reply, run on a worker thread so the UI keeps drawing
     def run_turn(text: str, from_voice: bool = False, timing=None, speak_remote: bool = False, follow: bool = False,
-                 voice_remote: bool = False, talk_remote: bool = False):
+                 voice_remote: bool = False, talk_remote: bool = False, phone: bool = False):
         """`follow`: the turn is already running on the phone chat this screen is joined to; show it
         as it streams rather than sending the message (RemoteBrain.ask knows it is that turn).
         `voice_remote`: spoken on the phone; `talk_remote`: typed during a call on the phone. Both go
-        to the conversation model, like talk mode here."""
+        to the conversation model, like talk mode here. `phone`: sent from the phone. Phone turns
+        (and followed ones) are spoken on the phone if at all, never out of this machine's speakers."""
         if from_voice and timing is None and cfg.conversation.timing:
             from vision.timing import VoiceTiming
             timing = VoiceTiming()
@@ -973,7 +1027,8 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                                                         talk=(state["talk"] and not state["once"]) or talk_remote)
         state["driver"] = driver
         ss = None
-        if state["speak"] or (state["talk"] and not state["once"]):  # a voice conversation always talks back
+        local = not (phone or follow)
+        if local and (state["speak"] or (state["talk"] and not state["once"])):  # a voice conversation always talks back
             from vision.tts import StreamingSpeaker
 
             ss = StreamingSpeaker(speaker(), timing=timing)
@@ -985,6 +1040,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         if ss:
             entry.gate = lambda: ss.spoken_position  # keep the sub-character timing for smooth frames
         started = time.time()
+        journal_event("start", text=text)
         link_post({"type": "start", "text": text, "speak": speak_remote})
         if link:
             link.post_summary(force=True)
@@ -997,6 +1053,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         steers = []
 
         def on_text(d):
+            journal_event("delta", text=d)
             streamed.append(d)
             screen.update_reply(entry, delta=d)
             if ss:
@@ -1007,6 +1064,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             # A message went into the running turn (Ctrl-X here, or from the phone): it sits in the
             # transcript where it went in, and the rest of the reply follows it (as Claude Code shows it).
             nonlocal entry
+            journal_event("steered", text=t)
             steers.append((len("".join(streamed)), t, len(agent_frames)))
             entry = screen.split_reply(entry, user_grid(t))
             if ss:
@@ -1023,6 +1081,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
 
         def on_question(questions):
             nonlocal entry
+            journal_event("question", questions=questions)
             screen.update_reply(entry, status="waiting for your answer…", force=True)
             if buddy:
                 buddy.listening()
@@ -1034,6 +1093,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                     link.post_summary(force=True)
 
             answers = screen.ask_questions(questions, on_open=opened)  # answered here or on the phone, whichever is first
+            journal_event("answered", questions=questions, answers=answers)
             link_post({"type": "answered", "questions": questions, "answers": answers})  # the phone shows it in the reply
             if link:
                 link.post_summary(force=True)
@@ -1046,6 +1106,11 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             return answers
 
         def on_agent(run):
+            frame = agent_frame(run)
+            frame["at"] = agent_frames.get(run.id, {}).get("at", len("".join(streamed)))
+            from vision.turnjournal import compact_agent_frame
+
+            journal_event("agent", frame=compact_agent_frame(frame, agent_frames.get(run.id)))
             if run.id in entry.agents:  # still at work when a question or steer split the reply: it moved down
                 homes[run.id] = entry
             home = homes.setdefault(run.id, entry)
@@ -1054,12 +1119,13 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             else:  # it finished before a question or steered message split the reply: its row stays up there
                 home.invalidate()
                 screen.app.invalidate()
-            frame = agent_frame(run)
-            frame["at"] = agent_frames.get(run.id, {}).get("at", len("".join(streamed)))
             agent_frames[run.id] = frame
             link_post(dict(frame))
 
         def on_tool(call):
+            frame = tool_frame(call)
+            frame["at"] = tool_frames.get(call.id, {}).get("at", len("".join(streamed)))
+            journal_event("tool", frame=frame)
             home = tool_homes.setdefault(call.id, entry)
             if home is entry:
                 screen.update_reply(entry, tool=call)
@@ -1067,8 +1133,6 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 home.place(call)
                 home.invalidate()
                 screen.app.invalidate()
-            frame = tool_frame(call)
-            frame["at"] = tool_frames.get(call.id, {}).get("at", len("".join(streamed)))
             tool_frames[call.id] = frame
             link_post(dict(frame))  # the phone draws it as a row too
 
@@ -1094,6 +1158,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 buddy.fail()
         finally:
             state["driver"] = state["steered"] = None
+            if turn is not None or error:
+                journal_event("done", text=(turn.text if turn is not None else "") or "".join(streamed),
+                              error=error, session_id=(turn.session_id if turn is not None else None) or brain.session_id)
             if (agent_frames or tool_frames) and not joined():
                 # The rows stay with the conversation (the server keeps a joined chat's itself).
                 from vision import agentlog
@@ -1146,8 +1213,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         note(f"router (audit): {route.describe(cfg.router)}")
 
     def cancel_reply():
-        conversation.cancel()
-        brain.cancel()
+        screen.answer_questions(None)
+        background(conversation.cancel)
+        background(brain.cancel)
         if state["ss"]:
             state["ss"].stop()
         elif state["speaker"]:
@@ -1160,30 +1228,47 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         """Run typed follow-ups in submission order, never concurrently on the same brain. While a
         queued message is being picked or edited in the strip, the queue is held: nothing goes."""
         pending = state["turn_queue"]
-        while not state["quitting"]:
-            if not pending.wait_free(0.25):
-                continue
+        try:
+            while not state["quitting"]:
+                if not pending.wait_free(0.25):
+                    continue
+                with state["turn_lock"]:
+                    item = pending.pop()
+                    if item is None:
+                        # Hand the queue back while holding the same lock used by enqueue_turn.
+                        # Otherwise a message arriving after pop() but before the old worker's
+                        # finally block sees turn_active=True and is left with no worker.
+                        state["turn_active"] = False
+                        state["turn_thread"] = None
+                        return
+                try:
+                    if item.shown:
+                        screen.add(user_grid(item.text), gap_before=True)
+                    screen.app.invalidate()
+                    run_turn(item.text, speak_remote=item.speak, follow=item.follow, voice_remote=item.voice,
+                             talk_remote=item.talk, phone=item.phone)
+                except Exception as e:  # noqa: BLE001
+                    state["driver"] = state["steered"] = None
+                    note(f"turn failed: {e}", "warn")
+                    try:
+                        journal_event("done", text="", error=str(e), session_id=brain.session_id)
+                    except OSError:
+                        pass
+        finally:
             with state["turn_lock"]:
-                item = pending.pop()
-                if item is None:
+                if state["turn_thread"] is threading.current_thread():
                     state["turn_active"] = False
                     state["turn_thread"] = None
-                    return
-            if item.shown:
-                screen.add(user_grid(item.text), gap_before=True)  # its turn now: into the transcript, above its reply
-            screen.app.invalidate()
-            run_turn(item.text, speak_remote=item.speak, follow=item.follow, voice_remote=item.voice, talk_remote=item.talk)
-        with state["turn_lock"]:
-            state["turn_active"] = False
-            state["turn_thread"] = None
 
     def enqueue_turn(text: str, speak_remote: bool = False, follow: bool = False, voice: bool = False, talk: bool = False,
-                     shown: bool = False):
+                     shown: bool = False, recorded: bool = False, phone: bool = False):
         """`speak_remote`: the phone asked for this reply spoken; the server does that from the deltas.
-        `follow`, `voice`, `talk`: see run_turn. `shown`: it waits in the queued strip (queue_or_add)."""
+        `follow`, `voice`, `talk`, `phone`: see run_turn. `shown`: it waits in the queued strip (queue_or_add)."""
         pending = state["turn_queue"]
         with state["turn_lock"]:
-            pending.put(QueuedTurn(text, speak_remote, follow, voice, talk, shown=shown))
+            if not recorded:
+                journal_event("queued", text=text)
+            pending.put(QueuedTurn(text, speak_remote, follow, voice, talk, shown=shown, phone=phone))
             if state["turn_active"]:
                 return
             state["turn_active"] = True
@@ -1209,7 +1294,14 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             before = (cfg.brain.model, cfg.brain.effort)
             link = state["link"]
             try:
-                brain, detail = _switch_model(cfg, brain, model, voice_mode=False, effort=effort, full=full)
+                from vision.turnjournal import recover
+
+                records = turn_journal.read()
+                history = recover(records)["history"] if records else None  # this window's chat, as shown
+                brain, detail = _switch_model(cfg, brain, model, voice_mode=False, effort=effort, full=full,
+                                              history=history)
+                journal_event("model", model=cfg.brain.model, effort=cfg.brain.effort,
+                              session_id=brain.session_id)
                 conversation.agent = brain
                 conversation.follow()  # talk mode speaks through the new pick too
                 msg = _save_defaults(cfg, cfg.brain.model, cfg.brain.effort) if save else f"{prefix}{_brain_summary(cfg, brain)}"
@@ -1585,6 +1677,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         finally:
             conversation.model.close()
             state["talk"], state["once"], state["cancel"] = False, False, None
+            # Text typed during the last spoken reply still belongs to the chat.
+            while not typed.empty():
+                enqueue_turn(typed.get_nowait())
             set_hearing("")
             if buddy:
                 buddy.rest()
@@ -1803,7 +1898,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 note(f"[red]{e}[/red]")
                 return
             label = "all provider" if which == "all" else provider_label((which or brain.provider), cli=True)
-            screen.busy, screen.busy_label = True, f"reading {label} usage…"
+            owns_busy = not screen.busy
+            if owns_busy:
+                screen.busy, screen.busy_label = True, f"reading {label} usage…"
 
             def go():
                 try:
@@ -1811,7 +1908,8 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 except Exception as e:  # an unavailable provider selected by name
                     note(f"[red]{e}[/red]")
                 finally:
-                    screen.busy = False
+                    if owns_busy and not state["turn_active"]:
+                        screen.busy, screen.busy_label = False, ""
             background(go)
         elif cmd in ("version", "versions"):
             try:
@@ -1819,13 +1917,16 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             except ValueError as e:
                 note(f"[red]{e}[/red]")
                 return
-            screen.busy, screen.busy_label = True, "reading versions…"
+            owns_busy = not screen.busy
+            if owns_busy:
+                screen.busy, screen.busy_label = True, "reading versions…"
 
             def go():
                 try:
                     screen.add(_versions_renderable(providers=providers, vision=show_vision))
                 finally:
-                    screen.busy = False
+                    if owns_busy and not state["turn_active"]:
+                        screen.busy, screen.busy_label = False, ""
             background(go)
         elif cmd == "update":
             try:
@@ -1896,6 +1997,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             detach()  # a joined phone chat: leave it (it carries on there), then start afresh here
             brain.new_session()
             conversation.new_session()
+            reset_turn_journal()
             screen.set_history([])
             note("new conversation")
         elif cmd in ("mode", "auto", "plan"):
@@ -1934,6 +2036,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 detach()  # a joined phone chat: leave it before this brain takes another conversation
                 msg = _apply_session(brain, info)
                 if msg != "already in that conversation":
+                    reset_turn_journal()
                     conversation.new_session()
                     load_arrow_history(info.provider, info.id)
                     show_history(info.provider, info.id)
@@ -1970,6 +2073,8 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         elif cmd == "speak":
             state["speak"] = state["speaker"] is None or not state["speak"]
             note(f"speech {'on' if state['speak'] else 'off'}")
+            if not state["speak"] and state["speaker"] is not None and not state["talk"]:
+                background(state["speaker"].close)
             if state["speak"] and not speaker()._loaded:
                 # Load the voice now, on a worker thread (as --speak does at start-up), rather than
                 # in the middle of the first spoken reply.
@@ -2092,32 +2197,6 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 conversation.pending_override = override
                 what = f"{override.agent} {override.effort}".strip() if override.kind == "delegate" else override.kind
                 note(f"next message → {what} (or put the request on the same line: /{cmd} {arg + ' ' if arg else ''}<request>)")
-        elif cmd == "voicemodel":
-            from vision.config import save_config_value
-
-            words = arg.split()
-            save = "save" in [w.lower() for w in words[1:]]
-
-            def set_conversation(choice):
-                if screen.busy:
-                    note("still replying — change the voice model once it has finished (Esc cancels)")
-                    return
-                try:
-                    conversation.set_model(choice)
-                except BrainError as e:
-                    note(f"[yellow]{e}[/yellow]")
-                    return
-                if save:
-                    save_config_value("conversation", "model", f'"{choice}"')
-                    if cfg.conversation.model == choice:
-                        save_config_value("conversation", "effort", f'"{cfg.conversation.effort}"')
-                note(_voicemodel_note(cfg, choice, save))
-                screen.app.invalidate()
-
-            if words:
-                set_conversation(words[0])
-            else:
-                screen.open_picker("Choose the voice for Codex and Grok chats", CONVERSATION_TABS, conversation.fallback, set_conversation)
         elif cmd == "router":
             from vision.config import ROUTER_MODES, save_config_value
 
@@ -2146,44 +2225,55 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             if state["cancel"]:
                 state["cancel"].set()
             return
-        enqueue_turn(text, shown=queue_or_add(text))
+        enqueue_turn(text, shown=queue_or_add(text), recorded=True)
 
     def queue_or_add(text: str) -> bool:
         """A message behind a running reply waits in the queued strip over the input box (True: it
         joins the transcript when its turn starts); otherwise it is in the transcript straight away."""
+        journal_event("queued", text=text)
         if state["turn_active"]:
             screen.app.invalidate()
             return True
         screen.add(user_grid(text), gap_before=True)
         return False
 
-    def take_queued(only: str | None = None) -> list[str]:
+    def take_queued(only: str | None = None, for_steer: bool = False, queued_id: int | None = None) -> list[str]:
         """Queued typed messages out of the turn queue (all, or the one reading `only`), their rows
         out of the transcript: they are about to go into the running turn instead."""
         with state["turn_lock"]:
-            taken = state["turn_queue"].take_where(lambda it: not it.follow and (only is None or it.text == only), first_only=only is not None)
+            taken = state["turn_queue"].take_where(
+                lambda it: not it.follow and (queued_id is None or it.id == queued_id)
+                and (only is None or it.text == only), first_only=only is not None or queued_id is not None)
+            for item in taken:
+                if for_steer:
+                    journal_event("steer_attempt", text=item.text)
+                journal_event("unqueued", text=item.text)
         screen.app.invalidate()
         return [item.text for item in taken]
 
-    def steer_now(text: str, from_phone: bool = False):
+    def steer_now(text: str, from_phone: bool = False, queued_id: int | None = None):
         """Ctrl-X, or Send now on the phone: into the running turn rather than after it; Claude takes
-        it at its next step. "" = everything queued. A brain that can't take one mid-reply (Codex,
-        Grok, a local model) leaves it queued. `from_phone`: the text may already sit in the queue
+        it at its next step (Codex, Grok and a local model likewise). "" = everything queued. A brain
+        that can't take one mid-reply (Codex exec, Grok headless) leaves it queued. `from_phone`: the text may already sit in the queue
         (sent earlier, now pushed) or not (sent with `now`); either way it must get through."""
         running = screen.busy and state["turn_active"]
         if not running:
-            if text and (not from_phone or not state["turn_queue"].has_text(text)):
+            # A queued message is already due to run. Sending a second copy here races the
+            # turn worker when the previous reply has just ended.
+            if text and queued_id is None and (not from_phone or not state["turn_queue"].has_text(text)):
                 if from_phone:
-                    enqueue_turn(text, shown=queue_or_add(text))
+                    enqueue_turn(text, shown=queue_or_add(text), recorded=True)
                 else:
                     send(text)
             return
         if text:
-            texts = [text]
-            if from_phone:
-                take_queued(text)
+            if queued_id is not None or (from_phone and state["turn_queue"].has_text(text)):
+                texts = take_queued(text, for_steer=True, queued_id=queued_id)
+            else:
+                texts = [text]
+                journal_event("steer_attempt", text=text)
         else:
-            texts = take_queued()
+            texts = take_queued(for_steer=True)
             if not texts:
                 screen.notice("nothing queued", 2)
                 return
@@ -2195,8 +2285,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 if split:
                     split(t)
             else:
+                journal_event("steer_failed", text=t)
                 note("this model can't take a message mid-reply, so it's queued")
-                enqueue_turn(t, shown=queue_or_add(t))
+                enqueue_turn(t, shown=queue_or_add(t), recorded=True)
 
     def submit(text: str):
         text = text.strip()
@@ -2231,7 +2322,6 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             "voice_effort": cfg.conversation.effort or "",
             "session_id": brain.session_id,
             "context": context_figure(brain),
-            "cache": cache_figure(brain),
             "workdir": brain.workdir,
             "busy": screen.busy or state["turn_active"],
             "waiting": screen.form_open,
@@ -2253,7 +2343,8 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             else:
                 shown = queue_or_add(text)
                 note("from the phone")
-                enqueue_turn(text, speak_remote=bool(frame.get("speak")), voice=bool(frame.get("voice")), talk=bool(frame.get("talk")), shown=shown)
+                enqueue_turn(text, speak_remote=bool(frame.get("speak")), voice=bool(frame.get("voice")),
+                             talk=bool(frame.get("talk")), shown=shown, recorded=True, phone=True)
         elif kind == "unqueue":
             # Removed (or taken back to edit) on the phone: out of the queue here too.
             text = (frame.get("text") or "").strip()
@@ -2673,28 +2764,11 @@ def _talk_turns(cfg: Config, brain, speaker, mic, stt, kb: _Keyboard, ptt: bool,
                         console.print(f"[dim]no conversation starts with “{word}”[/dim]")
                 elif cmd in ("quit", "exit", "q"):
                     break
-                elif cmd == "voicemodel":
-                    from vision.config import save_config_value
-
-                    words = arg.split()
-                    choice = words[0] if words else pick("Choose the voice for Codex and Grok chats", CONVERSATION_TABS, current=conversation.fallback)
-                    if choice is not None:
-                        try:
-                            conversation.set_model(choice)
-                        except BrainError as e:
-                            console.print(f"[dim]{e}[/dim]")
-                        else:
-                            save = "save" in [w.lower() for w in words[1:]]
-                            if save:
-                                save_config_value("conversation", "model", f'"{choice}"')
-                                if cfg.conversation.model == choice:
-                                    save_config_value("conversation", "effort", f'"{cfg.conversation.effort}"')
-                            console.print(f"[dim]{_voicemodel_note(cfg, choice, save)}[/dim]")
                 elif cmd == "new":
                     brain.new_session()
                     conversation.new_session()
                 else:
-                    console.print("[dim]in talk mode: /model, /effort, /fast, /default, /voicemodel, /session, /usage, /quit[/dim]")
+                    console.print("[dim]in talk mode: /model, /effort, /fast, /default, /session, /usage, /quit[/dim]")
                 continue
             show_user(console, heard)
             if heard.lower().strip(" .!?,") in _EXIT_PHRASES:
@@ -3049,6 +3123,31 @@ def voice_rm(name: str = typer.Argument(..., help="A saved voice to delete.")):
 
 
 # ---------------------------------------------------------------- remote (iOS app)
+@app.command("recover")
+def recover_turns():
+    """Show prompts, partial replies and queued messages saved before a crash."""
+    from vision.turnjournal import interrupted_journals
+
+    chats = interrupted_journals()
+    if not chats:
+        console.print("No interrupted turns or queued messages.")
+        return
+    for chat_id, state in chats:
+        console.print(f"\n[bold]{chat_id}[/bold]  {state['model'] or 'unknown model'}")
+        for row in state["recovery_rows"]:
+            if row.get("role") == "user":
+                console.print(Text(f"You: {row.get('text') or ''}"))
+            else:
+                if row.get("text"):
+                    console.print(Text(f"Vision: {row['text']}"))
+                for tool in row.get("tools") or []:
+                    status = "interrupted" if tool.get("cut_off") else "failed" if tool.get("is_error") else "done"
+                    label = " ".join(part for part in (tool.get("name"), tool.get("detail")) if part)
+                    console.print(Text(f"  {label or 'Tool'} ({status})"))
+                if row.get("error"):
+                    console.print(f"[yellow]{row['error']}[/yellow]")
+
+
 @app.command()
 def serve(
     host: Optional[str] = typer.Option(None, "--host", help="Bind address (config: remote.host, default 0.0.0.0: the LAN, for the phone)."),
@@ -3076,7 +3175,7 @@ def serve(
         resumed=bool(brain.session_id),
         extra=(
             f"listening on {info['local']}" + (f" · phone uses {info['url']}" if info["url"] != info["local"] else ""),
-            f"token in {short_path(str(TOKEN_FILE))} · Ctrl-C stops",
+            f"token in {short_path(str(TOKEN_FILE))} · r restarts once replies finish · c clears · Ctrl-C stops",
         ),
     )
     if info["url"] == info["local"]:
@@ -3098,7 +3197,36 @@ def serve(
     def log(msg: str):
         console.print(Text("  " + msg, style="dim"))
 
-    run_server(cfg, brain, info, log=log, follow_defaults=not (model or effort), open_initial=cont or new)
+    def banner():
+        """What `c` leaves on the cleared window: where it listens and the keys."""
+        console.print(Text(f"  vision serve · {info['url']} · r restarts once replies finish · c clears · Ctrl-C stops", style="dim"))
+
+    run_server(cfg, brain, info, log=log, follow_defaults=not (model or effort), open_initial=cont or new, on_clear=banner)
+
+
+@app.command()
+def restart():
+    """Restart `vision serve` on the new code once every chat has finished its reply; nothing is cut off."""
+    import urllib.request
+
+    from vision.remote import running_server
+
+    server = running_server()
+    if server is None:
+        console.print("[yellow]vision serve isn't running[/yellow]")
+        raise typer.Exit(1)
+    req = urllib.request.Request(server["url"] + "/restart", data=b"{}", method="POST",
+                                 headers={"Authorization": f"Bearer {server['token']}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310  (our own loopback server)
+            waiting = int(json.loads(resp.read().decode()).get("waiting") or 0)
+    except OSError as e:
+        console.print(f"[red]couldn't reach vision serve:[/red] {e}")
+        raise typer.Exit(1)
+    if waiting:
+        console.print(f"restarting once {waiting} chat{'s' * (waiting != 1)} finish{'es' * (waiting == 1)} replying")
+    else:
+        console.print("restarting now")
 
 
 # ---------------------------------------------------------------- setup / doctor / config

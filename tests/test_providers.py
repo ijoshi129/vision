@@ -74,7 +74,7 @@ class _LingeringProcess(_Process):
 def _cfg(model="gpt-6-astra", effort="high"):
     cfg = BrainConfig(model=model, effort=effort, mode="auto")  # auto is not the default everywhere (Windows)
     cfg.codex = CodexConfig()
-    cfg.grok = GrokConfig()
+    cfg.grok = GrokConfig(transport="headless")  # the grok -p stream tests; agent mode is tests/test_grok_acp.py
     return cfg
 
 
@@ -757,6 +757,46 @@ class ModelTranscriptTests(unittest.TestCase):
         self.assertIn("keep going", brain2.handoff)
         self.assertIn("new Claude conversation from the previous transcript", detail)
 
+    def test_cross_provider_switch_falls_back_to_the_chats_own_transcript(self):
+        """The outgoing session saved nothing (its only turn hit a usage limit, and the reply before it
+        came from the conversation model): the chat's transcript is what gets carried."""
+        from vision.cli import _switch_model
+        from vision.config import Config
+
+        chat = [{"role": "user", "text": "background voice in the dynamic island"},
+                {"role": "assistant", "text": "on it, the worker's started"},
+                {"role": "user", "text": "Darn"},
+                {"role": "assistant", "text": "", "error": "usage limit"}]
+        for session_id in ("t-empty", None):
+            with self.subTest(session_id=session_id):
+                cfg = Config()
+                cfg.brain.model = "gpt-6-sol"
+                with patch("vision.codex.find_codex", return_value="codex"):
+                    brain = CodexBrain(cfg.brain, session_id=session_id)
+                with patch("vision.sessions.session_history", return_value=[]), \
+                     patch("vision.brain.find_claude", return_value="claude"), \
+                     patch("vision.brain.subprocess.Popen") as popen:
+                    brain2, detail = _switch_model(cfg, brain, "opus", voice_mode=False, history=chat)
+                    popen.assert_not_called()
+                self.assertIn("background voice in the dynamic island", brain2.handoff)
+                self.assertIn("on it, the worker's started", brain2.handoff)
+                self.assertIn("from the previous transcript", detail)
+
+    def test_cross_provider_switch_prefers_the_saved_session_when_it_is_as_full(self):
+        from vision.cli import _switch_model
+        from vision.config import Config
+
+        cfg = Config()
+        cfg.brain.model = "opus"
+        with patch("vision.brain.find_claude", return_value="claude"):
+            brain = Brain(cfg.brain, session_id="s-old")
+        saved = [{"role": "user", "text": "fix the lock"}, {"role": "assistant", "text": "Read talker.py, patched it"}]
+        shown = [{"role": "user", "text": "fix the lock"}, {"role": "assistant", "text": "patched"}]
+        with patch("vision.sessions.session_history", return_value=saved), \
+             patch("vision.codex.find_codex", return_value="codex"):
+            brain2, _ = _switch_model(cfg, brain, "gpt-6-astra", voice_mode=False, history=shown)
+        self.assertIn("Read talker.py, patched it", brain2.handoff)
+
     def test_claude_to_grok_carries_local_transcript_without_asking(self):
         from vision.cli import _switch_model
         from vision.config import Config
@@ -992,6 +1032,7 @@ class SubagentTests(unittest.TestCase):
         ]
         turn, _, _ = self._run(events)  # the brain runs opus at BrainConfig's default effort, high
         self.assertEqual([(r.label, r.model, r.effort) for r in turn.agents], [("Named model", "sonnet", "high"), ("Inherited model", "opus", "high")])
+        self.assertEqual([r.prompt for r in turn.agents], ["p", "p"])
 
     def test_workflow_agents_get_rows_from_task_progress(self):
         # Ultracode: a Workflow runs its agents in the background, so none of their messages reach the
@@ -1296,8 +1337,67 @@ class ToolRowTests(unittest.TestCase):
         )
         self.assertEqual(tool_summary([]), "")
 
+    def test_a_live_run_of_tool_calls_is_one_row_that_becomes_its_total(self):
+        """While a run of calls is going it is one row showing the latest call, not a row per call
+        and no count; prose after it folds it to its total."""
+        from vision.brain import ToolCall
+        from vision.ui import _ReplyEntry
+
+        e = _ReplyEntry(markdown=False)
+        e.on_click = lambda: None
+        e.buf, e.shown = "Having a look.", 1 << 30
+
+        def plain():
+            e.full(80)  # the pacer's refresh: a live entry otherwise draws its last render of the buffer
+            e.invalidate()
+            return ["".join(f[1] for f in r).rstrip() for r in e.lines(80)]
+
+        e.place(ToolCall("a", "Read", "~/a.py"))
+        text = plain()
+        self.assertTrue(any(t.endswith("Read(~/a.py)") for t in text))
+        e.tools["a"].done = True
+        e.place(ToolCall("b", "Bash", "ls"))
+        e.place(ToolCall("c", "Read", "~/b.py"))
+        text = plain()
+        self.assertTrue(any(t.endswith("Read(~/b.py)") for t in text))  # no count until the total
+        self.assertFalse(any("Read(~/a.py)" in t or "Bash(ls)" in t for t in text))
+        e.tools["b"].done = e.tools["c"].done = True
+        e.buf += "\n\nFound it."
+        text = plain()
+        self.assertIn("⏺ Read 2 files, ran 1 command · click or ctrl-o to expand", text)
+        self.assertFalse(any("Read(~/b.py)" in t for t in text))
+        e.toggle_fold()  # ctrl-o works mid-reply: every call back on its own row
+        text = plain()
+        self.assertTrue(all(any(c in t for t in text) for c in ("Read(~/a.py)", "Bash(ls)", "Read(~/b.py)")))
+
+    def test_an_edit_shows_its_diff_between_the_folded_calls(self):
+        """An Edit is a block of its own, as in Claude Code: `Update(path)`, the count of additions
+        and removals, then the numbered lines; the calls before and after it fold on either side."""
+        from vision.brain import ToolCall, edit_diff
+        from vision.ui import _ReplyEntry
+
+        e = _ReplyEntry(markdown=False)
+        e.on_click = lambda: None
+        e.place(ToolCall("r", "Read", "~/a.py", done=True))
+        patch = {"structuredPatch": [{"oldStart": 7, "newStart": 7, "lines": [" x = 1", "-y = 2", "+y = 3", "+z = 4"]}]}
+        e.place(ToolCall("e", "Edit", "~/a.py", done=True, diff=edit_diff(patch)))
+        e.place(ToolCall("b", "Bash", "pytest", done=True))
+        e.buf, e.shown, e.finished, e.done = "Fixed.", 1 << 30, True, True
+        e.full(80)
+        text = ["".join(f[1] for f in r).rstrip() for r in e.lines(80)]
+        self.assertEqual(text[1:9], [
+            "⏺ Read 1 file · click or ctrl-o to expand",
+            "⏺ Update(~/a.py)",
+            "  ⎿  Updated ~/a.py with 2 additions and 1 removal",
+            "       7   x = 1",
+            "       8 - y = 2",
+            "       8 + y = 3",
+            "       9 + z = 4",
+            "⏺ Ran 1 command · click or ctrl-o to expand",
+        ])
+
     def test_done_reply_folds_its_tool_calls_to_one_row_until_unfolded(self):
-        """As Claude Code: while the reply runs every call has its rows; once it is done they fold
+        """As Claude Code: once the reply is done its calls fold
         to `⏺ Read 2 files, ran 1 command · click or ctrl-o to expand`, and a click on that row
         (or ctrl-o, which calls toggle_fold) brings them back, with a way to fold again."""
         from prompt_toolkit.mouse_events import MouseEvent, MouseEventType, MouseButton
@@ -1316,10 +1416,6 @@ class ToolRowTests(unittest.TestCase):
         def plain(rows):
             return ["".join(f[1] for f in r) for r in rows]
 
-        text = plain(e.lines(80))  # still running: one block per call
-        self.assertTrue(any("Read(~/a.py)" in t for t in text))
-        self.assertTrue(any("Bash(ls)" in t for t in text))
-        self.assertFalse(any("Read 2 files" in t for t in text))
         e.finished = e.done = True
         e.invalidate()
         rows = e.lines(80)
@@ -1361,16 +1457,15 @@ class ToolRowTests(unittest.TestCase):
         def plain(rows):
             return ["".join(f[1] for f in r).rstrip() for r in rows]
 
-        e.shown = 1 << 30
+        e.shown = 1 << 30  # prose follows each run: they have settled into their totals, mid-reply too
         self.assertEqual(plain(e.lines(80))[1:-1], [
             "● Sent the agent off.",
             "",
-            "⏺ general-purpose(Find largest folder)",
-            f"  ⎿  done · {model_label('opus')} high · 3 tools · 17.3s",
+            "⏺ Ran 1 agent · click or ctrl-o to expand",
             "",
             "● Steam is the monster.",
             "",
-            "⏺ Bash(du -sh ~/.steam)",
+            "⏺ Ran 1 command · click or ctrl-o to expand",
             "",
             "● Uninstall CS:GO.",
         ])
@@ -1382,7 +1477,7 @@ class ToolRowTests(unittest.TestCase):
         self.assertNotIn("⏺", "".join(text))
         e.shown = len("Sentthe agentoff.")  # the first piece is out (blanks are free): the agent's rows come into view, not the next prose
         e.invalidate()
-        self.assertEqual(plain(e.lines(80))[1:5], ["● Sent the agent off.", "", "⏺ general-purpose(Find largest folder)", f"  ⎿  done · {model_label('opus')} high · 3 tools · 17.3s"])
+        self.assertEqual(plain(e.lines(80))[1:4], ["● Sent the agent off.", "", "⏺ Ran 1 agent · click or ctrl-o to expand"])
         self.assertNotIn("● Steam", "".join(plain(e.lines(80))))
         # done: the agent and the tool call each fold in place, under their own prose, not at the top
         e.shown, e.finished, e.done = 1 << 30, True, True
@@ -1446,8 +1541,8 @@ class ToolRowTests(unittest.TestCase):
         from vision.ui import _ReplyEntry
 
         e = _ReplyEntry(markdown=True)
-        e.place(ToolCall("b", "Bash", "ls", done=True, output="\n".join(f"line{i}" for i in range(200))))
         e.buf, e.shown = "so far", 1 << 30  # text revealed, but the brain is still working: not done, no `ended`
+        e.place(ToolCall("b", "Bash", "ls", done=True, output="\n".join(f"line{i}" for i in range(200))))  # the live row, nothing after it yet
         e.on_click = lambda: None
 
         def plain(rows):
@@ -1663,7 +1758,7 @@ class ClaudeCatalogueTests(unittest.TestCase):
             self.assertTrue(models.set_local_models(["qwen3.6", "gemma-5"]))
             self.assertEqual([m.label for m in models.LOCAL_MODELS], ["Qwen 3.6 35B-A3B", "gemma-5"])
             self.assertEqual(models.provider_for("gemma-5"), "local")
-            self.assertIn("gemma-5", [r[0] for r in models.CONVERSATION_TABS[1][1]])
+            self.assertIn("gemma-5", [r[0] for r in models.MODEL_TABS[3][1]])
         finally:
             for p, rows in saved.items():
                 models._swap(p, rows)
@@ -1725,4 +1820,3 @@ class RetiredModelTests(unittest.TestCase):
         cfg.brain.model = "grok-4.6"  # a --model on the command line is the user's call, not a saved default
         models.replace_retired_models(cfg, brain=False)
         self.assertEqual(cfg.brain.model, "grok-4.6")
-

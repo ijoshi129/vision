@@ -3,7 +3,7 @@
 Claude Code keeps one JSONL per session under ~/.claude/projects/<cwd-encoded>/; Vision's turns are
 tagged `entrypoint: "sdk-cli"` (interactive `claude` sessions say "cli"), which is how they are told
 apart. Codex keeps rollout-*.jsonl files under ~/.codex/sessions/YYYY/MM/DD/; Vision's carry
-`originator: "codex_exec"` and a developer message that starts with the persona. Grok keeps one
+`originator: "codex_exec"` (exec) or `"vision"` (app-server) and a developer message that starts with the persona. Grok keeps one
 directory per session under ~/.grok/sessions/<cwd-encoded>/<id>/; Vision's are the ones whose
 system_prompt.txt contains the persona.
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import time
 from datetime import datetime
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ HEAD_BYTES = 256 * 1024  # enough to reach the first real prompt past the enviro
 TITLE_WIDTH = 48
 HISTORY_LIMIT = 60  # recent turns shown in history views; transfers use limit=0
 # Legacy summary prompt; skip it when reading older session logs.
+CODEX_ORIGINATORS = ("codex_exec", "vision")  # `codex exec`, and codex_app.py's app-server clientInfo name
 HANDOFF_USER_PREFIX = "This conversation is being handed over to a different model"
 
 
@@ -128,7 +130,7 @@ def _claude_session(path: str) -> SessionInfo | None:
 
 
 def _codex_session(path: str) -> SessionInfo | None:
-    """Parse one Codex rollout; None unless it is a Vision (codex_exec + persona) thread."""
+    """Parse one Codex rollout; None unless it is a Vision (codex_exec/app-server + persona) thread."""
     sid = ""
     cwd = ""
     persona = False
@@ -137,7 +139,7 @@ def _codex_session(path: str) -> SessionInfo | None:
         t = rec.get("type")
         p = rec.get("payload") or {}
         if t == "session_meta":
-            if p.get("originator") != "codex_exec":
+            if p.get("originator") not in CODEX_ORIGINATORS:
                 return None
             sid, cwd = p.get("id") or "", p.get("cwd") or ""
         elif t == "response_item" and p.get("type") == "message":
@@ -317,7 +319,11 @@ def _local_messages(path: str, *, include_context: bool = False) -> tuple[dict, 
         if isinstance(content, list):  # OpenAI-style parts
             content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
         if isinstance(content, str) and content.strip():
-            text = _strip_handoff(content.strip()) if m["role"] == "user" and not include_context else content.strip()
+            text = content.strip()
+            if m["role"] == "user" and not include_context:
+                earlier, text = _unfold_handoff(text)
+                out.extend(earlier)
+                text = text.strip()
             if text:
                 out.append({"role": m["role"], "text": text})
     return data, out
@@ -354,13 +360,46 @@ def local_history(session_id: str, limit: int = HISTORY_LIMIT, *, include_contex
 # model is not asked, so a rate-limit there cannot wipe the chat.
 
 
+_HANDOFF_START = "You are taking over an ongoing conversation"
+_HANDOFF_MARKER = "The user's next message:\n\n"
+
+
 def _strip_handoff(text: str) -> str:
     """If this user turn is Vision's injected handoff wrapper, keep only the user's real message."""
-    marker = "The user's next message:\n\n"
-    if text.startswith("You are taking over an ongoing conversation") and marker in text:
+    if text.startswith(_HANDOFF_START) and _HANDOFF_MARKER in text:
         # Earlier transfers can be nested inside the context; the final marker introduces this turn.
-        return text.rsplit(marker, 1)[1]
+        return text.rsplit(_HANDOFF_MARKER, 1)[1]
     return text
+
+
+def _transcript_turns(note: str) -> list[dict]:
+    """format_transcript's "User: …" / "Vision: …" blocks back into turns; a first user block that is
+    itself a handoff wrapper (a second switch) is unfolded too."""
+    out: list[dict] = []
+    if note.startswith("User: " + _HANDOFF_START) and _HANDOFF_MARKER in note:
+        inner = note[len("User: "):]
+        cut = inner.rindex(_HANDOFF_MARKER) + len(_HANDOFF_MARKER)
+        rest = inner[cut:]
+        end = rest.find("\n\nVision: ")
+        message, note = (rest, "") if end < 0 else (rest[:end], rest[end + 2:])
+        out, message = _unfold_handoff(inner[:cut] + message)
+        out.append({"role": "user", "text": message.strip()})
+    for block in re.split(r"\n\n(?=(?:User|Vision): )", note):
+        role, _, text = block.partition(": ")
+        if role in ("User", "Vision") and text.strip():
+            out.append({"role": "user" if role == "User" else "assistant", "text": text.strip()})
+    return out
+
+
+def _unfold_handoff(text: str) -> tuple[list[dict], str]:
+    """A handoff wrapper as (the earlier turns it carries, the user's real message); ([], text) if
+    it is not one. History views show the carried turns so a switched chat keeps its past."""
+    if not (text.startswith(_HANDOFF_START) and _HANDOFF_MARKER in text):
+        return [], text
+    head, message = text.rsplit(_HANDOFF_MARKER, 1)
+    body = head.split("\n\n", 1)[1] if "\n\n" in head else ""  # past "What happened so far:"
+    body = body.rsplit("\n\n---\n\n", 1)[0]
+    return _transcript_turns(body), message
 
 
 def _content_text(content) -> str:
@@ -386,7 +425,10 @@ def _append_turn(out: list[dict], role: str, text: str, *, include_context: bool
         return
     if role == "user":
         if not include_context:
-            text = _strip_handoff(text)
+            earlier, text = _unfold_handoff(text)
+            for m in earlier:
+                _append_turn(out, m["role"], m["text"])
+            text = text.strip()
         if not text or text.startswith("<") or text.startswith(HANDOFF_USER_PREFIX):
             return
     if role == "assistant" and out and out[-1]["role"] == "assistant":
@@ -504,7 +546,7 @@ def grok_history(session_id: str, limit: int = HISTORY_LIMIT, *, include_context
 def session_history(provider: str, session_id: str, limit: int = HISTORY_LIMIT, *, include_context: bool = False) -> list[dict]:
     """Saved turns; limit=0 reads all turns, include_context preserves earlier provider transfers.
 
-    History views hide the injected context. Transfers must retain it, including nested transfers,
+    History views unfold the injected context into the earlier turns it carries. Transfers retain it raw, including nested transfers,
     so switching providers again does not discard the conversation from before the first switch.
     """
     if not session_id:

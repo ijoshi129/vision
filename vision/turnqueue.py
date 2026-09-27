@@ -23,6 +23,7 @@ class QueuedTurn:
     voice: bool = False
     talk: bool = False
     shown: bool = False   # sent behind a running reply: it sits in the queued strip until its turn
+    phone: bool = False   # sent from the phone: its reply is spoken there, never on this machine
     id: int = field(default_factory=lambda: next(_ids))
 
 

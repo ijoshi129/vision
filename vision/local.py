@@ -197,6 +197,8 @@ class LocalBrain:
         self._messages: list[dict] = []  # the transcript after the system prompt; loaded on resume
         self._holder: dict = {}
         self._lock = threading.Lock()
+        self._running = False  # a turn is on and can still take a steered message
+        self._steers: list[str] = []  # messages sent into the running turn, waiting for its next step
         if session_id:
             self._messages = self._load(session_id)
 
@@ -281,7 +283,36 @@ class LocalBrain:
     ) -> Turn:
         """One user turn: a request, then as many tool rounds as the model asks for (up to
         MAX_TOOL_ROUNDS), then the reply. Tool calls stream to `on_tool` as ToolCall rows like the
-        Claude brain's; a worker turn ends with a grammar-constrained call for the result object."""
+        Claude brain's; a worker turn ends with a grammar-constrained call for the result object.
+        Messages steered in meanwhile join at the next step and are answered in the same turn."""
+        with self._lock:
+            self._running, self._steers = True, []
+        try:
+            return self._turn(prompt, on_text, on_status, on_tool)
+        finally:
+            with self._lock:
+                self._running = False
+
+    def steer(self, text: str) -> bool:
+        """A message typed mid-reply (Ctrl-X / Send now), as Claude takes one: it goes in after the
+        tool calls in flight, or once the text streaming now ends, and the model answers it in this
+        turn. False when no turn can take it (none running, a worker, or already over): it queues."""
+        with self._lock:
+            if not self._running or self.task_mode:
+                return False
+            self._steers.append(text)
+        return True
+
+    def _take_steers(self, last: bool = False) -> list[dict]:
+        """The steered messages as user messages; `last`: the model has answered, so with none
+        waiting the turn stops taking them (a later one queues instead of being lost)."""
+        with self._lock:
+            texts, self._steers = self._steers, []
+            if last and not texts:
+                self._running = False
+        return [{"role": "user", "content": t} for t in texts]
+
+    def _turn(self, prompt: str, on_text, on_status, on_tool) -> Turn:
         from vision.brain import ToolCall, Turn, inject_handoff, tool_detail
 
         turn = Turn(session_id=self.session_id, model=_model_name(self.cfg.model))
@@ -381,6 +412,12 @@ class LocalBrain:
                                            {"role": "user", "content": "Return the result object for the task now."}]
                     specs = []
                     continue
+                steers = [] if self.task_mode else self._take_steers(last=True)
+                if steers:  # sent in while this reply streamed: it carries on to answer them
+                    reply.finish()
+                    reply.tool()  # its answer starts a new paragraph
+                    messages = messages + [{"role": "assistant", "content": result["text"]}] + steers
+                    continue
                 break
             rounds += 1
             messages = messages + [{"role": "assistant", "content": result["text"] or None, "tool_calls": calls}]
@@ -409,6 +446,7 @@ class LocalBrain:
                 call.output, call.is_error, call.done = output, is_error, True
                 tool_changed(call)
                 messages = messages + [{"role": "tool", "tool_call_id": tc["id"], "content": output}]
+            messages = messages + self._take_steers()  # the next step reads them after the results
             if on_status:
                 on_status(READING)
 

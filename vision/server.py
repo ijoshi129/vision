@@ -61,8 +61,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from vision import __version__
 from vision import agentlog
-from vision.brain import agent_frame, cache_figure, context_figure, tool_frame
-from vision.config import CONFIG_DIR, Config, save_brain_defaults, saved_brain_defaults
+from vision.brain import agent_frame, context_figure, tool_frame
+from vision.config import CONFIG_DIR, STATE_DIR, Config, save_brain_defaults, saved_brain_defaults
 from vision.sessions import claude_history
 from vision.reply import status_label
 from vision.tts import SAMPLE_RATE, Speaker, StreamingSpeaker
@@ -303,11 +303,12 @@ class Chat:
     config (so /model on one never touches another) and drives its own agent process.
     """
 
-    def __init__(self, hub: "Hub", brain, cfg: Config, title: str = ""):
+    def __init__(self, hub: "Hub", brain, cfg: Config, title: str = "", chat_id: str | None = None,
+                 restored: dict | None = None):
         from vision.conversation import VoiceConversation
 
         self.hub = hub
-        self.id = secrets.token_hex(6)
+        self.id = chat_id or secrets.token_hex(6)
         self.cfg = cfg
         self.brain = brain
         self.conversation = VoiceConversation(cfg, agent=brain)
@@ -333,6 +334,29 @@ class Chat:
         self.tools: dict[str, dict] = {}  # …and its tool calls as tool frames, the same way
         self._steers: list[tuple] = []  # (reply chars so far, text, agent rows so far) of messages sent into this turn
         self._driver = None  # what answers this turn (the brain, or the conversation model on a call)
+        self.journal = None
+        self._journal_has_base = bool(restored and restored["has_base"])
+        if hub.journal_enabled:
+            from vision.turnjournal import ChatJournal
+
+            self.journal = ChatJournal(self.id)
+            if not self.journal.claim():
+                raise RuntimeError(f"chat {self.id} is already open in another Vision process")
+            if restored is None:
+                self.journal.append("chat", title=title, model=cfg.brain.model, effort=cfg.brain.effort,
+                                    session_id=brain.session_id)
+        if restored is not None:
+            self._transcript = restored["history"] if restored["has_base"] or restored["history"] else None
+            self.created, self.updated = restored["created"], restored["updated"]
+            if not self.title:
+                self.title = next((m["text"][:48] for m in self._transcript or []
+                                   if m.get("role") == "user" and m.get("text")), "")
+            # A first turn can crash before the provider gives Vision a session id. Carry the
+            # recovered transcript into the next fresh provider thread.
+            if not brain.session_id and self._transcript:
+                from vision.turnjournal import recovery_context
+
+                brain.handoff = recovery_context(self._transcript, restored["recovery_rows"])
 
     # -- the bits of the brain the hub reads (LinkedChat has the same, from the terminal's summary)
     source = "server"
@@ -376,7 +400,6 @@ class Chat:
             "voice_effort": self.cfg.conversation.effort or "",
             "session_id": self.brain.session_id,
             "context": context_figure(self.brain),
-            "cache": cache_figure(self.brain),
             "history_id": self.history_id,
             "busy": self.busy,
             "waiting": self._question is not None and not self._question.done(),
@@ -416,11 +439,23 @@ class Chat:
     def queue(self, text: str, speak: bool, voice: bool, talk: bool = False) -> None:
         """`voice`: spoken; `talk`: typed during a call. Both go to the conversation model, so one
         model answers the whole call."""
-        if self.busy:
+        if self.journal:
+            self.journal.append("queued", text=text)
+        if self.busy or self.hub.restarting:
+            # A restart already under way: the journal carries it over and the new process runs it.
             self._pending.append((text, speak, voice, talk))
             return
         self.busy = True  # reserve the turn before yielding to a scheduled task
         self._turn_task = asyncio.create_task(self.run_turn(text, speak=speak, voice=voice, talk=talk))
+
+    def resume_queued(self, texts: list[str]) -> None:
+        """Run messages that were queued when a graceful restart took the last process down (their
+        `queued` records are already in the journal, so they are not journalled again)."""
+        self._pending.extend((text, False, False, False) for text in texts if text)
+        if not self.busy and self._pending:
+            text, speak, voice, talk = self._pending.popleft()
+            self.busy = True
+            self._turn_task = asyncio.create_task(self.run_turn(text, speak, voice, talk))
 
     def answer(self, answers) -> None:
         fut = self._question
@@ -431,6 +466,8 @@ class Chat:
         """Take a queued message back out (the first one reading `text`); False if it already ran."""
         for i, item in enumerate(self._pending):
             if item[0] == text:
+                if self.journal:
+                    self.journal.append("unqueued", text=text)
                 del self._pending[i]
                 return True
         return False
@@ -440,8 +477,17 @@ class Chat:
         A copy still waiting in the queue is taken out. False when this turn's brain can't take one
         (Codex, Grok, a local model, nothing running): the message stays queued."""
         steer = getattr(self._driver, "steer", None)
-        if not self.busy or steer is None or not steer(text):
+        if not self.busy or steer is None:
             return False
+        if self.journal:
+            self.journal.append("steer_attempt", text=text)
+        if not steer(text):
+            if self.journal:
+                self.journal.append("steer_failed", text=text)
+            return False
+        if self.journal:
+            self.journal.append("steered", text=text)
+            self.journal.append("unqueued", text=text)
         for i, item in enumerate(self._pending):
             if item[0] == text:
                 del self._pending[i]
@@ -468,11 +514,17 @@ class Chat:
         model_changed = model != self.cfg.brain.model
         self.busy = True
         loop = asyncio.get_running_loop()
+        with self._lock:
+            history = list(self._transcript or [])
         try:
             self.brain, _detail = await loop.run_in_executor(
-                None, lambda: _switch_model(self.cfg, self.brain, model, voice_mode=False, effort=effort or None)
+                None, lambda: _switch_model(self.cfg, self.brain, model, voice_mode=False, effort=effort or None,
+                                            history=history)
             )
             self.conversation.agent = self.brain
+            if self.journal:
+                self.journal.append("model", model=self.cfg.brain.model, effort=self.cfg.brain.effort,
+                                    session_id=self.brain.session_id)
             self.conversation.follow()  # a call on this chat talks through the new pick
             # One short line; the transcript-handoff detail is terminal chatter the phone doesn't need.
             effort_word = _effort_word(self.cfg.brain.effort)
@@ -487,17 +539,18 @@ class Chat:
             self.busy = False
             self.hub.post(self.summary())
             # A message may have arrived during the handoff. It belongs after the switch, on the new brain.
-            if self._pending:
+            if self._pending and not self.hub.restarting:
                 text, speak, voice, talk = self._pending.popleft()
                 self.busy = True
                 self._turn_task = asyncio.create_task(self.run_turn(text, speak, voice, talk))
+            self.hub.maybe_restart()
 
     async def run_turn(self, text: str, speak: bool, voice: bool, talk: bool = False) -> None:
         """Run this turn and every follow-up queued while it is active, in arrival order."""
         try:
             while True:
                 await self._run_one_turn(text, speak, voice, talk)
-                if not self._pending:
+                if not self._pending or self.hub.restarting:
                     return
                 text, speak, voice, talk = self._pending.popleft()
         finally:
@@ -505,6 +558,7 @@ class Chat:
             if self._turn_task is asyncio.current_task():
                 self._turn_task = None
             self.hub.post(self.summary())
+            self.hub.maybe_restart()
 
     async def _run_one_turn(self, text: str, speak: bool, voice: bool, talk: bool = False) -> None:
         loop = asyncio.get_running_loop()
@@ -514,6 +568,11 @@ class Chat:
         if not self.title:
             self.title = _title_from(text)
         await loop.run_in_executor(None, self.history)  # seed from the typed session before it advances
+        if self.journal:
+            if not self._journal_has_base:
+                self.journal.append("base", history=self._transcript or [])
+                self._journal_has_base = True
+            self.journal.append("start", text=text)
         self.log(f"› {text[:80]}{'…' if len(text) > 80 else ''}")
         self.post({"type": "start", "text": text, "speak": speak})
         self.hub.post(self.summary())
@@ -529,6 +588,8 @@ class Chat:
         self._wire = wire
 
         def on_text(delta: str) -> None:
+            if self.journal:
+                self.journal.append("delta", text=delta)
             self.partial += delta
             self.post({"type": "delta", "text": delta})
             if wire:
@@ -543,6 +604,10 @@ class Chat:
             # One frame per change; `step` is the newest tool call (absent when it just started or finished).
             frame = agent_frame(run)
             frame["at"] = self.agents.get(run.id, {}).get("at", len(self.partial))
+            if self.journal:
+                from vision.turnjournal import compact_agent_frame
+
+                self.journal.append("agent", frame=compact_agent_frame(frame, self.agents.get(run.id)))
             self.agents[run.id] = frame
             self.post(dict(frame))
 
@@ -550,11 +615,15 @@ class Chat:
             # The main conversation's tool calls, drawn as rows by the phone and a terminal following this chat.
             frame = tool_frame(call)
             frame["at"] = self.tools.get(call.id, {}).get("at", len(self.partial))
+            if self.journal:
+                self.journal.append("tool", frame=frame)
             self.tools[call.id] = frame
             self.post(dict(frame))
 
         def on_question(questions: list[dict]) -> dict[str, str] | None:
             fut: Future = Future()
+            if self.journal:
+                self.journal.append("question", questions=questions)
             self._questions = questions
             self._question = fut
             self.post({"type": "question", "questions": questions})
@@ -566,6 +635,8 @@ class Chat:
             except Exception:  # noqa: BLE001  (timeout → the model carries on without answers)
                 return None
             finally:
+                if self.journal:
+                    self.journal.append("answered", questions=questions, answers=answers)
                 self._question = None
                 self._questions = []
                 self.post({"type": "answered", "questions": questions, "answers": answers})
@@ -590,6 +661,9 @@ class Chat:
             self.post({"type": "audio_end"})
         self._wire = None
         self._driver = None
+        if self.journal:
+            self.journal.append("done", text=reply, error=error,
+                                session_id=session_id or self.brain.session_id)
         entries = _turn_entries(text, reply, error, self.partial, list(self.agents.values()), self._steers, list(self.tools.values()))
         with self._lock:
             if self._transcript is None:
@@ -865,11 +939,12 @@ class Hub:
     """Owns the chats, the speech models and the connected sockets."""
 
     def __init__(self, cfg: Config, brain, token: str, log=print, follow_defaults: bool = False,
-                 open_initial: bool = True):
+                 open_initial: bool = True, journal_enabled: bool = False):
         self.cfg = cfg
         # New chats re-read the saved default model/effort, so /default elsewhere applies without a
         # restart. Off when `vision serve --model/--effort` pinned them for this run.
         self.follow_defaults = follow_defaults
+        self.journal_enabled = journal_enabled
         self.token = token
         self.log = log
         self.clients: set = set()
@@ -880,16 +955,23 @@ class Hub:
         self._lock = threading.Lock()
         self.chats: dict[str, Chat | LinkedChat] = {}
         self.links: dict[int, LinkedChat] = {}  # terminal chats by pid (see link.py)
+        self.restart_wanted = ""  # who asked for a graceful restart (see request_restart); "" = none
+        self.restarting = False  # every chat went quiet and the new process is on its way
+        self.exec_restart = None  # what replaces this process (serve sets it); None = just log
+        self._resume: list[tuple[Chat, list[str]]] = []  # messages a graceful restart carried over, run at startup
         self._dedupe_lock = threading.Lock()
         from vision.scheduled import Schedule
 
         self.schedule = Schedule()
+        if journal_enabled:
+            self.restore_chats()
         # Only an explicit --new or --continue opens a chat at startup.
         if open_initial:
             self.open_chat(brain, copy.deepcopy(cfg))
 
     # -- chats
-    def open_chat(self, brain=None, cfg: Config | None = None, title: str = "") -> Chat:
+    def open_chat(self, brain=None, cfg: Config | None = None, title: str = "",
+                  chat_id: str | None = None, restored: dict | None = None) -> Chat:
         from vision.brain import create_brain
 
         if cfg is None:
@@ -909,14 +991,81 @@ class Hub:
                 cfg.brain.effort, _ = coerce_effort(cfg.brain.model, cfg.brain.effort)
                 self.log(retired)
             brain = create_brain(cfg.brain, voice_mode=False, continue_session=False)
-        chat = Chat(self, brain, cfg, title=title)
+        chat = Chat(self, brain, cfg, title=title, chat_id=chat_id, restored=restored)
         self.chats[chat.id] = chat
         if retired:
             chat.post({"type": "note", "text": retired})
         return chat
 
-    def close_chat(self, chat: Chat) -> None:
-        chat.cancel()
+    def restore_chats(self) -> None:
+        from vision.brain import create_brain
+        from vision.turnjournal import recover, saved_chats
+
+        graceful = take_restart_marker()  # the last process restarted on purpose: its queued messages run
+        for chat_id, records in saved_chats():
+            try:
+                state = recover(records, requeue=graceful)
+                cfg = copy.deepcopy(self.cfg)
+                cfg.brain.model = state["model"] or cfg.brain.model
+                cfg.brain.effort = state["effort"] or cfg.brain.effort
+                from vision.models import provider_for
+
+                sid = state["session_id"]
+                if state["interrupted"] and provider_for(cfg.brain.model) == "local":
+                    sid = None  # its saved model context ends at the last completed turn
+                brain = create_brain(cfg.brain, voice_mode=False, session_id=sid)
+                chat = self.open_chat(brain, cfg, title=state["title"], chat_id=chat_id, restored=state)
+                if graceful and state["pending"]:
+                    self._resume.append((chat, list(state["pending"])))
+                elif state["pending"] and chat.journal:
+                    # Recovery showed these as lost. Retire them durably so a later
+                    # graceful restart cannot silently run them after the user retries.
+                    for text in state["pending"]:
+                        chat.journal.append("unqueued", text=text)
+                        chat.journal.append("steer_failed", text=text)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"could not restore chat {chat_id}: {e}")
+
+    # -- graceful restart
+    def busy_chats(self) -> list:
+        """The server's own chats still replying, or with messages waiting to run."""
+        return [c for c in self.chats.values() if isinstance(c, Chat) and (c.busy or c._pending)]
+
+    def request_restart(self, by: str) -> int:
+        """Restart once every chat is quiet: nothing is cut off mid-reply. Returns how many chats it
+        is waiting on (0: it restarts now). Asking again while one is pending changes nothing."""
+        waiting = len(self.busy_chats())
+        if not self.restart_wanted:
+            self.restart_wanted = by or "someone"
+            self.log(f"restart asked for ({self.restart_wanted})" + (f"; waiting on {waiting} chat{'s' * (waiting != 1)} to finish" if waiting else ""))
+            if waiting:
+                self.post({"type": "toast", "text": "Vision restarts once the current replies finish."})
+        self.maybe_restart()
+        return waiting
+
+    def maybe_restart(self) -> None:
+        """Restart now if one was asked for and nothing is running. From here on a new message is
+        held (Chat.queue) and journalled, and the next process runs it (restore_chats)."""
+        if not self.restart_wanted or self.restarting or self.busy_chats():
+            return
+        if self.exec_restart is None:
+            return
+        self.restarting = True
+        self.log("restarting…")
+        self.post({"type": "toast", "text": "Restarting Vision…"})
+        write_restart_marker()
+        if self.loop is not None:
+            self.loop.call_later(0.4, self.exec_restart)  # let the toast reach the phone first
+        else:
+            self.exec_restart()
+
+    def close_chat(self, chat: Chat, already_cancelled: bool = False) -> None:
+        if isinstance(chat, Chat) and chat.journal:
+            chat.journal.append("close")
+        if not already_cancelled:
+            chat.cancel()
+        if isinstance(chat, Chat) and chat.journal:
+            chat.journal.release()
         self.chats.pop(chat.id, None)
         # No replacement: the phone shows an empty screen and opens a chat with its next message.
 
@@ -993,6 +1142,8 @@ class Hub:
 
     def run_task(self, task: dict) -> Chat:
         chat = self.open_chat(title=task.get("title") or "")
+        if chat.journal:
+            chat.journal.append("scheduled", task_id=task["id"])
         chat.updated = time.time()
         self.schedule.ran(task["id"], chat.id)
         self.post(chat.summary())
@@ -1130,6 +1281,9 @@ class Hub:
                 return
             self.cfg.brain.model, self.cfg.brain.effort = model, effort
             return
+        if kind == "restart" or (kind == "message" and (msg.get("text") or "").strip().lower() == "/restart"):
+            self.request_restart("phone")  # it tells every phone what happens next
+            return
         chat = self.chat(msg.get("chat"))
         if chat is None:
             await ws.send_json({"type": "error", "text": "that chat is gone"})
@@ -1137,7 +1291,7 @@ class Hub:
         if kind == "message":
             text = with_attachments((msg.get("text") or "").strip(), msg.get("images"))
             # `now`: send it into the running turn (Claude takes it at its next step); else it queues.
-            if text and not (msg.get("now") and chat.busy and chat.steer(text)):
+            if text and not (msg.get("now") and chat.busy and await asyncio.to_thread(chat.steer, text)):
                 chat.queue(text, bool(msg.get("speak")), bool(msg.get("voice")), bool(msg.get("talk")))
         elif kind == "unqueue":
             # A queued message removed (or taken back to edit) on the phone: it never runs.
@@ -1147,17 +1301,18 @@ class Hub:
         elif kind == "steer":
             # A queued message the phone wants sent into the running turn now.
             text = with_attachments((msg.get("text") or "").strip(), msg.get("images"))  # as it was queued
-            if text and not chat.steer(text):
+            if text and not await asyncio.to_thread(chat.steer, text):
                 await ws.send_json({"type": "toast", "text": "This model can't take a message mid-reply, so it stays queued."})
         elif kind == "answer":
             chat.answer(msg.get("answers"))
         elif kind == "cancel":
-            chat.cancel()
+            await asyncio.to_thread(chat.cancel)
         elif kind == "close":
             if chat.source == "terminal":
                 chat.quit()  # the terminal exits as if /quit were typed; its link going away removes it from the list
                 return
-            self.close_chat(chat)
+            await asyncio.to_thread(chat.cancel)
+            self.close_chat(chat, already_cancelled=True)
             self.post({"type": "chat_closed", "chat": chat.id})
         elif kind == "model":
             if chat.busy:
@@ -1263,12 +1418,20 @@ def create_app(hub: Hub) -> FastAPI:
         asyncio.create_task(hub.pump())
         asyncio.create_task(hub._watch_links())
         asyncio.create_task(hub._watch_schedule())
+        for chat, texts in hub._resume:
+            chat.resume_queued(texts)
+        hub._resume.clear()
         hub.warm_up()
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         # The voice transport stays alive between requests; reap it when the server stops.
         await asyncio.to_thread(hub.cancel)
+
+    @app.post("/restart", dependencies=[Depends(bearer)])
+    async def restart() -> dict:
+        """`vision restart`: restart once every chat is quiet (see Hub.request_restart)."""
+        return {"waiting": hub.request_restart("vision restart")}
 
     @app.get("/health", dependencies=[Depends(bearer)])
     async def health() -> dict:
@@ -1471,14 +1634,21 @@ def create_app(hub: Hub) -> FastAPI:
         return {"chat": chat.id}
 
     @app.post("/transcribe", dependencies=[Depends(bearer)])
-    async def transcribe(file: UploadFile = File(...)) -> dict:
+    async def transcribe(file: UploadFile = File(...), preview: bool = False) -> dict:
+        """`preview=1` is the phone's live words: the utterance so far, sent every second or so while
+        you talk. Only served when Whisper is on the GPU (409 otherwise, the phone falls back to its own),
+        and not logged."""
         data = await file.read()
         if not data:
             raise HTTPException(status_code=400, detail="empty audio")
+        if preview and not hub.stt().can_preview_live:
+            raise HTTPException(status_code=409, detail="live preview needs Whisper on the GPU")
         try:
             text = await asyncio.get_running_loop().run_in_executor(None, hub.transcribe_bytes, data)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=422, detail=f"could not decode audio: {e}")
+        if preview:
+            return {"text": text}
         hub.log(f"heard: {text!r}")
         return {"text": text}
 
@@ -1487,25 +1657,38 @@ def create_app(hub: Hub) -> FastAPI:
         """A photo, video or any other file from the phone, saved where every brain can read it; the message
         frame then names the path. A video is digested here (frames + transcript), so a bad clip fails the
         upload. Other files keep their name after the stamp, so the brain (and the phone's chip) sees it."""
-        data = await file.read()
-        if not data:
-            raise HTTPException(status_code=400, detail="empty file")
         name = os.path.basename(file.filename or "")
         ext = os.path.splitext(name)[1].lower() or ".jpg"
         stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         if ext not in IMAGE_TYPES and ext not in VIDEO_TYPES:
-            if len(data) > MAX_FILE_BYTES:
-                raise HTTPException(status_code=413, detail=f"files are limited to {MAX_FILE_BYTES // (1024 * 1024)} MB")
             safe = re.sub(r"[^\w.\- ]", "_", name).strip(" .")[-120:] or "file"
             path = UPLOAD_DIR / f"{stamp}-{safe}"
-            path.write_bytes(data)
-            hub.log(f"file: {path.name} ({len(data) // 1024} KB)")
+        else:
+            path = UPLOAD_DIR / f"{stamp}{ext}"
+
+        def save() -> int:
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            size = 0
+            try:
+                with path.open("xb") as out:
+                    while chunk := file.file.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > MAX_FILE_BYTES:
+                            raise HTTPException(status_code=413, detail=f"uploads are limited to {MAX_FILE_BYTES // (1024 * 1024)} MB")
+                        out.write(chunk)
+                if not size:
+                    raise HTTPException(status_code=400, detail="empty file")
+                return size
+            except BaseException:
+                path.unlink(missing_ok=True)
+                raise
+
+        size = await asyncio.to_thread(save)
+        if ext not in IMAGE_TYPES and ext not in VIDEO_TYPES:
+            hub.log(f"file: {path.name} ({size // 1024} KB)")
             return {"path": str(path)}
-        path = UPLOAD_DIR / f"{stamp}{ext}"
-        path.write_bytes(data)
         if ext in IMAGE_TYPES:
-            hub.log(f"photo: {path.name} ({len(data) // 1024} KB)")
+            hub.log(f"photo: {path.name} ({size // 1024} KB)")
             return {"path": str(path)}
         started = time.monotonic()
         try:
@@ -1515,7 +1698,7 @@ def create_app(hub: Hub) -> FastAPI:
             path.unlink(missing_ok=True)
             shutil.rmtree(path.with_name(path.stem + "-frames"), ignore_errors=True)
             raise HTTPException(status_code=422, detail=f"could not read that video: {e}")
-        hub.log(f"video: {path.name} ({len(data) // 1024} KB, {clock(digest['duration'])}, "
+        hub.log(f"video: {path.name} ({size // 1024} KB, {clock(digest['duration'])}, "
                 f"{len(digest['frames'])} frames, {len(digest['transcript'])} chars heard, {time.monotonic() - started:.1f} s)")
         return {"path": str(path), "frames": str(len(digest["frames"])), "duration": str(digest["duration"])}
 
@@ -1663,14 +1846,96 @@ def pairing_info(cfg: Config, host: str | None, port: int | None, public_url: st
     return {"host": host, "port": port, "local": local, "url": url, "token": token, "payload": pairing_payload(url, token)}
 
 
+RESTART_MARKER = STATE_DIR / "restart.json"  # a graceful restart is under way (see Hub.maybe_restart)
+
+
+def write_restart_marker() -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        RESTART_MARKER.write_text(json.dumps({"at": time.time()}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def take_restart_marker() -> bool:
+    """True once after a graceful restart (a marker less than five minutes old), then gone."""
+    try:
+        at = json.loads(RESTART_MARKER.read_text(encoding="utf-8")).get("at") or 0
+        RESTART_MARKER.unlink()
+    except (OSError, ValueError, AttributeError):
+        return False
+    return time.time() - at < 300
+
+
+RESTART_DROPPED = {"--new", "--continue", "-c", "--new-token"}  # one-off start-up flags a restart must not repeat
+
+
+def restart_argv(argv: list[str]) -> list[str]:
+    """The command line that brings `vision serve` back: the same interpreter and options, less the
+    one-off ones (chats come back from the journal; the pairing token stays)."""
+    return [sys.executable, "-m", "vision", *(a for a in argv[1:] if a not in RESTART_DROPPED)]
+
+
+def watch_keys(hub: "Hub", on_clear):
+    """`r` asks for a graceful restart and `c` clears the window (on_clear redraws the one-line
+    banner), read a key at a time off a terminal. Returns what puts the terminal back as it was
+    (a no-op when stdin is not a terminal)."""
+    if not sys.stdin.isatty() or os.name == "nt":
+        return lambda: None
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    tty.setcbreak(fd)  # keys arrive one at a time and are not echoed; Ctrl-C still stops the server
+
+    def restore() -> None:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        except termios.error:
+            pass
+
+    def loop() -> None:
+        while True:
+            try:
+                key = os.read(fd, 1).decode(errors="ignore").lower()
+            except OSError:
+                return
+            if not key:
+                return
+            if key == "r":
+                if hub.loop is not None:
+                    hub.loop.call_soon_threadsafe(hub.request_restart, "r pressed")
+            elif key == "c":
+                sys.stdout.write("\033[2J\033[3J\033[H")
+                sys.stdout.flush()
+                on_clear()
+
+    threading.Thread(target=loop, daemon=True, name="serve-keys").start()
+    return restore
+
+
 def serve(cfg: Config, brain, info: dict, log=print, follow_defaults: bool = True,
-          open_initial: bool = False) -> None:
+          open_initial: bool = False, on_clear=None) -> None:
     import uvicorn
 
     from vision.remote import remove_serve_descriptor, write_serve_descriptor
 
     hub = Hub(cfg, brain, info["token"], log=log, follow_defaults=follow_defaults,
-              open_initial=open_initial)
+              open_initial=open_initial, journal_enabled=True)
+    restore_keys = watch_keys(hub, on_clear or (lambda: None))
+
+    def exec_restart() -> None:
+        """Become a fresh `vision serve` on the new code: same terminal, same port (the listening
+        socket is not inherited), chats back from the journal. The phone just reconnects."""
+        hub.cancel()
+        restore_keys()
+        remove_serve_descriptor()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, restart_argv(sys.argv))
+
+    hub.exec_restart = exec_restart
     try:
         write_serve_descriptor(info["host"], info["port"])
     except OSError as e:
@@ -1678,4 +1943,5 @@ def serve(cfg: Config, brain, info: dict, log=print, follow_defaults: bool = Tru
     try:
         uvicorn.run(create_app(hub), host=info["host"], port=info["port"], log_level="warning", ws_ping_interval=20, ws_ping_timeout=20)
     finally:
+        restore_keys()
         remove_serve_descriptor()

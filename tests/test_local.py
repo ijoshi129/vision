@@ -184,6 +184,36 @@ class LocalBrainTests(unittest.TestCase):
         self.assertEqual([m["role"] for m in brain._messages], ["user", "assistant", "tool", "assistant"])
         self.assertIn("Vision refuses them", first["messages"][0]["content"])
 
+    def test_a_steered_message_joins_after_the_tool_results(self):
+        StubServer.script = [[("Bash", {"command": "sleep 1"})], "Done, and noted."]
+        brain = create_brain(self.cfg.brain)
+        self.assertFalse(brain.steer("too early"))  # no turn running: the caller queues it
+        steered = []
+        threading.Timer(0.4, lambda: steered.append(brain.steer("use the other folder"))).start()
+        turn = brain.ask("do the thing")
+        self.assertEqual(steered, [True])
+        self.assertEqual(turn.text, "Done, and noted.")
+        roles = [m["role"] for m in StubServer.requests[1]["messages"]]
+        self.assertEqual(roles, ["system", "user", "assistant", "tool", "user"])
+        self.assertEqual(StubServer.requests[1]["messages"][-1]["content"], "use the other folder")
+        self.assertFalse(brain.steer("after"))  # the turn is over
+
+    def test_a_message_steered_while_the_reply_streams_is_answered_in_the_same_turn(self):
+        StubServer.script = ["First answer. It keeps going for a bit.", "Second answer."]
+        brain = create_brain(self.cfg.brain)
+        pieces = []
+
+        def on_text(chunk):
+            if not pieces:
+                self.assertTrue(brain.steer("and another thing"))
+            pieces.append(chunk)
+
+        turn = brain.ask("hi", on_text=on_text)
+        self.assertEqual(len(StubServer.requests), 2)
+        self.assertEqual([m["role"] for m in StubServer.requests[1]["messages"]], ["system", "user", "assistant", "user"])
+        self.assertEqual(turn.text, "First answer. It keeps going for a bit.\n\nSecond answer.")
+        self.assertEqual([m["role"] for m in brain._messages], ["user", "assistant", "user", "assistant"])
+
     def test_denied_command_comes_back_as_an_error_for_the_model(self):
         StubServer.script = [[("Bash", {"command": "sudo systemctl restart foo"})], "I can't run sudo; run it yourself."]
         brain = create_brain(self.cfg.brain)
