@@ -343,7 +343,8 @@ class GrokBrain:
         if self.cfg.effort:
             cmd += ["--effort", self.cfg.effort]
         for rule in self.cfg.denied_tools or []:
-            cmd += ["--deny", rule]
+            if not rule.startswith("PowerShell("):  # Claude Code's Windows shell; Grok has no such tool
+                cmd += ["--deny", rule]
         if self.task_mode:
             from vision.delegation import RESULT_SCHEMA
 

@@ -834,6 +834,16 @@ class ModeTests(unittest.TestCase):
         self.assertEqual(grok_sandbox(BrainConfig(mode="plan", grok=GrokConfig())), "read-only")
         self.assertEqual(grok_sandbox(BrainConfig(mode="auto", grok=GrokConfig(sandbox="workspace"))), "workspace")
 
+    def test_windows_deny_rules_reach_the_powershell_tool(self):
+        from vision import compat
+
+        cfg = BrainConfig(model="opus", mode="auto", denied_tools=["Bash(sudo:*)", "PowerShell(Clear-Disk:*)"])
+        for windows, expected in ((False, "Bash(sudo:*),PowerShell(Clear-Disk:*)"),
+                                  (True, "Bash(sudo:*),PowerShell(Clear-Disk:*),PowerShell(sudo:*)")):
+            with patch.object(compat, "WINDOWS", windows), patch("vision.brain.find_claude", return_value="claude"):
+                cmd = Brain(cfg)._command()
+            self.assertEqual(cmd[cmd.index("--disallowedTools") + 1], expected)
+
     def test_claude_fast_mode_is_session_scoped(self):
         brain = self._brain("auto")
         brain.cfg.fast = True
@@ -1600,6 +1610,7 @@ class BrainEnvTests(unittest.TestCase):
         from vision.persona import system_prompt
 
         denied = BrainConfig().denied_tools
+        self.assertEqual("Bash(diskpart:*)" in denied, sys.platform == "win32")
         self.assertIn("Bash(claude:*)", denied)
         self.assertIn("Bash(codex:*)", denied)
         self.assertIn("Bash(grok:*)", denied)

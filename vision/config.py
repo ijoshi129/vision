@@ -19,6 +19,16 @@ from vision.models import THINKING_OFF, provider_for
 # Windows starts in plan mode: none of the Linux sandboxes exist there, and denied_tools only knows
 # POSIX commands. "auto" still works; set it under [brain] or press Shift-Tab.
 DEFAULT_MODE = "plan" if sys.platform == "win32" else "auto"
+# Windows' counterparts of the default POSIX deny entries: wiping disks, the boot configuration and
+# restore points, shutting down, and elevating (the sudo of Windows). Bash rules also reach Claude
+# Code's PowerShell tool as PowerShell(...) ones (see Brain._command); the cmdlets only PowerShell
+# has are listed as PowerShell rules.
+WINDOWS_DENIED = [
+    "Bash(format:*)", "Bash(diskpart:*)", "Bash(bcdedit:*)", "Bash(vssadmin delete:*)", "Bash(runas:*)",
+    "PowerShell(Format-Volume:*)", "PowerShell(Clear-Disk:*)", "PowerShell(Initialize-Disk:*)",
+    "PowerShell(Remove-Partition:*)", "PowerShell(Stop-Computer:*)", "PowerShell(Restart-Computer:*)",
+    "PowerShell(Start-Process * -Verb RunAs*)",
+]
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "vision"
 DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "vision"
@@ -338,6 +348,9 @@ language = "en"
 '''
 if DEFAULT_MODE != "auto":
     DEFAULT_CONFIG = DEFAULT_CONFIG.replace('\nmode = "auto"\n', f'\nmode = "{DEFAULT_MODE}"\n', 1)
+if sys.platform == "win32":
+    DEFAULT_CONFIG = DEFAULT_CONFIG.replace(
+        '"Bash(grok:*)"]\n', '"Bash(grok:*)", ' + ", ".join(f'"{r}"' for r in WINDOWS_DENIED) + "]\n", 1)
 
 VOICE_ENGINES = ("qwen3", "orpheus")
 # The voices baked into the Orpheus fine-tune, roughly in order of how polished they are.
@@ -406,6 +419,7 @@ class BrainConfig:
     )
     denied_tools: list[str] = field(
         default_factory=lambda: ["Bash(sudo:*)", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(mkfs:*)", "Bash(dd:*)", "Bash(shutdown:*)", "Bash(reboot:*)", "Bash(claude:*)", "Bash(codex:*)", "Bash(grok:*)"]
+        + (WINDOWS_DENIED if sys.platform == "win32" else [])
     )
     workdir: str = ""
     address_user_as: str = ""
