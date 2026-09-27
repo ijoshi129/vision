@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import socket
 import tempfile
 import threading
 import time
@@ -41,7 +43,6 @@ class _Terminal:
         self.busy = False
 
 
-@unittest.skipUnless(link.SUPPORTED, "the terminal link needs Unix sockets")
 class LinkTests(unittest.TestCase):
     def _hub(self):
         from vision.config import Config
@@ -185,3 +186,49 @@ class LinkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TcpLinkTests(LinkTests):
+    """The same, over the loopback TCP link Windows uses (no AF_UNIX there); runs everywhere."""
+
+    def setUp(self):
+        p = patch.object(link, "_TCP", True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_connection_without_the_secret_gets_nothing(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(link, "LIVE_DIR", Path(d)), \
+             patch.object(link, "HELLO_TIMEOUT", 0.5):
+            term = _Terminal()
+            term.host.start()
+            try:
+                info = json.loads(Path(d, f"{os.getpid()}.json").read_text())
+                self.assertEqual(len(info["secret"]), 32)
+                addr = ("127.0.0.1", info["port"])
+
+                def attempt(first_frame):
+                    with socket.create_connection(addr, timeout=2) as s:
+                        if first_frame is not None:
+                            s.sendall((json.dumps(first_frame) + "\n").encode())
+                        time.sleep(0.2)
+                        term.host.post({"type": "delta", "text": "private"})
+                        return s.recv(65536)  # b"" once the terminal hangs up
+
+                self.assertEqual(attempt({"type": "hello", "secret": "wrong"}), b"")
+                self.assertEqual(attempt({"type": "message", "text": "rm -rf ~"}), b"")
+                self.assertEqual(attempt(None), b"")  # silent until the hello timeout
+                self.assertEqual(term.frames, [])
+                self.assertFalse(term.host.connected)
+
+                got = []
+                client = link.LinkClient(link.list_links()[0], on_event=got.append, on_close=lambda: None)
+                client.connect()
+                for _ in range(50):
+                    if got:
+                        break
+                    time.sleep(0.05)
+                client.close()
+                self.assertEqual(got[0]["type"], "chat")
+            finally:
+                term.host.stop()
+

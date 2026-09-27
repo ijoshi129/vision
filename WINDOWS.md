@@ -85,13 +85,22 @@ Ported, but not tested on real installs:
 - **The Orpheus voice engine (`setup --orpheus`).**
   - It uses the Windows CUDA 13.4 build of llama.cpp.
   - A job object stops `llama-server` when Vision exits, in place of the `sh` watchdog used on Linux.
+- **`vision serve`, the phone app and `vision --join`.** Pairing and chatting from the iPhone app were tested
+  against a Windows machine. The terminal link and joining a phone chat are covered by the test suite.
+  - **Link transport.** CPython has no Unix sockets on Windows, so a terminal chat listens on a `127.0.0.1` port with a random
+    secret instead. The secret is kept in `%USERPROFILE%\.local\state\vision\live`. A connection that
+    doesn't present it gets nothing.
+  - **"Open on laptop"** uses Windows Terminal (`wt`) when it is installed, else a new console window.
+  - **The server listens on your LAN.** `vision serve` binds to `0.0.0.0` (the LAN, so the phone can reach it). Windows Firewall
+    asks the first time: allow **private networks only**, or set `[remote] host = "127.0.0.1"` and use a
+    tunnel.
+  - **The token file.** Windows has no file mode bits, so `remote_token` is protected by your profile folder's permissions
+    rather than `chmod 600`.
+  - **It can run anything.** Anyone with the token can drive the brain in whatever mode your config starts in. That is plan on
+    Windows by default, but a paired phone can still approve a plan.
 
 ## What doesn't work on Windows
 
-- **`vision serve`, the phone app and `vision --join`: not ported.**
-  - The terminal↔server link uses Unix sockets, which CPython does not have on Windows. The chat skips the link quietly.
-  - "Open on laptop" launches Linux terminal emulators.
-  - The image route allows `/tmp`.
 - **Grok with a sandbox (plan mode, or `[grok] sandbox` other than `off`): refused.**
   - Grok always runs with `--always-approve`, and its sandbox is Linux/macOS kernel machinery.
   - Rather than run "read-only" with nothing enforcing it, Vision says so and does not run the turn.
@@ -108,8 +117,8 @@ Ported, but not tested on real installs:
   - `vision setup` loads Whisper right after designing a voice, while that model still holds VRAM, so setup may report "Whisper ready on cpu/small.en".
   - A normal session loads Whisper on CUDA. Close other GPU-heavy apps if the voice falls back to the CPU.
 - **`vision doctor` without the voice extra** exits with an install hint at the voice checks (as on Linux).
-- **Test suite on Windows.** It passes, with 6 tests skipped for Linux-only features (the Unix-socket
-  link, the process title, file mode bits, serve's `/tmp` route).
+- **Test suite on Windows.** It passes, with one test skipped for a Linux-only feature (the process
+  title).
   - Run it from a real console, not a piped shell such as the Git Bash window: the chat-screen tests need a Windows console.
   - It needs the `all` extra plus pytest and httpx2.
 - **Quiet speech.** Very quiet speech can lose its first word to the voice detector. Speak at normal volume,
