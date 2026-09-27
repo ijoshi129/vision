@@ -12,7 +12,8 @@ WebSocket protocol (JSON, one object per frame). Every frame about a chat carrie
 a phone → laptop frame without one goes to the most recently active chat.
   phone → laptop   message {chat, text, speak, voice, images?: [path…]} (photos, videos and files from /upload) · answer {chat, answers} · cancel {chat}
                    new · close {chat} · resume {session_id, provider?} · model {chat, model, effort} · ping
-                   open_terminal {chat} (a terminal window here running `vision --join <chat>`)
+                   open_terminal {chat} (a terminal window here running `vision --join <chat>`; one per chat:
+                     a chat that already has one gets it brought forward, on Hyprland, and a toast)
   laptop → phone   hello {version, workdir, chats: [chat…]}
                    chat {chat, title, model, effort, session_id, busy, waiting, questions, partial, user_text, …}
                      (sent whenever a chat's state changes; `opened: true` on the reply to new/resume)
@@ -31,8 +32,8 @@ and leave the list when the terminal quits; `close` quits that terminal (as /qui
 Closing the last chat leaves none open; the phone's next message (or +) opens one.
 
 The other way round, a terminal `vision` can join one of this process's chats (remote.py): it dials
-the same WebSocket (`/ws?client=terminal`) and follows the frames like a phone. While running, this
-process leaves ~/.local/state/vision/serve.json so a terminal on this machine finds it.
+the same WebSocket (`/ws?client=terminal&chat=<id>&pid=<its pid>`) and follows the frames like a
+phone; the chat and pid say which chat already has a window here. While running, this process leaves ~/.local/state/vision/serve.json so a terminal on this machine finds it.
 """
 from __future__ import annotations
 
@@ -99,6 +100,47 @@ def open_terminal(chat_id: str, workdir: str) -> str:
         subprocess.Popen(argv(path), cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         return os.path.basename(name)
     raise RuntimeError("no terminal emulator found (set $TERMINAL)")
+
+
+def _parent_pid(pid: int) -> int:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        return int(stat.rsplit(")", 1)[1].split()[1])  # the name in (…) can hold spaces; ppid follows the state
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def focus_terminal(pid: int) -> bool:
+    """Bring forward the window a `vision` process (`pid`) runs in: "Open on laptop" for a chat that
+    already has one. Hyprland only, whose hyprctl gives each window's pid: the terminal emulator's, an
+    ancestor of `vision` (through `sh -c`). Elsewhere, or when the window can't be told apart, nothing."""
+    exe = shutil.which("hyprctl")
+    if not exe or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return False
+    try:
+        r = subprocess.run([exe, "clients", "-j"], capture_output=True, text=True, timeout=3, encoding="utf-8")
+        clients = json.loads(r.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    by_pid: dict[int, list[dict]] = {}
+    for c in clients if isinstance(clients, list) else []:
+        by_pid.setdefault(c.get("pid"), []).append(c)
+    while pid > 1 and pid not in by_pid:
+        pid = _parent_pid(pid)
+    windows = by_pid.get(pid, [])
+    if len(windows) > 1:  # one process drawing several windows (a single-instance terminal): Vision's own title
+        from vision.ui import TITLE_SPINNER
+
+        titles = [(c.get("title") or "").lstrip(TITLE_SPINNER + " ") for c in windows]
+        windows = [c for c, t in zip(windows, titles) if t == "Vision" or t.startswith("Vision - ")]
+    if len(windows) != 1:
+        return False
+    try:
+        r = subprocess.run([exe, "dispatch", "focuswindow", f"address:{windows[0]['address']}"],
+                           capture_output=True, text=True, timeout=3, encoding="utf-8")
+    except (OSError, KeyError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and r.stdout.strip() == "ok"
 
 
 def _open_terminal_windows(vision: str, chat_id: str, cwd: str) -> str:
@@ -880,6 +922,11 @@ class Hub:
         self._lock = threading.Lock()
         self.chats: dict[str, Chat | LinkedChat] = {}
         self.links: dict[int, LinkedChat] = {}  # terminal chats by pid (see link.py)
+        # The other way round: terminal windows following one of this process's chats (remote.py), by
+        # chat id, each socket with its process's pid, and when a window was launched for a chat that
+        # has not dialled in yet. "Open on laptop" opens one window per chat.
+        self.mirrors: dict[str, dict] = {}
+        self._opening: dict[str, float] = {}
         self._dedupe_lock = threading.Lock()
         from vision.scheduled import Schedule
 
@@ -987,6 +1034,23 @@ class Hub:
             except Exception as e:  # noqa: BLE001
                 self.log(f"link sweep failed: {e}")
             await asyncio.sleep(self.LINK_POLL)
+
+    # -- terminal windows following a chat (remote.py); only touched on the event loop
+    OPEN_GRACE = 15.0  # seconds a launched window has to dial in before another tap may open a second
+
+    def mirror_joined(self, chat_id: str, ws, pid: int | None) -> None:
+        self.mirrors.setdefault(chat_id, {})[ws] = pid
+        self._opening.pop(chat_id, None)
+
+    def mirror_left(self, chat_id: str, ws) -> None:
+        windows = self.mirrors.get(chat_id, {})
+        windows.pop(ws, None)
+        if not windows:
+            self.mirrors.pop(chat_id, None)
+
+    def opening(self, chat_id: str) -> bool:
+        """A window was launched for this chat moments ago and is still starting up."""
+        return time.monotonic() - self._opening.get(chat_id, float("-inf")) < self.OPEN_GRACE
 
     # -- scheduled tasks (scheduled.py): each run opens a fresh chat and sends the task's prompt
     SCHEDULE_POLL = 20.0
@@ -1170,9 +1234,21 @@ class Hub:
             if chat.source == "terminal":
                 await ws.send_json({"type": "toast", "text": "That chat is already open in a terminal."})
                 return
+            windows = self.mirrors.get(chat.id)
+            if windows:
+                pids = [pid for pid in windows.values() if pid]
+                shown = bool(pids) and await asyncio.to_thread(focus_terminal, pids[-1])
+                text = "Already open on the laptop; brought it to the front." if shown else "That chat is already open on the laptop."
+                await ws.send_json({"type": "toast", "text": text})
+                return
+            if self.opening(chat.id):
+                await ws.send_json({"type": "toast", "text": "That chat is already opening on the laptop."})
+                return
+            self._opening[chat.id] = time.monotonic()  # before the await: a second tap lands while it runs
             try:
                 term = await asyncio.to_thread(open_terminal, chat.id, chat.workdir)
             except Exception as e:  # noqa: BLE001
+                self._opening.pop(chat.id, None)
                 await ws.send_json({"type": "error", "text": f"could not open a terminal: {e}"})
                 return
             chat.log(f"opened in a terminal ({term}) from the phone")
@@ -1574,6 +1650,11 @@ def create_app(hub: Hub) -> FastAPI:
             return
         hub.clients.add(websocket)
         who = "terminal" if websocket.query_params.get("client") == "terminal" else "phone"
+        # A terminal window following one chat (remote.py) says which, and its pid: one window per chat.
+        mirror = websocket.query_params.get("chat") if who == "terminal" else None
+        if mirror:
+            pid = websocket.query_params.get("pid") or ""
+            hub.mirror_joined(mirror, websocket, int(pid) if pid.isdigit() else None)
         hub.log(f"{who} connected ({len(hub.clients)} client{'s' if len(hub.clients) != 1 else ''})")
         try:
             await websocket.send_json(hub.hello())
@@ -1592,6 +1673,8 @@ def create_app(hub: Hub) -> FastAPI:
             hub.log(f"socket error: {e}")
         finally:
             hub.clients.discard(websocket)
+            if mirror:
+                hub.mirror_left(mirror, websocket)
             hub.log(f"{who} disconnected")
 
     @app.exception_handler(404)
