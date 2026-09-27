@@ -20,6 +20,7 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
+from urllib.parse import quote
 
 from vision.brain import AgentRun, ToolCall, Turn, run_from_frame
 from vision.config import STATE_DIR
@@ -259,7 +260,10 @@ class RemoteBrain:
         from websockets.sync.client import connect
 
         reason = "the server closed the connection"
-        url = self.server["url"].replace("http://", "ws://", 1).replace("https://", "wss://", 1) + "/ws?client=terminal"
+        url = self.server["url"].replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        # Which chat this window follows, and its pid: the server opens one window per chat for the phone
+        # and brings this one forward instead of a second.
+        url += f"/ws?client=terminal&chat={quote(self.chat_id)}&pid={os.getpid()}"
         try:
             with connect(url, additional_headers={"Authorization": f"Bearer {self.server['token']}"}, open_timeout=CONNECT_TIMEOUT) as ws:
                 with self._lock:

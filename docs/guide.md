@@ -102,7 +102,8 @@ Pip uses the Obsidian design in the bottom-left gutter beside the input box: a g
 recessed face, and jade eyes. He blinks while idle, passes a highlight across three dots while
 thinking, and scans a small cursor while tools run. While listening, the side rails pulse gently
 and a waveform follows actual microphone levels. He speaks along with the voice and dozes off
-after ten idle minutes. Rename or hide him under `[buddy]` in the config.
+after ten idle minutes. He slides in from the left when a chat opens (`slide_in = false` under
+`[buddy]` turns that off). Rename or hide him under `[buddy]` in the config.
 During `/talk` and `/listen` warmup, Pip's lower rim fills as speech recognition, voice, and the
 optional interruption listener finish loading. The percentage counts ready components, not elapsed
 time: it holds during a slow load, excludes failed loads, and resets for the next warmup. Narrow

@@ -200,6 +200,28 @@ class PipRendererTests(unittest.TestCase):
         self.assertEqual([get_cwidth(row) for row in rows], [WIDTH] * HEIGHT)
         self.assertNotIn("error", text)  # no caption row under the head
 
+    def test_slide_in_enters_from_the_left_and_settles_into_the_still_gutter(self):
+        from vision.buddy import SLIDE_S
+
+        def rows(pip, now):
+            with patch("vision.buddy.time.time", return_value=now):
+                return "".join(t for _, t in pip.render(False)).split("\n")
+
+        still = rows(self.pip, 100.0)
+        sliding = Buddy(sleep_after_s=1000, slide_in=True)
+        sliding.last_activity, sliding._blink_phase = 0, 1.0
+
+        self.assertEqual(rows(sliding, 100.0), [" " * WIDTH] * HEIGHT)  # the clock starts at the first frame drawn
+        hidden = sliding._hidden(100.0 + SLIDE_S / 3)
+        self.assertTrue(0 < hidden < WIDTH)
+        self.assertEqual(rows(sliding, 100.0 + SLIDE_S / 3), [r[hidden:] + " " * hidden for r in still])  # his right side, flush left
+        with patch("vision.buddy.time.time", return_value=100.0 + SLIDE_S / 3):
+            self.assertFalse(sliding.slid_in())
+        with patch("vision.buddy.time.time", return_value=100.0 + SLIDE_S):
+            self.assertTrue(sliding.slid_in())
+        self.assertEqual(rows(sliding, 100.0 + SLIDE_S), still)
+        self.assertTrue(self.pip.slid_in())  # off: nothing to wait for
+
 
 class PipLayoutTests(unittest.TestCase):
     def test_buddy_is_the_leftmost_bottom_gutter(self):

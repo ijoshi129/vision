@@ -477,6 +477,56 @@ class JoinTests(unittest.TestCase):
                 for p in patches:
                     p.stop()
 
+    def test_open_on_laptop_opens_one_window_per_chat(self):
+        from vision.config import BrainConfig
+
+        hub = _hub(_StubBrain(BrainConfig()))
+        chat_id = next(iter(hub.chats))
+        opened, focused = [], []
+        with tempfile.TemporaryDirectory() as d:
+            patches = _quiet(d) + (
+                patch.object(server, "open_terminal", lambda cid, workdir: opened.append(cid) or "kitty"),
+                patch.object(server, "focus_terminal", lambda pid: focused.append(pid) or True),
+            )
+            for p in patches:
+                p.start()
+            try:
+                with _Live(hub) as info:
+                    phone = _Phone(info)
+                    phone.until(lambda ev: ev["type"] == "hello")
+                    toast = lambda: phone.until(lambda ev: ev["type"] == "toast")["text"]
+
+                    # a second tap while the first window is still starting up opens nothing
+                    phone.send({"type": "open_terminal", "chat": chat_id})
+                    self.assertEqual(toast(), "Opened in a terminal on the laptop.")
+                    phone.send({"type": "open_terminal", "chat": chat_id})
+                    self.assertEqual(toast(), "That chat is already opening on the laptop.")
+                    self.assertEqual(opened, [chat_id])
+
+                    # the window dials in: a tap brings it forward
+                    rb = remote.RemoteBrain(info, {"chat": chat_id}, BrainConfig())
+                    rb.connect()
+                    self.assertEqual(list(hub.mirrors[chat_id].values()), [os.getpid()])
+                    phone.send({"type": "open_terminal", "chat": chat_id})
+                    self.assertEqual(toast(), "Already open on the laptop; brought it to the front.")
+                    self.assertEqual((opened, focused), ([chat_id], [os.getpid()]))
+
+                    # it closes: the next tap opens a window again
+                    rb.close()
+                    for _ in range(50):
+                        if chat_id not in hub.mirrors:
+                            break
+                        time.sleep(0.05)
+                    self.assertNotIn(chat_id, hub.mirrors)
+                    phone.send({"type": "open_terminal", "chat": chat_id})
+                    self.assertEqual(toast(), "Opened in a terminal on the laptop.")
+                    self.assertEqual(opened, [chat_id, chat_id])
+                    phone.close()
+            finally:
+                for p in patches:
+                    p.stop()
+
+
 
 class LiveSessionTests(unittest.TestCase):
     """A phone chat's session is on disk too: its provider-tab row is tagged and keyed to the chat."""

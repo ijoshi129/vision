@@ -237,6 +237,46 @@ class _StubBrain:
         return _Turn(reply, self.session_id)
 
 
+class FocusTerminalTests(unittest.TestCase):
+    """"Open on laptop" for a chat that already has a window: Hyprland brings that window forward."""
+
+    def _focus(self, clients, parents, pid=300):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv[1:])
+            out = json.dumps(clients) if argv[1] == "clients" else "ok"
+            return subprocess.CompletedProcess(argv, 0, out, "")
+
+        with patch.object(server.shutil, "which", lambda name: "/usr/bin/hyprctl"), \
+             patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "sig"}), \
+             patch.object(server.subprocess, "run", run), \
+             patch.object(server, "_parent_pid", lambda p: parents.get(p, 0)):
+            shown = server.focus_terminal(pid)
+        return shown, [c for c in calls if c[0] == "dispatch"]
+
+    def test_the_terminal_window_above_vision_is_focused(self):
+        # vision 300 runs under `sh -c` 200, under the terminal 100 that owns the window
+        clients = [{"pid": 100, "address": "0xa", "title": "Vision"}, {"pid": 900, "address": "0xb", "title": "Vision"}]
+        shown, dispatched = self._focus(clients, {300: 200, 200: 100, 100: 1})
+        self.assertTrue(shown)
+        self.assertEqual(dispatched, [["dispatch", "focuswindow", "address:0xa"]])
+
+    def test_a_single_instance_terminal_is_told_apart_by_vision_s_title(self):
+        clients = [{"pid": 100, "address": "0xa", "title": "~/code"},
+                   {"pid": 100, "address": "0xb", "title": "✳ Vision - Weather"},
+                   {"pid": 100, "address": "0xc", "title": "◑ Vision setup"}]
+        shown, dispatched = self._focus(clients, {300: 100})
+        self.assertTrue(shown)
+        self.assertEqual(dispatched, [["dispatch", "focuswindow", "address:0xb"]])
+
+    def test_no_window_or_no_hyprland_does_nothing(self):
+        shown, dispatched = self._focus([{"pid": 900, "address": "0xb", "title": "Vision"}], {300: 1})
+        self.assertEqual((shown, dispatched), (False, []))
+        with patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": ""}):
+            self.assertFalse(server.focus_terminal(os.getpid()))
+
+
 class MultiChatTests(unittest.TestCase):
     """Several chats run at the same time and every frame names its chat."""
 

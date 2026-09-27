@@ -2,7 +2,8 @@
 
 Flat foreground/background colors work in ordinary terminals. Idle glances and blinks;
 thinking and tool use animate within the face; listening follows microphone levels, and
-warmup follows component completion. The body never moves or changes size.
+warmup follows component completion. The body never moves or changes size, apart from sliding in
+from the left once when the chat opens ([buddy] slide_in).
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ _BLINK_PERIOD_S = 4.0
 _BLINK_DURATION_S = 0.14
 _GLANCE_PERIOD_S = 7.0
 _GLANCES = ((2.2, 2.9, 1), (4.8, 5.4, -1))  # (from, to, eye offset) within each glance period
+SLIDE_S = 0.45  # the entrance: from off the gutter's left edge into place, easing out
 
 
 def _glance(seconds: float) -> int:
@@ -139,9 +141,11 @@ def idle_sprite() -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
 class Buddy:
     """State holder + renderer. Thread-safe enough: fields are only ever assigned whole."""
 
-    def __init__(self, name: str = "Pip", sleep_after_s: float = 600.0):
+    def __init__(self, name: str = "Pip", sleep_after_s: float = 600.0, slide_in: bool = False):
         self.name = name
         self.sleep_after_s = sleep_after_s
+        self.slide_in = slide_in
+        self._shown_at: float | None = None  # first drawn: the slide runs from there, not from start-up
         self.state = "idle"     # explicit state: idle | tool | chore | listening | error
         self.tool = ""          # the tool's name, or the chore's caption
         self.last_activity = time.time()
@@ -250,18 +254,36 @@ class Buddy:
     def _frame(self, busy: bool, now: float):
         return self._paint(busy, now)[:5]
 
+    def _hidden(self, now: float) -> int:
+        """Columns of him still off the gutter's left edge: all of them on the first frame, none once
+        he has slid in (and always none with slide_in off)."""
+        if not self.slide_in:
+            return 0
+        if self._shown_at is None:
+            self._shown_at = now
+        t = min(1.0, max(0.0, now - self._shown_at) / SLIDE_S)
+        return round(WIDTH * (1 - t) ** 3)
+
+    def slid_in(self) -> bool:
+        """The entrance is over (or there is none): the screen can go back to its usual refresh."""
+        return not self.slide_in or (self._shown_at is not None and time.time() - self._shown_at >= SLIDE_S)
+
     def render(self, busy: bool) -> FormattedText:
         """The 16x4 buddy gutter: the four sprite rows."""
-        _, rows, _, _, _, colors = self._paint(busy, time.time())
+        now = time.time()
+        _, rows, _, _, _, colors = self._paint(busy, now)
+        hidden = self._hidden(now)
         parts = []
         for y, row in enumerate(rows):
             if y:
                 parts.append(("", "\n"))
-            for x, char in enumerate(row):
+            for x in range(hidden, len(row)):  # sliding in: his right side shows first, flush left
                 style = colors[y][x]
                 if 1 <= y <= 2 and FACE_X0 <= x <= FACE_X1:
                     style += f" bg:{_FACE}"
-                parts.append((style, char))
+                parts.append((style, row[x]))
+            if hidden:
+                parts.append(("", " " * hidden))
         return FormattedText(parts)
 
     def render_inline(self, busy: bool) -> FormattedText:
