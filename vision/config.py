@@ -320,7 +320,8 @@ enabled = true
 [remote]
 # `vision serve`: the HTTP + WebSocket server the Vision Remote iOS app talks to.
 # 0.0.0.0 = reachable from the phone on the same Wi-Fi (the QR carries the laptop's LAN address);
-# 127.0.0.1 = laptop only, for use behind an HTTPS tunnel (Tailscale Funnel or Cloudflare Tunnel).
+# 127.0.0.1 = laptop only, for use behind Tailscale Serve (`tailscale serve --bg 8765`: your own devices
+# only, and Vision puts its https address in the QR) or a public tunnel (Tailscale Funnel, Cloudflare Tunnel).
 # The pairing token lives in remote_token next to this file (`vision serve --new-token` rotates it).
 host = "0.0.0.0"
 port = 8765

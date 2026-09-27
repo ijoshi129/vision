@@ -3083,8 +3083,10 @@ def serve(
         where = "on the laptop itself" if info["local"].startswith("http://127.") else "on this Wi-Fi"
         console.print(
             f"[yellow]no public URL:[/yellow] the phone can only reach this {where}. "
-            "Publish it with Tailscale Funnel ([dim]tailscale funnel --bg %d[/dim]) or a Cloudflare Tunnel, "
-            "then set public_url under \\[remote] in config.toml or pass --public-url. See README → Remote." % info["port"]
+            "To reach it from anywhere, Tailscale Serve publishes it to your own devices only "
+            "([dim]tailscale serve --bg %d[/dim]); Vision finds it and puts its https address in the QR. "
+            "Tailscale Funnel or a Cloudflare Tunnel publish it to the whole internet instead; then set "
+            "public_url under \\[remote] in config.toml or pass --public-url. See README → Remote." % info["port"]
         )
     if not no_qr:
         console.print()
@@ -3253,6 +3255,15 @@ def doctor(
         with console.status("[dim]reading all provider usage…[/dim]"):
             report = _usage_selection(cfg, None, "all")
         console.print(report)
+
+    # models, GPU and audio need the voice extra; a text-only install stops here, and that is fine
+    import importlib.util
+
+    missing = [m for m in ("numpy", "sounddevice", "soundfile", "faster_whisper") if importlib.util.find_spec(m) is None]
+    if missing:
+        console.print(f"{warn} voice not installed (optional; {', '.join(missing)} missing). For speech in and out:  pip install -e '.\\[voice]'")  # \\[: not rich markup
+        console.print(f"[dim]config: {CONFIG_PATH}[/dim]")
+        return
 
     # models
     from vision.tts import models_present

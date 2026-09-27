@@ -115,8 +115,11 @@ Ported, but not tested on real installs:
     doesn't present it gets nothing.
   - **"Open on laptop"** uses Windows Terminal (`wt`) when it is installed, else a new console window.
   - **The server listens on your LAN.** `vision serve` binds to `0.0.0.0` (the LAN, so the phone can reach it). Windows Firewall
-    asks the first time: allow **private networks only**, or set `[remote] host = "127.0.0.1"` and use a
-    tunnel.
+    asks the first time: allow **private networks only**.
+  - **Away from home.** With Tailscale on the PC and the phone, run `tailscale serve --bg 8765` once and set
+    `[remote] host = "127.0.0.1"`. Nothing then listens on the LAN, and the phone reaches Vision at
+    `https://<pc>.<tailnet>.ts.net` from anywhere; the QR code carries that address. It is reachable only from
+    your own tailnet (not Funnel, which is the public internet).
   - **The token file.** Windows has no file mode bits, so `remote_token` is protected by your profile folder's permissions
     rather than `chmod 600`.
   - **It can run anything.** Anyone with the token can drive the brain in whatever mode your config starts in. That is plan on

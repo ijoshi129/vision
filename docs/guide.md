@@ -367,8 +367,10 @@ last conversation for the selected model's provider.
 for a remote client (the author's **Vision Remote** iPhone app, which is not part of this repository): text chat with streamed replies, dictation
 through the laptop's Whisper, replies read aloud sentence by sentence through the voice engine, AskUserQuestion
 forms, model switching and resuming conversations. On the same Wi-Fi the phone talks to the laptop
-directly (the QR carries the LAN address); away from home an HTTPS tunnel (Tailscale Funnel, or
-Cloudflare Tunnel) carries it, and every request needs the bearer token in `~/.config/vision/remote_token`. `vision serve` prints the address, the token and a QR code
+directly (the QR carries the LAN address). Away from home, Tailscale Serve (`tailscale serve --bg 8765`)
+carries it to your own tailnet devices only, and Vision puts its https address in the QR; with
+`[remote] host = "127.0.0.1"` nothing listens on the LAN at all. Tailscale Funnel or a Cloudflare Tunnel
+publish it to the whole internet instead, so prefer Serve. Every request needs the bearer token in `~/.config/vision/remote_token`. `vision serve` prints the address, the token and a QR code
 the app scans to pair. The API lives in `vision/server.py` if you want to write your own client.
 
 A `vision` chat open in a terminal on the same machine shows up in the app's chat list too (terminal

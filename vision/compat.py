@@ -124,6 +124,56 @@ def pid_alive(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def process_cmdline(pid: int) -> list[str]:
+    """Windows: another process's command line as argv, what /proc/<pid>/cmdline gives on Linux.
+    [] if it can't be read (gone, or not ours to query)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class UNICODE_STRING(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", ctypes.c_void_p)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    shell32 = ctypes.WinDLL("shell32")
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.LocalFree.argtypes = (wintypes.HLOCAL,)
+    ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+    ntdll.NtQueryInformationProcess.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.ULONG,
+                                                ctypes.POINTER(wintypes.ULONG))
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+    shell32.CommandLineToArgvW.argtypes = (wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int))
+    PROCESS_QUERY_LIMITED_INFORMATION, ProcessCommandLineInformation = 0x1000, 60  # the latter: Windows 8.1+
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return []
+    try:
+        size = wintypes.ULONG(0)
+        ntdll.NtQueryInformationProcess(handle, ProcessCommandLineInformation, None, 0, ctypes.byref(size))
+        if not size.value:
+            return []
+        buf = ctypes.create_string_buffer(size.value)
+        if ntdll.NtQueryInformationProcess(handle, ProcessCommandLineInformation, buf, size, ctypes.byref(size)) != 0:
+            return []
+        text = UNICODE_STRING.from_buffer(buf)
+        line = ctypes.wstring_at(text.Buffer, text.Length // 2) if text.Buffer else ""
+    finally:
+        kernel32.CloseHandle(handle)
+    if not line:
+        return []
+    argc = ctypes.c_int(0)
+    argv = shell32.CommandLineToArgvW(line, ctypes.byref(argc))
+    if not argv:
+        return []
+    try:
+        return [argv[i] for i in range(argc.value)]
+    finally:
+        kernel32.LocalFree(ctypes.cast(argv, ctypes.c_void_p))
+
+
 def lock_nonblocking(fd: int) -> None:
     """An exclusive, non-blocking lock on an open file, released when the fd closes (or the process
     dies). Raises OSError (BlockingIOError on POSIX) when another process holds it."""
