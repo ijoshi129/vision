@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import io
 import os
-import stat
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fake_exe import python_command
 from rich.console import Console
 
 from vision import clis
@@ -16,27 +16,21 @@ from vision.cli import _update_summary, _usage_selection, _versions_renderable
 
 
 def _fake_cli(dir: str, name: str, version_lines: list[str], update_rc: int = 0) -> str:
-    """A shell script that reports the next version each time it is asked, and whose `update` bumps it."""
+    """A command that reports the next version each time it is asked, and whose `update` bumps it."""
     counter = os.path.join(dir, f"{name}.count")
-    path = os.path.join(dir, name)
-    cases = "".join(f"  {i}) echo '{line}' ;;\n" for i, line in enumerate(version_lines))
-    with open(path, "w") as f:
-        f.write(
-            "#!/bin/sh\n"
-            f"n=$(cat {counter} 2>/dev/null || echo 0)\n"
-            'if [ "$1" = "--version" ]; then\n'
-            f"  case $n in\n{cases}  *) echo '{version_lines[-1]}' ;;\n  esac\n"
-            "  exit 0\n"
-            "fi\n"
-            'if [ "$1" = "update" ]; then\n'
-            f"  echo $((n + 1)) > {counter}\n"
-            "  echo 'Updating…'\n"
-            f"  exit {update_rc}\n"
-            "fi\n"
-            "exit 2\n"
-        )
-    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
-    return path
+    return python_command(os.path.join(dir, name), (
+        "import os, sys\n"
+        f"counter, lines = {counter!r}, {version_lines!r}\n"
+        "n = int(open(counter).read()) if os.path.exists(counter) else 0\n"
+        "if sys.argv[1:2] == ['--version']:\n"
+        "    print(lines[min(n, len(lines) - 1)])\n"
+        "    sys.exit(0)\n"
+        "if sys.argv[1:2] == ['update']:\n"
+        "    open(counter, 'w').write(str(n + 1))\n"
+        "    print('Updating…')\n"
+        f"    sys.exit({update_rc})\n"
+        "sys.exit(2)\n"
+    ))
 
 
 def _render(renderable) -> str:

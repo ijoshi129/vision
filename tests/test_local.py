@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import sys
 import tempfile
 import threading
 import time
@@ -86,6 +87,7 @@ class LocalBrainTests(unittest.TestCase):
             p.start()
         self.cfg = Config()
         self.cfg.brain.model, self.cfg.brain.effort = "qwen3.6", "off"
+        self.cfg.brain.mode = "auto"  # the Bash tests need it; plan mode (Windows' default) withholds Bash
         self.cfg.local.base_url = self.base
         self.cfg.conversation.model = "qwen3.6"
         self.cfg.brain.workdir = self.tmp.name
@@ -304,7 +306,8 @@ class LocalToolTests(unittest.TestCase):
         out, err = localtools.run("Bash", {"command": "sleep 5", "timeout_s": 1}, self.dir, [])
         self.assertTrue(err)
         self.assertIn("killed", out)
-        out, err = localtools.run("Bash", {"command": "pwd"}, self.dir, [])
+        # Git Bash prints POSIX-style paths (%TEMP% is /tmp); -W gives the Windows one.
+        out, err = localtools.run("Bash", {"command": "pwd -W" if sys.platform == "win32" else "pwd"}, self.dir, [])
         self.assertEqual(Path(out.strip()).resolve(), Path(self.dir).resolve())
 
     def test_shell_cannot_start_another_brain(self):

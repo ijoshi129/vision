@@ -2,13 +2,13 @@
 import io
 import json
 import os
-import stat
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fake_exe import python_command
 from rich.console import Console
 
 from vision import usage as usage_ui
@@ -43,9 +43,7 @@ LIVE_REPLY = {
 
 def _fake_app_server(td: Path, reply: dict | None = LIVE_REPLY, hang: bool = False) -> str:
     """A stand-in `codex` whose app-server subcommand answers JSON-RPC on stdio."""
-    exe = td / "codex"
-    exe.write_text(
-        "#!/usr/bin/env python3\n"
+    return python_command(td / "codex", (
         "import json, sys, time\n"
         f"reply = {reply!r}\n"
         f"hang = {hang!r}\n"
@@ -62,9 +60,7 @@ def _fake_app_server(td: Path, reply: dict | None = LIVE_REPLY, hang: bool = Fal
         "        ok = bool(msg['params'].get('idempotencyKey'))\n"
         "        print(json.dumps({'id': msg['id'], 'result': {'outcome': 'reset'}} if ok else\n"
         "                         {'id': msg['id'], 'error': {'code': -32600, 'message': 'idempotencyKey must not be empty'}}), flush=True)\n"
-    )
-    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
-    return str(exe)
+    ))
 
 
 class SharedLookTests(unittest.TestCase):

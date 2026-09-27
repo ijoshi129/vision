@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -46,6 +47,7 @@ class LiveTitleTests(unittest.TestCase):
 
 
 class ProcTitleTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "hide_cmdline works through /proc and prctl")
     def test_hide_cmdline_in_a_child(self):
         import subprocess, sys
 

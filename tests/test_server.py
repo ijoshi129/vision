@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -29,6 +30,7 @@ class UploadTests(unittest.TestCase):
             self.assertIn(f"[Attached image: {path}]", server.with_attachments("Look at this", [path]))
             self.assertIn("Look at the attached image", server.with_attachments("", [path]))
 
+    @unittest.skipIf(sys.platform == "win32", "`vision serve` is not ported to Windows yet")
     def test_reply_image_is_served_from_home_or_tmp_only(self):
         from types import SimpleNamespace
         from fastapi.testclient import TestClient
@@ -139,7 +141,8 @@ class TokenTests(unittest.TestCase):
             with patch.object(server, "TOKEN_FILE", server.TOKEN_FILE.__class__(path)), patch.object(server, "CONFIG_DIR", server.CONFIG_DIR.__class__(d)):
                 first = server.load_token()
                 self.assertGreaterEqual(len(first), 30)
-                self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+                if os.name == "posix":  # Windows has no mode bits; the file inherits the folder's ACL
+                    self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
                 self.assertEqual(server.load_token(), first)
                 self.assertNotEqual(server.load_token(regenerate=True), first)
 
