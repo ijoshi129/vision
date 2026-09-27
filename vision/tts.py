@@ -1136,10 +1136,20 @@ class Speaker:
                 stream = self.open_stream()
                 stream.start()
             step = 2400  # 100 ms
+            from vision import echo
+
+            canceller = echo.current()  # set up by the microphone when echo cancellation is on
+            if canceller is not None:
+                try:
+                    canceller.output_latency_s = max(0.0, float(stream.latency))
+                except (TypeError, ValueError):
+                    pass
             for i in range(0, len(audio), step):
                 if self._stop.is_set():
                     stream.abort()
                     break
+                if canceller is not None:
+                    canceller.played(audio[i : i + step], SAMPLE_RATE)
                 stream.write(audio[i : i + step].reshape(-1, 1))
             if own:
                 self.close_stream(stream)

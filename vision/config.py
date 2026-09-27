@@ -291,10 +291,14 @@ live_ms = 600
 #   "wake"   say Vision's name ("Vision, stop" / "Vision, what about…" runs straight away). Works on
 #            speakers: a tiny Whisper on the CPU listens for the name over Vision's own voice.
 #   "speech" just start talking (~a quarter second of voice). Needs headphones or echo cancellation
-#            (`pactl load-module module-echo-cancel`, then input_device = "echo-cancel"), or Vision
-#            hears itself through the speakers and cuts itself off.
+#            (`pactl load-module module-echo-cancel`, then input_device = "echo-cancel"; on Windows,
+#            echo_cancel below), or Vision hears itself through the speakers and cuts itself off.
 #   "off"    keyboard only.
 barge_in = "wake"
+# Take Vision's own voice out of the microphone in Vision itself (WebRTC's echo canceller, via the
+# livekit package): "auto" = on for Windows, off elsewhere (PipeWire's echo-cancel module covers
+# Linux); "on"; "off".
+echo_cancel = "auto"
 
 [wake]
 # Say Vision's name to start talking without touching the keyboard (also /wake inside a chat).
@@ -516,6 +520,7 @@ class ListenConfig:
     chime: bool = True
     live_ms: int = 600  # live transcription preview interval; 0 = off
     barge_in: str = "wake"  # "wake" | "speech" | "off"
+    echo_cancel: str = "auto"  # "auto" (on for Windows) | "on" | "off"; see vision/echo.py
 
 
 @dataclass

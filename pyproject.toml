@@ -44,6 +44,8 @@ voice = [
   # PyPI's Windows torch wheels are CPU-only; uv takes these from PyTorch's CUDA index (tool.uv.sources).
   "torch; sys_platform == 'win32'",
   "torchaudio; sys_platform == 'win32'",
+  # WebRTC echo cancellation (vision/echo.py): Windows has no system module Vision can switch on.
+  "livekit; sys_platform == 'win32'",
 ]
 # `vision serve`: HTTP + WebSocket API for remote clients and the pairing QR code
 serve = [
