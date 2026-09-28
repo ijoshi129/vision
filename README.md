@@ -24,7 +24,7 @@ normal login and puts a proper chat, a voice and a pair of ears around them.
 
 | For | You need |
 | --- | --- |
-| Text chat | Python 3.11+, Linux (macOS should work but is untested), and at least one brain: [Claude Code](https://code.claude.com), the [Codex CLI](https://github.com/openai/codex), the Grok CLI, or an OpenAI-compatible `llama-server` |
+| Text chat | Python 3.11+, Linux (macOS should work but is untested), and at least one brain: [Claude Code](https://code.claude.com), the [Codex CLI](https://github.com/openai/codex), the Grok CLI, any OpenAI-compatible server (Ollama, LM Studio, `llama-server`, a hosted API), or an agent that speaks ACP |
 | Voice | An NVIDIA GPU with 8 GB+ of VRAM (it falls back to the CPU, but several times slower than real time), PipeWire, a microphone. Up to about 10 GB of downloads for the speech models |
 | The voice conversation model | A Claude Code login, or a local model (see [the guide](docs/guide.md#the-voice)) |
 | Weather | Optional: an Apple Developer account for WeatherKit. Without it Vision searches the web |
@@ -44,6 +44,9 @@ The extras are `voice` (speech in and out), `serve` (the remote API), `weather` 
 `all`. If a command needs one you don't have, Vision tells you which to install.
 
 Log in to whichever brains you want with their own tools first: `claude`, `codex login`, `grok login`.
+No subscription? `vision provider add ollama` (or any OpenAI-compatible server or API) makes it a brain
+in a minute. With nothing set up yet, `vision` still opens and tells you what it needs; `/providers`
+picks which brains `/model` offers.
 
 ## Use
 

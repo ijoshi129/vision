@@ -275,6 +275,11 @@ class GrokBrain:
 
     def __init__(self, cfg: BrainConfig, voice_mode: bool = False, session_id: str | None = None):
         self.cfg = cfg
+        self._grok_path: str | None = None
+        try:
+            self._grok_path = find_grok()
+        except Exception:  # noqa: BLE001  not installed (yet): see the `grok` property
+            pass
         self.voice_mode = voice_mode
         self.task_mode = False
         self.session_id = session_id
@@ -282,7 +287,6 @@ class GrokBrain:
         self._acp = None  # the running agent-mode turn (vision.grok_acp.AgentSession), for steer and cancel
         self._killed = False
         self._lock = threading.Lock()
-        self.grok = find_grok()
         self.workdir = os.path.abspath(os.path.expanduser(cfg.workdir)) if cfg.workdir else os.getcwd()
         self.last_usage: dict | None = None
         self.model: str | None = None
@@ -292,6 +296,15 @@ class GrokBrain:
         self.context: tuple[int, int] | None = None
 
     # -- session helpers -------------------------------------------------
+    # The CLI's path: found when the brain is made if it is there, else looked up again when a turn
+    # needs it, so a machine without it still gets a chat screen (and the start-up note saying how to
+    # set it up) and the first message says what is missing, instead of a crash.
+    @property
+    def grok(self) -> str:
+        if self._grok_path is None:
+            self._grok_path = find_grok()
+        return self._grok_path
+
     @staticmethod
     def _read_last() -> dict:
         try:
@@ -403,8 +416,13 @@ class GrokBrain:
     ) -> Turn:
         from vision.brain import Turn, brain_env, inject_handoff
 
-        env = brain_env("grok")
         turn = Turn(session_id=self.session_id, model=_cli_model(self.cfg.model) or None)
+        try:
+            self.grok  # not installed: the turn says so instead of raising, the same on every front end
+        except Exception as e:  # noqa: BLE001  (that provider's own "not installed" message)
+            turn.is_error, turn.error = True, str(e)
+            return turn
+        env = brain_env("grok")
         sandbox = sandbox_for(self.cfg)
         if compat.WINDOWS and sandbox != "off":
             # Grok always runs with --always-approve and leaves every limit to its kernel sandbox, which

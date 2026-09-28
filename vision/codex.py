@@ -232,12 +232,16 @@ class CodexBrain:
 
     def __init__(self, cfg: BrainConfig, voice_mode: bool = False, session_id: str | None = None):
         self.cfg = cfg
+        self._codex_path: str | None = None
+        try:
+            self._codex_path = find_codex()
+        except Exception:  # noqa: BLE001  not installed (yet): see the `codex` property
+            pass
         self.voice_mode = voice_mode
         self.task_mode = False
         self.session_id = session_id
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
-        self.codex = find_codex()
         self.workdir = os.path.abspath(os.path.expanduser(cfg.workdir)) if cfg.workdir else os.getcwd()
         self.last_usage: dict | None = None
         self.model: str | None = None  # slug used on the last turn
@@ -249,6 +253,15 @@ class CodexBrain:
         self._cancelled_app = False
 
     # -- session helpers -------------------------------------------------
+    # The CLI's path: found when the brain is made if it is there, else looked up again when a turn
+    # needs it, so a machine without it still gets a chat screen (and the start-up note saying how to
+    # set it up) and the first message says what is missing, instead of a crash.
+    @property
+    def codex(self) -> str:
+        if self._codex_path is None:
+            self._codex_path = find_codex()
+        return self._codex_path
+
     @staticmethod
     def _read_last() -> dict:
         try:
@@ -365,6 +378,14 @@ class CodexBrain:
         on_agent: Callable | None = None,  # sub-agent rows, read from Codex's collab items (vision.subagents)
         on_tool: Callable | None = None,  # live tool rows (app-server only; exec items arrive whole, after the fact)
     ) -> Turn:
+        try:
+            self.codex  # not installed: the turn says so instead of raising, the same on every front end
+        except Exception as e:  # noqa: BLE001  (that provider's own "not installed" message)
+            from vision.brain import Turn
+
+            turn = Turn(session_id=self.session_id, model=self.cfg.model or None)
+            turn.is_error, turn.error = True, str(e)
+            return turn
         if self._transport() != "exec":
             from vision.codex_app import run_turn
 

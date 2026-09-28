@@ -527,6 +527,11 @@ class Brain:
 
     def __init__(self, cfg: BrainConfig, voice_mode: bool = False, session_id: str | None = None):
         self.cfg = cfg
+        self._claude_path: str | None = None
+        try:
+            self._claude_path = find_claude()
+        except BrainError:  # noqa: BLE001  not installed (yet): see the `claude` property
+            pass
         self.voice_mode = voice_mode
         self.task_mode = False  # a separate worker session, never a typed conversation
         self.session_id = session_id
@@ -539,7 +544,6 @@ class Brain:
         self._stdin_open = False
         self._steered = [False]
         self._plan_approved = False  # this turn's plan was approved: allow the tools that follow
-        self.claude = find_claude()
         self.workdir = os.path.abspath(os.path.expanduser(cfg.workdir)) if cfg.workdir else os.getcwd()
         self.last_usage: dict | None = None
         # Live figures for the chat screen: output tokens received so far this turn (the `↓ 1.2k`
@@ -555,6 +559,15 @@ class Brain:
         # Previous provider's transcript, sent with the first message of the next fresh session.
         self.handoff: str | None = None
         WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # The CLI's path: found when the brain is made if it is there, else looked up again when a turn
+    # needs it, so a machine without it still gets a chat screen (and the start-up note saying how to
+    # set it up) and the first message says what is missing, instead of a crash.
+    @property
+    def claude(self) -> str:
+        if self._claude_path is None:
+            self._claude_path = find_claude()
+        return self._claude_path
 
     def context_window(self) -> int:
         """The model's context window in tokens: what Claude Code reported for the current model
@@ -680,8 +693,13 @@ class Brain:
         to on_agent instead).
         on_agent gets the AgentRun of a subagent each time it changes: when it starts, after every
         tool call it makes, and when it finishes (`done`). The same object is passed each time."""
-        env = brain_env("claude")
         turn = Turn(session_id=self.session_id)
+        try:
+            self.claude  # not installed: the turn says so instead of raising, the same on every front end
+        except BrainError as e:
+            turn.is_error, turn.error = True, str(e)
+            return turn
+        env = brain_env("claude")
         prompt = inject_handoff(self, prompt)
         streamed = []
         final_text_from_message = []
