@@ -31,6 +31,7 @@ class StubServer(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         type(self).requests.append(body)
+        type(self).post_headers.append(dict(self.headers))
         scripted = type(self).script.pop(0) if type(self).script else None
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -57,10 +58,17 @@ class StubServer(http.server.BaseHTTPRequestHandler):
     def _sse(self, obj: dict) -> None:
         self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
 
+    headers_seen: list[dict] = []
+    post_headers: list[dict] = []
+
     def do_GET(self):
+        type(self).headers_seen.append(dict(self.headers))
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'{"status":"ok"}')
+        if self.path.endswith("/models"):
+            self.wfile.write(b'{"data":[{"id":"qwen3"},{"id":"llama4"}]}')
+        else:
+            self.wfile.write(b'{"status":"ok"}')
 
     def log_message(self, *a):
         pass
@@ -455,3 +463,109 @@ class LocalToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfigProviderTests(unittest.TestCase):
+    """A `[providers.<name>]` server: registered from config, driven by LocalBrain, its models prefixed."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StubServer)
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}/v1"
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def setUp(self):
+        from vision import config, providers
+
+        StubServer.requests, StubServer.headers_seen = [], []
+        self.tmp = tempfile.TemporaryDirectory()
+        state = Path(self.tmp.name)
+        (state / "config.toml").write_text(
+            "[providers.ollama]\n"
+            f'base_url = "{self.base}"\n'
+            'label = "Ollama"\n'
+            'api_key_env = "OLLAMA_TEST_KEY"\n'
+            "context = 4096\n"
+            "\n[providers.hosted]\n"
+            'base_url = "https://api.example.test/v1"\n'
+            'models = ["big-1", "small-1"]\n'
+            "\n[providers.claude]\n"
+            'base_url = "http://nope/v1"\n'
+            "\n[providers.odd]\n"
+            'type = "acp"\n'
+            'base_url = "http://nope/v1"\n',
+            encoding="utf-8")
+        self._patches = [patch("vision.local.SESSIONS_DIR", state / "sessions"), patch("vision.local.LAST_SESSION_FILE", state / "last"),
+                         patch.object(config, "CONFIG_PATH", state / "config.toml"), patch.object(config, "ensure_dirs"),
+                         patch.dict("os.environ", {"OLLAMA_TEST_KEY": "sekrit"})]
+        for p in self._patches:
+            p.start()
+        self.cfg = config.load_config()
+        self.addCleanup(lambda: providers.register_endpoints({}))
+        self.addCleanup(self.tmp.cleanup)
+        for p in self._patches:
+            self.addCleanup(p.stop)
+
+    def test_registered_from_config_with_notes_for_bad_tables(self):
+        from vision import providers
+
+        self.assertEqual([n for n in providers.REGISTRY if not providers.REGISTRY[n].builtin], ["ollama", "hosted"])
+        self.assertEqual(self.cfg.providers.enabled, ["claude", "codex", "grok", "local", "ollama", "hosted"])
+        self.assertEqual(len(self.cfg.providers.notes), 2)
+        self.assertIn("claude", self.cfg.providers.notes[0])
+        self.assertIn("acp", self.cfg.providers.notes[1])
+        p = providers.REGISTRY["ollama"]
+        self.assertEqual((p.label, p.endpoint.base_url, p.endpoint.context, p.endpoint.key()), ("Ollama", self.base, 4096, "sekrit"))
+        self.assertTrue(providers.ready("ollama", self.cfg))
+        self.assertFalse(providers.ready("hosted", self.cfg))  # nothing listens at api.example.test
+
+    def test_models_come_from_the_server_prefixed(self):
+        from vision import clis, models
+
+        self.assertTrue(clis.refresh_local_models("ollama"))
+        self.assertEqual([m.alias for m in models._LISTS["ollama"]], ["ollama/qwen3", "ollama/llama4"])
+        self.assertEqual(models.provider_for("ollama/qwen3"), "ollama")
+        self.assertEqual(models.model_label("ollama/qwen3"), "qwen3")
+        self.assertEqual(models.provider_default("ollama"), "ollama/qwen3")
+        self.assertEqual(StubServer.headers_seen[-1].get("Authorization"), "Bearer sekrit")
+        self.assertIn(("Ollama", [("ollama/qwen3", "qwen3", "via Ollama; shell, files and web search"),
+                                  ("ollama/llama4", "llama4", "via Ollama; shell, files and web search")], f"via {self.base} · your own server"),
+                      models.MODEL_TABS)
+        # a fixed list in the table is taken as it is, no request made
+        self.assertTrue(clis.refresh_local_models("hosted"))
+        self.assertEqual([m.alias for m in models._LISTS["hosted"]], ["hosted/big-1", "hosted/small-1"])
+
+    def test_a_turn_goes_to_that_server_with_its_key_and_bare_model_id(self):
+        from vision import clis, models, providers, sessions
+
+        clis.refresh_local_models("ollama")
+        self.cfg.brain.model, self.cfg.brain.effort, self.cfg.brain.mode = "ollama/qwen3", "off", "auto"
+        self.cfg.brain.workdir = self.tmp.name
+        brain = create_brain(self.cfg.brain)
+        self.assertEqual((type(brain).__name__, brain.provider, brain.context_window()), ("LocalBrain", "ollama", 4096))
+        turn = brain.ask("hi")
+        self.assertEqual(turn.text, "Sorted.")
+        self.assertEqual(StubServer.requests[-1]["model"], "qwen3")
+        self.assertEqual(StubServer.post_headers[-1].get("Authorization"), "Bearer sekrit")
+        self.assertEqual(brain.last_usage["provider"], "ollama")
+        self.assertIn("served by Ollama", StubServer.requests[-1]["messages"][0]["content"])
+        # its session lists under its own tab, not Local's
+        with patch("vision.local.SESSIONS_DIR", Path(self.tmp.name) / "sessions"):
+            self.assertEqual([s.id for s in sessions.list_sessions("ollama")], [turn.session_id])
+            self.assertEqual(sessions.list_sessions("local"), [])
+        self.assertEqual(sessions.session_history("ollama", turn.session_id)[0]["text"], "hi")
+        self.assertIn("ollama", providers.conversation_names())
+        self.assertEqual(providers.endpoint_for("local", self.cfg).base_url, self.cfg.local.base_url)
+
+    def test_the_voice_model_can_be_that_server(self):
+        from vision import clis
+
+        clis.refresh_local_models("ollama")
+        self.cfg.conversation.model = "ollama/qwen3"
+        conv = LocalConversation(self.cfg)
+        self.assertEqual((conv.provider, conv._ep.base_url), ("ollama", self.base))
+        conv.warm_up()

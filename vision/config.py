@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from vision.models import THINKING_OFF, provider_for
-from vision.providers import PROVIDER_NAMES
+from vision.providers import PROVIDER_NAMES, REGISTRY, register_endpoints
 
 # Windows starts in plan mode: none of the Linux sandboxes exist there, and denied_tools only knows
 # POSIX commands. "auto" still works; set it under [brain] or press Shift-Tab.
@@ -136,8 +136,24 @@ stall_s = 900
 [providers]
 # Which providers /model offers, in this order: "claude" (Claude Code), "codex" (Codex CLI), "grok"
 # (Grok CLI), "local" (the llama-server in [local]). /providers picks them. One that is listed but not
-# set up yet (CLI not installed, server not answering) shows in /model with how to set it up.
+# set up yet (CLI not installed, server not answering) shows in /model with how to set it up. Leave the
+# line out to offer every provider, including the ones added below.
 enabled = ["claude", "codex", "grok", "local"]
+
+# More servers: any OpenAI-compatible chat endpoint (Ollama, LM Studio, vLLM, llama-server, OpenRouter,
+# any hosted API) as its own provider, run the way [local] is: Vision runs its tools itself, nothing goes
+# through a CLI. Its models show in /model as <name>/<model> and come from the server's /models unless
+# `models` lists them. The API key is read from the environment variable in api_key_env (or api_key).
+#
+# [providers.ollama]
+# base_url = "http://localhost:11434/v1"
+# label = "Ollama"
+# context = 32768
+#
+# [providers.openrouter]
+# base_url = "https://openrouter.ai/api/v1"
+# api_key_env = "OPENROUTER_API_KEY"
+# models = ["anthropic/claude-sonnet-4.5", "google/gemini-2.5-pro"]
 
 [codex]
 # Sandbox used for GPT/Codex models in auto mode: "auto" (= danger-full-access, matching Claude's auto
@@ -425,6 +441,7 @@ class LocalConfig:
 @dataclass
 class ProvidersConfig:
     enabled: list[str] = field(default_factory=lambda: list(PROVIDER_NAMES))
+    notes: list[str] = field(default_factory=list)  # what was wrong with a [providers.<name>] table, if anything
 
 
 @dataclass
@@ -621,6 +638,8 @@ def load_config() -> Config:
     except tomllib.TOMLDecodeError as e:
         raise SystemExit(f"Config error in {CONFIG_PATH}: {e}")
     cfg = Config()
+    providers_raw = raw.get("providers", {}) if isinstance(raw.get("providers"), dict) else {}
+    cfg.providers.notes = register_endpoints({k: v for k, v in providers_raw.items() if isinstance(v, dict)})
     for section, target in (("brain", cfg.brain), ("providers", cfg.providers), ("codex", cfg.codex), ("grok", cfg.grok), ("local", cfg.local), ("conversation", cfg.conversation), ("voice", cfg.voice), ("listen", cfg.listen), ("wake", cfg.wake), ("buddy", cfg.buddy), ("remote", cfg.remote), ("weather", cfg.weather)):
         for k, v in raw.get(section, {}).items():
             if hasattr(target, k):
@@ -636,8 +655,11 @@ def load_config() -> Config:
         cfg.brain.plan_approval = "session"
     global _read_cli_logins
     _read_cli_logins = cfg.brain.read_cli_logins is not False
-    enabled = cfg.providers.enabled if isinstance(cfg.providers.enabled, list) else list(PROVIDER_NAMES)
-    cfg.providers.enabled = list(dict.fromkeys(str(x).strip().lower() for x in enabled if str(x).strip().lower() in PROVIDER_NAMES))
+    if "enabled" in providers_raw and isinstance(cfg.providers.enabled, list):
+        enabled = [str(x).strip().lower() for x in cfg.providers.enabled]
+    else:
+        enabled = list(REGISTRY)  # not chosen: every provider, the config-defined ones included
+    cfg.providers.enabled = list(dict.fromkeys(x for x in enabled if x in REGISTRY))
     vc = cfg.voice
     vc.filler_after_ms = max(0, int(vc.filler_after_ms or 0))
     vc.filler_phrases = [str(x).strip() for x in (vc.filler_phrases if isinstance(vc.filler_phrases, list) else []) if str(x).strip()]

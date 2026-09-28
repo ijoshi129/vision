@@ -52,20 +52,27 @@ class LocalError(RuntimeError):
     pass
 
 
-def _model_name(alias: str) -> str:
-    from vision.models import provider_default
+def _model_name(alias: str, provider: str = "local") -> str:
+    """What the server is asked for: the model id without a config-defined provider's prefix."""
+    from vision.models import endpoint_model, provider_default
 
-    return alias or provider_default("local") or "qwen3.6"
+    return endpoint_model(alias or provider_default(provider) or "qwen3.6")
+
+
+def _endpoint(provider: str, cfg):
+    from vision.providers import Endpoint, endpoint_for
+
+    return endpoint_for(provider, cfg) or Endpoint()
 
 
 class _Stream:
     """One streaming chat completion. `close()` from another thread cancels it."""
 
-    def __init__(self, base_url: str, body: dict, timeout: float):
+    def __init__(self, base_url: str, body: dict, timeout: float, headers: dict | None = None):
         req = urllib.request.Request(
             base_url.rstrip("/") + "/chat/completions",
             data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+            headers={"Content-Type": "application/json", "Accept": "text/event-stream", **(headers or {})},
         )
         try:
             self.resp = urllib.request.urlopen(req, timeout=timeout)
@@ -92,14 +99,15 @@ class _Stream:
             pass
 
 
-def stream_chat(base_url: str, body: dict, timeout: float, on_delta: Callable[[dict], None], holder: dict) -> dict:
+def stream_chat(base_url: str, body: dict, timeout: float, on_delta: Callable[[dict], None], holder: dict,
+                headers: dict | None = None) -> dict:
     """Run one streamed completion; `holder["stream"]` is set so a cancel can close it. Returns
     {"text", "reasoning", "tool_calls", "usage", "timings", "finish"}; tool calls are assembled from
     their indexed deltas into OpenAI message form ({"id", "type", "function": {"name", "arguments"}})."""
     body = {**body, "stream": True, "stream_options": {"include_usage": True}}
     out = {"text": "", "reasoning": "", "tool_calls": [], "usage": None, "timings": None, "finish": None}
     calls: dict[int, dict] = {}
-    stream = _Stream(base_url, body, timeout)
+    stream = _Stream(base_url, body, timeout, headers)
     holder["stream"] = stream
     try:
         for ev in stream:
@@ -178,12 +186,14 @@ def _result_json(text: str) -> dict | None:
 class LocalBrain:
     """Same interface as the Claude brain so the CLI does not care which one is thinking."""
 
-    provider = "local"
-
     def __init__(self, cfg: BrainConfig, voice_mode: bool = False, session_id: str | None = None):
         import os
 
+        from vision.models import provider_for
+
         self.cfg = cfg
+        self.provider = provider_for(cfg.model) if cfg.model else "local"  # "local", or a [providers.<name>] server
+        self._ep = _endpoint(self.provider, cfg)
         self.voice_mode = voice_mode
         self.task_mode = False
         self.session_id = session_id
@@ -250,10 +260,10 @@ class LocalBrain:
         self._save()
 
     def resolved_model(self) -> str | None:
-        return self.model or _model_name(self.cfg.model)
+        return self.model or _model_name(self.cfg.model, self.provider)
 
     def context_window(self) -> int:
-        return int(self.cfg.local.context)
+        return int(self._ep.context)
 
     def _thinking(self) -> bool:
         return self.cfg.effort == "high"
@@ -323,7 +333,7 @@ class LocalBrain:
         thinking = self._thinking() and not self.task_mode  # a grammar and a think block do not mix
         messages = _trim([{"role": "system", "content": self._system()}, *self._messages,
                           {"role": "user", "content": prompt}],
-                         int(self.cfg.local.context * CHARS_PER_TOKEN * 0.8))
+                         int(self._ep.context * CHARS_PER_TOKEN * 0.8))
         specs = localtools.specs(self.tools())
         live: dict[int, ToolCall] = {}  # this request's calls by delta index, as rows in the reply
         offered = {"tools": False}  # whether the request in flight carries tool specs
@@ -384,7 +394,7 @@ class LocalBrain:
 
                 body["response_format"] = {"type": "json_schema", "json_schema": {"name": "result", "schema": RESULT_SCHEMA}}
             try:
-                result = stream_chat(self.cfg.local.base_url, body, self.cfg.local.timeout_s, on_delta, self._holder)
+                result = stream_chat(self._ep.base_url, body, self._ep.timeout_s, on_delta, self._holder, self._ep.headers())
             except LocalError as e:
                 return fail(str(e))
             except (OSError, ValueError) as e:  # the stream broke mid-reply, or cancel() closed it
@@ -466,9 +476,9 @@ class LocalBrain:
         turn.session_id = self.session_id
         self._save()
         self.handoff = None
-        self.model = _model_name(self.cfg.model)
+        self.model = _model_name(self.cfg.model, self.provider)
         self._model_seen_for = self.cfg.model
-        self.last_usage = {"provider": "local", "model": self.model, "usage": turn.usage,
+        self.last_usage = {"provider": self.provider, "model": self.model, "usage": turn.usage,
                            "timings": result["timings"], "at": time.time()}
         return turn
 
@@ -485,15 +495,19 @@ class LocalBrain:
 
     def usage_renderable(self, full: bool = False):
         """No pool to show: the model is the user's own. Report what the server is running and the last turn's speed."""
-        base = self.cfg.local.base_url
-        try:
-            with urllib.request.urlopen(base.rstrip("/").removesuffix("/v1") + "/props", timeout=3) as r:
+        from vision.models import provider_label
+
+        base = self._ep.base_url
+        try:  # llama-server says what it is running; another server just gets the model we ask for
+            with urllib.request.urlopen(urllib.request.Request(base.rstrip("/").removesuffix("/v1") + "/props", headers=self._ep.headers()), timeout=3) as r:
                 props = json.load(r)
         except Exception:
-            return Text(f"Local model unavailable: llama-server at {base} did not answer.", style="dim")
-        model = str((props.get("model_alias") or props.get("model_path") or "?")).rsplit("/", 1)[-1]
+            props = {}
+            if self.provider == "local":
+                return Text(f"Local model unavailable: llama-server at {base} did not answer.", style="dim")
+        model = str((props.get("model_alias") or props.get("model_path") or self.resolved_model() or "?")).rsplit("/", 1)[-1]
         ctx = props.get("default_generation_settings", {}).get("n_ctx") or self.context_window()
-        t = usage_ui.usage_table("Local", model)
+        t = usage_ui.usage_table(provider_label(self.provider), model)
         usage_ui.add_window(t, "Self-hosted", 0.0, "never: your own hardware, no limits")
         parts = [t, Text(f"{base} · context {ctx:,} tokens", style="dim")]
         timings = (self.last_usage or {}).get("timings") or {}
@@ -524,7 +538,11 @@ class LocalConversation:
     cheap. Speech streams out of the JSON reply as it is written, through the same SpeechStream."""
 
     def __init__(self, cfg):
+        from vision.models import provider_for
+
         self.cfg = cfg
+        self.provider = provider_for(cfg.conversation.model) if cfg.conversation.model else "local"
+        self._ep = _endpoint(self.provider, cfg)
         self._lock = threading.RLock()
         self._turn_lock = threading.Lock()
         self.usage = None
@@ -548,10 +566,10 @@ class LocalConversation:
                 "model or brain is answering, say so; the worker's model only handles delegated tasks.")
 
     def warm_up(self) -> None:
-        try:
-            urllib.request.urlopen(self.cfg.local.base_url.rstrip("/").removesuffix("/v1") + "/health", timeout=3).read()
+        try:  # /models is every OpenAI-style server's cheapest answer (llama-server, Ollama, a hosted API)
+            urllib.request.urlopen(urllib.request.Request(self._ep.base_url.rstrip("/") + "/models", headers=self._ep.headers()), timeout=3).read()
         except Exception as e:
-            raise LocalError(f"llama-server at {self.cfg.local.base_url} is not answering ({e}).") from e
+            raise LocalError(f"the model server at {self._ep.base_url} is not answering ({e}).") from e
 
     def close(self) -> None:
         with self._lock:
@@ -599,13 +617,13 @@ class LocalConversation:
                     on_speech(piece)
 
             body = {
-                "model": _model_name(self.cfg.conversation.model),
+                "model": _model_name(self.cfg.conversation.model, self.provider),
                 "messages": messages,
                 "chat_template_kwargs": {"enable_thinking": False},
                 "response_format": {"type": "json_schema", "json_schema": {"name": "response", "schema": RESPONSE_SCHEMA}},
             }
             try:
-                result = stream_chat(self.cfg.local.base_url, body, self.cfg.conversation.timeout_s, on_delta, self._holder)
+                result = stream_chat(self._ep.base_url, body, self.cfg.conversation.timeout_s, on_delta, self._holder, self._ep.headers())
             except LocalError as e:
                 self.close()
                 raise BrainError("cancelled" if cancel.is_set() else str(e)) from e

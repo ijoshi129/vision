@@ -342,7 +342,40 @@ exit 1), the other providers' CLIs are pointed at an empty config dir (`CODEX_HO
 `Bash(claude:*)`, `Bash(codex:*)` and `Bash(grok:*)`. The persona tells the model to point you at `/model` instead of
 trying. Cross-provider work is always an explicit `/model` switch.
 
-All three providers work in the directory where you launch Vision (or `[brain].workdir`). Install and log in
+### Choosing providers, adding your own
+
+`[providers] enabled` in config.toml says which providers `/model` offers, in that order; `/providers`
+picks them (a multi-select: Enter ticks, Enter on Submit saves), or name them outright
+(`/providers claude local`). A provider that is on but not set up here (its CLI missing, its server not
+answering) still shows in `/model`, as one row that says how to set it up, and a chat whose saved model
+can't run here starts on the first provider that can and says so. Leave the `enabled` line out to offer
+everything, including servers you add.
+
+Any OpenAI-compatible chat server is a provider of its own: Ollama, LM Studio, vLLM, another
+llama-server, OpenRouter, a hosted API. Add a table under `[providers]`:
+
+```toml
+[providers.ollama]
+base_url = "http://localhost:11434/v1"
+label = "Ollama"            # the /model tab (default: the name capitalised)
+context = 32768             # tokens; the conversation is trimmed to fit
+
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"   # or api_key = "…"; sent as a bearer token
+models = ["anthropic/claude-sonnet-4.5", "google/gemini-2.5-pro"]   # else the server's /models
+```
+
+It runs exactly as `[local]` does (`vision/local.py`): Vision talks to it directly and runs the model's
+tool calls itself (Bash, Read, Write, Edit, WebSearch, WebFetch), nothing goes through a CLI, and it can
+be the voice conversation model too. Its models show in `/model` as `<name>/<model>` (`ollama/qwen3`),
+so two servers' names can't clash, and the model id after the slash is what the server is asked for.
+Its conversations list under their own `/session` tab. A table Vision can't use (a built-in name, no
+`base_url`, a `type` other than `"openai"`) is skipped with a note at start-up.
+
+`[local]` is the same kind of provider with a shorter name: its models stay bare (`qwen3.6`).
+
+All three CLI providers work in the directory where you launch Vision (or `[brain].workdir`). Install and log in
 to the provider you want with `claude`, `codex login` or `grok login`; `vision doctor` checks all three
 (version, login, and subscription usage; `--no-usage` skips the usage tables).
 

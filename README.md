@@ -78,7 +78,9 @@ Config lives in `~/.config/vision/config.toml`, written with commented defaults 
 - **Memory.** Tell it to remember something and it appends a line to
   `~/.local/share/vision/memory/MEMORY.md`, which every brain reads.
 - **A model at home.** `deploy/local-model` sets up `llama-server` on a Mac (Apple silicon) as a free,
-  private brain; point `[local].base_url` at it.
+  private brain; point `[local].base_url` at it. Any other OpenAI-compatible server (Ollama, LM Studio,
+  vLLM, OpenRouter, a hosted API) is a `[providers.<name>]` table away, and `/providers` picks which
+  providers `/model` offers.
 
 ## Privacy
 

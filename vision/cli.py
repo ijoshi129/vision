@@ -49,7 +49,7 @@ from vision.config import (
     voice_dir,
 )
 from vision.models import THINKING_OFF, coerce_effort, effort_choices, model_label, provider_default, provider_for, provider_label, replace_retired_models, supports_effort
-from vision.providers import PROVIDER_NAMES, cap
+from vision.providers import cap
 from vision.providers import names as provider_names
 from vision.reply import status_label
 from rich.markup import escape
@@ -84,6 +84,7 @@ def _cfg(model: Optional[str], voice: Optional[str], effort: Optional[str] = Non
         moved = settle(cfg)  # a saved model whose provider isn't set up here, or is switched off
         if moved:
             RETIRED_NOTES.append(moved)
+    RETIRED_NOTES.extend(cfg.providers.notes)  # a [providers.<name>] table Vision couldn't use
     if not quiet:
         for n in RETIRED_NOTES:
             console.print(f"[yellow]{n}[/yellow]")
@@ -723,6 +724,12 @@ def _mic_rows() -> list[tuple[str, str, str]]:
         return []
 
 
+def providers_registry() -> tuple[str, ...]:
+    from vision.providers import REGISTRY
+
+    return tuple(REGISTRY)
+
+
 def _usable_tabs(cfg: Config) -> list:
     """/model's tabs with only the providers that can run here (the plain pickers have no setup rows)."""
     from vision.providers import model_tabs
@@ -763,7 +770,7 @@ def _menu_commands(cfg: Config, brain_ref: Callable[[], object]) -> list[SlashCo
 
     return [
         SlashCommand("model", "switch model for this session", models),
-        SlashCommand("providers", "which providers /model offers", lambda: [(n, "") for n in PROVIDER_NAMES]),
+        SlashCommand("providers", "which providers /model offers", lambda: [(n, "") for n in providers_registry()]),
         SlashCommand("effort", "reasoning effort for this session", efforts),
         SlashCommand("fast", "toggle faster, higher-usage inference", lambda: [("on", "use the fast service tier"), ("off", "use standard inference")]),
         SlashCommand("default", "choose and save the default model + effort", lambda: [("reset", "back to Opus 5 · high")]),
@@ -1302,7 +1309,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         """Change model on a worker thread while preserving the conversation."""
         from vision import providers
 
-        why = providers.setup_note(model) or providers.unavailable_reason(provider_for(model), cfg)
+        why = providers.setup_note(model, cfg) or providers.unavailable_reason(provider_for(model), cfg)
         if why:
             note(f"[yellow]{why}[/yellow]")
             return
@@ -1916,8 +1923,8 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             def pick_effort(model_choice):
                 from vision.providers import setup_note
 
-                if setup_note(model_choice):
-                    note(f"[yellow]{setup_note(model_choice)}[/yellow]")
+                if setup_note(model_choice, cfg):
+                    note(f"[yellow]{setup_note(model_choice, cfg)}[/yellow]")
                     return
                 selected_effort, _ = coerce_effort(model_choice, saved_effort)
                 screen.open_picker(

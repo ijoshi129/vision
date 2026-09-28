@@ -253,8 +253,19 @@ MODEL_TABS = [(p.label, [(m.alias, m.label, m.description) for m in _LISTS[p.nam
 MODEL_CHOICES = [(m.alias, m.label, f"{PROVIDER_LABELS.get(m.provider, m.provider)} · {m.description}") for m in MODELS]
 
 
+def _ensure_provider(provider: str) -> None:
+    """A provider registered after import (a [providers.<name>] server) gets its list, tab and labels."""
+    if provider in _LISTS or provider not in _REGISTRY:
+        return
+    p = _REGISTRY[provider]
+    PROVIDER_LABELS[provider], PROVIDER_CLIS[provider] = p.label, p.product
+    _LISTS[provider] = []
+    MODEL_TABS.append((p.label, [], p.note))
+
+
 def _swap(provider: str, new: list[ModelInfo]) -> None:
     """Replace one provider's models everywhere, in place (the pickers and routing hold these lists)."""
+    _ensure_provider(provider)
     _LISTS[provider][:] = new
     MODELS[:] = [m for p in _LISTS for m in _LISTS[p]]
     for name, rows, _note in MODEL_TABS:
@@ -294,17 +305,33 @@ def reload_cli_cache(provider: str) -> bool:
     return True
 
 
-def set_local_models(ids) -> bool:
-    """The models llama-server serves (its /v1/models ids). A known one keeps its label and levels; a new
-    one gets the same thinking switch (llama-server's enable_thinking; a model without it just ignores it)."""
-    known = {m.alias: m for m in _LOCAL_FALLBACK + LOCAL_MODELS}
-    new = [known.get(i) or ModelInfo("local", i, i, "self-hosted; free; shell, files and web search", (THINKING_OFF, "high"), None, THINKING_OFF)
-           for i in dict.fromkeys(str(i) for i in ids if i)]
+def set_local_models(ids, provider: str = "local") -> bool:
+    """The models a chat server serves (its /v1/models ids). A known one keeps its label and levels; a new
+    one gets the same thinking switch (llama-server's enable_thinking; a model without it just ignores it).
+    A config-defined server's models are named <provider>/<id> so two servers' ids can't clash."""
+    _ensure_provider(provider)
+    known = {m.alias: m for m in _LOCAL_FALLBACK + _LISTS.get(provider, [])}
+    desc = "self-hosted; free; shell, files and web search" if provider == "local" else f"via {PROVIDER_LABELS.get(provider, provider)}; shell, files and web search"
+    new = [known.get(i) or ModelInfo(provider, i, endpoint_model(i), desc, (THINKING_OFF, "high"), None, THINKING_OFF)
+           for i in dict.fromkeys(qualified(provider, str(i)) for i in ids if i)]
     if not new:
         return False
-    _swap("local", new)
-    LIVE.add("local")
+    _swap(provider, new)
+    LIVE.add(provider)
     return True
+
+
+def qualified(provider: str, model_id: str) -> str:
+    """The alias a config-defined server's model goes by in /model: "ollama/qwen3"; the built-in local server's stay bare."""
+    if provider == "local" or model_id.startswith(provider + "/"):
+        return model_id
+    return f"{provider}/{model_id}"
+
+
+def endpoint_model(alias: str) -> str:
+    """What the server is asked for: the id after the provider prefix ("ollama/qwen3" → "qwen3")."""
+    head, sep, rest = alias.partition("/")
+    return rest if sep and head in _REGISTRY and not _REGISTRY[head].builtin else alias
 
 
 def provider_default(provider: str) -> str:
@@ -385,6 +412,9 @@ def provider_for(alias: str) -> str:
     if m:
         return m.provider
     a = _resolve(alias).lower()
+    head, sep, _ = a.partition("/")
+    if sep and head in _REGISTRY and not _REGISTRY[head].builtin:
+        return head  # a config-defined server's model: "ollama/qwen3"
     for m in _CLAUDE_FALLBACK + _CODEX_FALLBACK + _GROK_FALLBACK + _LOCAL_FALLBACK:  # dropped from a fetched list since
         if m.alias == a:
             return m.provider

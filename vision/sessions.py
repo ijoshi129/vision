@@ -175,8 +175,17 @@ def _newest_first(paths: list[str]) -> list[str]:
 from vision.providers import REGISTRY as _REGISTRY
 from vision.providers import get as _provider
 
-PROVIDERS = tuple(_REGISTRY)
+PROVIDERS = tuple(_REGISTRY)  # the built-in ones; `_providers()` also has the config-defined servers
 PROVIDER_TITLES = {p.name: p.label for p in _REGISTRY.values()}
+
+
+def _providers() -> tuple[str, ...]:
+    return tuple(_REGISTRY)
+
+
+def _title(provider: str) -> str:
+    p = _provider(provider)
+    return p.label if p else provider
 
 
 # Where each provider keeps its conversations (the registry's session_paths hooks).
@@ -213,6 +222,8 @@ def list_sessions(provider: str, limit: int = 15) -> list[SessionInfo]:
     seen: set[str] = set()
     for path in _newest_first(paths):
         info = parse(path)
+        if info and info.provider != provider:
+            continue  # the local-server providers share one folder; each file says whose it is
         if info and info.id not in seen:
             seen.add(info.id)
             out.append(info)
@@ -224,7 +235,7 @@ def list_sessions(provider: str, limit: int = 15) -> list[SessionInfo]:
 def list_all_sessions(limit: int = 15) -> list[SessionInfo]:
     """Vision conversations for every provider, Claude, Codex, Grok then Local, newest first within each."""
     out: list[SessionInfo] = []
-    for provider in PROVIDERS:
+    for provider in _providers():
         out.extend(list_sessions(provider, limit=limit))
     return out
 
@@ -246,7 +257,7 @@ def find_any_session(prefix: str, prefer: str | None = None, limit: int = 200) -
         hit = find_session(prefer, prefix, limit=limit)
         if hit:
             return hit
-    for provider in PROVIDERS:
+    for provider in _providers():
         if provider == prefer:
             continue
         hit = find_session(provider, prefix, limit=limit)
@@ -266,7 +277,7 @@ def session_from_key(key: str, listed: list[SessionInfo]) -> SessionInfo | None:
     if not key:
         return None
     provider, sep, sid = key.partition(":")
-    if sep and provider in PROVIDERS and sid:
+    if sep and provider in _providers() and sid:
         return next((s for s in listed if s.provider == provider and s.id == sid), None)
     return next((s for s in listed if s.id == key), None)
 
@@ -279,9 +290,9 @@ def session_rows(sessions: list[SessionInfo], now: float | None = None) -> list[
 def session_tabs(now: float | None = None, limit: int = 15) -> list[tuple[str, list[tuple[str, str, str]], str]]:
     """Claude / Codex / Grok / Local tabs for `/session`. Empty providers keep the tab with a note."""
     tabs = []
-    for provider in PROVIDERS:
+    for provider in _providers():
         rows = session_rows(list_sessions(provider, limit=limit), now)
-        tabs.append((PROVIDER_TITLES[provider], rows, "" if rows else "no conversations"))
+        tabs.append((_title(provider), rows, "" if rows else "no conversations"))
     return tabs
 
 
@@ -349,10 +360,13 @@ def _local_session(path: str) -> SessionInfo | None:
         mtime = os.path.getmtime(path)
     except (OSError, ValueError):
         return None
+    from vision.models import provider_for
+
     sid = os.path.splitext(os.path.basename(path))[0]
     first = next((m["text"] for m in messages if m["role"] == "user"), "")
     at = data.get("at")
-    return SessionInfo(sid, "local", _clean_title(first or "(no prompt)"), float(at) if isinstance(at, (int, float)) else mtime)
+    provider = provider_for(str(data.get("model") or "")) if data.get("model") else "local"  # "ollama/qwen3" → ollama
+    return SessionInfo(sid, provider, _clean_title(first or "(no prompt)"), float(at) if isinstance(at, (int, float)) else mtime)
 
 
 def local_history(session_id: str, limit: int = HISTORY_LIMIT, *, include_context: bool = False) -> list[dict]:

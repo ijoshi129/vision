@@ -9,6 +9,7 @@ import re
 import subprocess
 import threading
 import time
+import urllib.request
 from dataclasses import dataclass
 
 from vision import models
@@ -260,11 +261,16 @@ def forget_checks(providers=PROVIDERS) -> None:
 # Asked of the provider itself (see models.CATALOGUES_ON), all in about a second and none of it billed:
 # Claude Code's `initialize` handshake, `codex debug models` and `grok models` (each rewrites its CLI's
 # cache, which Vision then re-reads), and llama-server's /v1/models.
-MODEL_PROVIDERS = tuple(p.name for p in _registry.REGISTRY.values() if p.hooks.get("refresh_models"))
+def model_providers() -> tuple[str, ...]:
+    """Every provider with a model list to fetch, the config-defined servers included."""
+    return tuple(p.name for p in _registry.REGISTRY.values() if p.hooks.get("refresh_models"))
+
+
 MODELS_TTL = 6 * 3600  # a long-running Vision re-asks this often
 CLAUDE_MODELS_RECHECK = 600  # sooner when a Claude turn ran on a model the list lacks (at most this often)
 _models_at: dict[str, float] = {}
-_models_busy = {p: threading.Lock() for p in MODEL_PROVIDERS}
+_models_busy: dict[str, threading.Lock] = {}
+_models_busy_lock = threading.Lock()
 
 
 def claude_catalogue(timeout: float = 30) -> list[dict]:
@@ -289,18 +295,27 @@ def claude_catalogue(timeout: float = 30) -> list[dict]:
     raise ValueError((r.stderr or r.stdout).strip()[-200:] or f"claude exited {r.returncode} without an initialize response")
 
 
-def local_model_ids(timeout: float = 5) -> list[str]:
-    """The model ids llama-server in [local] serves. Raises when it cannot be reached."""
+def local_model_ids(timeout: float = 5, provider: str = "local") -> list[str]:
+    """The model ids a chat server serves (its /v1/models), or the fixed list its table gives. Raises
+    when it cannot be reached."""
     from vision.config import load_config
 
-    data = json.loads(_http_text(load_config().local.base_url.rstrip("/") + "/models", timeout))
+    ep = _registry.endpoint_for(provider, load_config())
+    if ep is None:
+        raise ValueError(f"{provider} is not a chat server")
+    if ep.models:
+        return list(ep.models)
+    req = urllib.request.Request(ep.base_url.rstrip("/") + "/models", headers={"User-Agent": "vision", **ep.headers()})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read().decode())
     return [str(m["id"]) for m in data.get("data") or [] if isinstance(m, dict) and m.get("id")]
 
 
 def refresh_models(provider: str, *, max_age: float = MODELS_TTL) -> bool:
     """Ask one provider for its model list and swap it in (models.set_claude_catalogue and friends). At
     most one at a time per provider, and not again within `max_age` seconds. Never raises; True if replaced."""
-    lock = _models_busy[provider]
+    with _models_busy_lock:
+        lock = _models_busy.setdefault(provider, threading.Lock())
     if not lock.acquire(blocking=False):
         return False
     try:
@@ -308,7 +323,8 @@ def refresh_models(provider: str, *, max_age: float = MODELS_TTL) -> bool:
             return False
         _models_at[provider] = time.time()
         try:
-            return bool(_registry.get(provider).hook("refresh_models")(provider))
+            p = _registry.get(provider)
+            return bool(p and p.hook("refresh_models")(provider))
         except Exception:  # noqa: BLE001 - not installed, offline, Mac asleep, format changed: keep the list we have
             return False
     finally:
@@ -320,7 +336,7 @@ def refresh_claude_models(provider: str = "claude") -> bool:
 
 
 def refresh_local_models(provider: str = "local") -> bool:
-    return models.set_local_models(local_model_ids())
+    return models.set_local_models(local_model_ids(provider=provider), provider)
 
 
 def refresh_cli_models(provider: str) -> bool:
@@ -330,11 +346,11 @@ def refresh_cli_models(provider: str) -> bool:
     return models.reload_cli_cache(provider)
 
 
-def refresh_models_soon(providers=MODEL_PROVIDERS, *, max_age: float = MODELS_TTL) -> None:
+def refresh_models_soon(providers=None, *, max_age: float = MODELS_TTL) -> None:
     """refresh_models for each stale provider, on daemon threads (callers are on a turn or the UI). Off under tests."""
     if not models.CATALOGUES_ON:
         return
-    for p in providers:
+    for p in model_providers() if providers is None else providers:
         if time.time() - _models_at.get(p, 0.0) >= max_age:
             threading.Thread(target=refresh_models, args=(p,), kwargs={"max_age": max_age}, daemon=True).start()
 

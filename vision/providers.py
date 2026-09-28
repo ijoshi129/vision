@@ -6,6 +6,12 @@ The rest of Vision asks the registry instead of testing provider names: a capabi
 have a CLI", "can it hold a voice conversation") or a hook, a "module:function" that is imported
 only when called. A new provider is one more entry here plus the functions its hooks name.
 
+Providers come in two kinds: the built-in four below, and endpoints the user adds in config.toml as
+`[providers.<name>]` tables (type = "openai": any OpenAI-compatible chat server, Ollama, LM Studio,
+vLLM, OpenRouter…), which run on the same driver as [local] (vision/local.py) with their models shown
+as `<name>/<model>` so two servers' names can't clash. `register_endpoints` builds those entries when
+the config loads.
+
 `[providers] enabled` in config.toml says which ones /model offers (/providers picks them). One that
 is enabled but not ready (its CLI is missing, its server does not answer) still shows in /model, as a
 single row that says how to set it up, so a new install never fails on its first message.
@@ -20,6 +26,27 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 # Imports nothing else from Vision at load: config and models build on it.
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """An OpenAI-compatible chat server Vision talks to directly (no CLI)."""
+
+    base_url: str = "http://localhost:8080/v1"
+    api_key: str = ""  # sent as a bearer token; api_key_env names an environment variable holding it instead
+    api_key_env: str = ""
+    timeout_s: float = 180
+    context: int = 32768  # tokens; the conversation is trimmed to stay inside it
+    models: tuple[str, ...] = ()  # fixed list; empty = ask the server's /models
+
+    def key(self) -> str:
+        import os
+
+        return self.api_key or (os.environ.get(self.api_key_env, "") if self.api_key_env else "")
+
+    def headers(self) -> dict[str, str]:
+        k = self.key()
+        return {"Authorization": f"Bearer {k}"} if k else {}
 
 
 @dataclass(frozen=True)
@@ -52,7 +79,12 @@ class Provider:
     default_model: str = ""  # what it means with no model named, when its list has it (else the list's first)
     default_effort_note: str = ""  # shown by its default effort level in /effort
     title_scanner: str = ""  # LiveTitle method that reads a running session's title
+    endpoint: Endpoint | None = None  # a config-defined server (the built-in "local" reads [local] instead)
     hooks: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def builtin(self) -> bool:
+        return self.endpoint is None
 
     def brain_class(self):
         return _load(self.brain)
@@ -133,7 +165,61 @@ REGISTRY: dict[str, Provider] = {p.name: p for p in (
         },
     ),
 )}
-PROVIDER_NAMES = tuple(REGISTRY)
+PROVIDER_NAMES = tuple(REGISTRY)  # the built-in four; `tuple(REGISTRY)` also has the config-defined ones
+_ENDPOINT_HOOKS = dict(REGISTRY["local"].hooks)
+
+
+def register_endpoints(specs: dict[str, dict]) -> list[str]:
+    """Replace the config-defined providers with these `[providers.<name>]` tables. A bad one is
+    skipped with its name and reason in the returned notes (an unknown type, a built-in name, no URL)."""
+    notes: list[str] = []
+    for name in [n for n, p in REGISTRY.items() if not p.builtin]:
+        del REGISTRY[name]
+    for raw_name, spec in specs.items():
+        name = str(raw_name).strip().lower()
+        if not isinstance(spec, dict):
+            continue
+        if name in PROVIDER_NAMES or not name.replace("-", "").replace("_", "").isalnum():
+            notes.append(f"[providers.{raw_name}]: that name is taken or not a plain word; skipped")
+            continue
+        kind = str(spec.get("type") or "openai").strip().lower()
+        if kind != "openai":
+            notes.append(f"[providers.{raw_name}]: type {kind!r} is not supported (only \"openai\"); skipped")
+            continue
+        url = str(spec.get("base_url") or "").strip().rstrip("/")
+        if not url:
+            notes.append(f"[providers.{raw_name}]: needs base_url; skipped")
+            continue
+        models = spec.get("models") or ()
+        ep = Endpoint(url, str(spec.get("api_key") or ""), str(spec.get("api_key_env") or ""),
+                      float(spec.get("timeout_s") or 180), int(spec.get("context") or 32768),
+                      tuple(str(m) for m in models if str(m).strip()) if isinstance(models, (list, tuple)) else ())
+        label = str(spec.get("label") or name.capitalize())
+        REGISTRY[name] = Provider(
+            name, label, label, f"via {url} · your own server", f"start the server at {url}, or fix base_url in [providers.{name}]",
+            "vision.local:LocalBrain", f"an open model served by {label}",
+            conversation="vision.local:LocalConversation", conversation_thinks=False,
+            vision_runs_tools=True, keeps_partial_turns=False, endpoint=ep, hooks=_ENDPOINT_HOOKS)
+        forget_ready()
+    return notes
+
+
+def endpoint_for(provider: str, cfg) -> Endpoint | None:
+    """The server a provider's turns go to: [local] for the built-in one, its own table for a config-defined one."""
+    p = REGISTRY.get(provider)
+    if p is None or p.cli:
+        return None
+    if p.endpoint is not None:
+        return p.endpoint
+    local = getattr(cfg, "local", None)
+    if local is None:
+        return Endpoint()
+    return Endpoint(str(local.base_url), timeout_s=float(local.timeout_s), context=int(local.context))
+
+
+def endpoint_names() -> tuple[str, ...]:
+    """Every provider that is a chat server (the built-in local one and the config-defined ones)."""
+    return tuple(p.name for p in REGISTRY.values() if not p.cli)
 
 
 def names(**caps) -> tuple[str, ...]:
@@ -171,7 +257,7 @@ def get(name: str) -> Provider | None:
 def enabled(cfg) -> list[Provider]:
     """The providers /model offers, in the order the config lists them."""
     names = getattr(getattr(cfg, "providers", None), "enabled", None)
-    names = PROVIDER_NAMES if names is None else names
+    names = tuple(REGISTRY) if names is None else names
     return [REGISTRY[n] for n in names if n in REGISTRY]
 
 
@@ -191,14 +277,16 @@ def _server_answers(base_url: str) -> bool:
 def ready(name: str, cfg=None) -> bool:
     """Whether this provider can take a turn here: its CLI is installed, or (local) its server answers.
     Cached for half a minute so /model opens instantly; a login problem still shows on the first turn."""
-    key = (name, getattr(getattr(cfg, "local", None), "base_url", "") if name == "local" else "")
+    p = REGISTRY.get(name)
+    ep = endpoint_for(name, cfg) if p is not None and not p.cli else None
+    key = (name, ep.base_url if ep else "")
     now = time.monotonic()
     with _ready_lock:
         hit = _ready_cache.get(key)
         if hit and now - hit[0] < _READY_TTL:
             return hit[1]
-    if name == "local":
-        ok = _server_answers(key[1])
+    if ep is not None:
+        ok = _server_answers(ep.base_url)
     elif name in REGISTRY:
         from vision import clis
 
@@ -232,17 +320,23 @@ def model_tabs(cfg, *, setup_rows: bool = True) -> list[tuple[str, list, str]]:
         rows, note = rows_by_label.get(p.label, ([], p.note))
         if ready(p.name, cfg) and rows:
             tabs.append((p.label, rows, note))
+        elif ready(p.name, cfg) and setup_rows:
+            tabs.append((p.label, [(SETUP_PREFIX + p.name, "No models yet", "the server answered but listed no models; try /model again in a moment")], note))
         elif setup_rows:
             tabs.append((p.label, [(SETUP_PREFIX + p.name, "Not set up", p.setup)], note))
     return tabs
 
 
-def setup_note(value: str) -> str | None:
+def setup_note(value: str, cfg=None) -> str | None:
     """For a /model pick that is a setup row, what to tell the user; None for a real model."""
     if not value.startswith(SETUP_PREFIX):
         return None
     p = REGISTRY.get(value[len(SETUP_PREFIX):])
-    return f"{p.label} isn't set up here yet: {p.setup}." if p else "That provider isn't set up here yet."
+    if p is None:
+        return "That provider isn't set up here yet."
+    if cfg is not None and ready(p.name, cfg):
+        return f"{p.label} answered but listed no models yet; try again in a moment."
+    return f"{p.label} isn't set up here yet: {p.setup}."
 
 
 def first_ready_model(cfg) -> str | None:

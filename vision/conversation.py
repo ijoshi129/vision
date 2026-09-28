@@ -679,10 +679,11 @@ class VoiceConversation:
         Claude, Codex or Local model, so one model answers typed and spoken turns alike. Grok has no
         tool-free structured-output mode, so its chats talk through [conversation].model (the fallback,
         set only in the config) and keep the picked model as the worker."""
-        from vision.models import CONVERSATION_PROVIDERS, provider_for
+        from vision.models import provider_for
+        from vision.providers import conversation_names
 
         chat = str(getattr(getattr(self.agent, "cfg", None), "model", "") or "")
-        return chat if chat.strip() and provider_for(chat) in CONVERSATION_PROVIDERS else self.fallback
+        return chat if chat.strip() and provider_for(chat) in conversation_names() else self.fallback
 
     def follow(self) -> None:
         """Bring the conversation model in line with the chat's pick after a /model switch. Its effort
