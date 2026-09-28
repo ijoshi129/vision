@@ -121,7 +121,8 @@ class CodexVoiceTests(unittest.TestCase):
 class StrictSchemaTests(unittest.TestCase):
     def test_every_property_is_required_and_min_length_goes(self):
         schema = strict_schema(RESPONSE_SCHEMA)
-        self.assertEqual(schema["required"], ["speech", "task", "search"])
+        self.assertEqual(schema["required"], ["speech", "task", "search", "weather"])
+        self.assertEqual(schema["properties"]["weather"]["anyOf"][1]["required"], ["places", "when"])
         task = schema["properties"]["task"]["anyOf"][1]
         self.assertEqual(set(task["required"]), set(task["properties"]))
         self.assertNotIn("minLength", json.dumps(schema))

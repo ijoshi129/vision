@@ -39,18 +39,30 @@ SEARCH_SCHEMA = {  # the front end's search-only tool, as a response field (visi
     "required": ["query"],
     "additionalProperties": False,
 }
+WEATHER_SCHEMA = {  # the model's WeatherKit tool, as a response field (vision/weather.py runs it)
+    "type": "object",
+    "properties": {
+        # Towns, each "Austin, TX" or "Lisbon"; empty (or a null in the list) for home. Up to MAX_PLACES.
+        "places": {"type": "array", "items": {"type": ["string", "null"]}},
+        "when": {"type": "string", "enum": ["today", "tomorrow", "week"]},
+    },
+    "required": ["places"],
+    "additionalProperties": False,
+}
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
         "speech": {"type": "string"},
         "task": {"anyOf": [{"type": "null"}, TASK_SCHEMA]},
         "search": {"anyOf": [{"type": "null"}, SEARCH_SCHEMA]},
+        "weather": {"anyOf": [{"type": "null"}, WEATHER_SCHEMA]},
     },
     "required": ["speech", "task"],
     "additionalProperties": False,
 }
 HISTORY_CHARS = 40_000
 MAX_SEARCHES = 2  # search-only lookups the model may ask for in one turn
+MAX_WEATHER = 2  # WeatherKit reports the model may ask for in one turn
 
 
 class SpeechStream:
@@ -184,10 +196,12 @@ def conversation_prompt(address: str, web: bool = False, front_end: bool = False
 
     models = ", ".join(m.alias for m in MODELS)
     efforts = ", ".join(EFFORT_WORDS)
-    tools = ("Your only tools are WebSearch and WebFetch, for live facts such as weather, news or "
-             "prices; use them yourself rather than delegating. You have no shell, filesystem access, "
+    tools = ("Your only tools are WebSearch and WebFetch, for live facts such as news or prices; use "
+             "them yourself rather than delegating. They are never for the weather: that is your `weather` "
+             "tool (see below). You have no shell, filesystem access, "
              "skills or subagents." if web else
-             "You have no tools, shell, filesystem access, browser, skills or subagents.")
+             "Your only tool is `weather` (see below). You have no shell, filesystem access, browser, skills "
+             "or subagents.")
     return f"""You are Vision, the user's conversational voice companion. You are always the
 conversation model, never the coding agent. {tools} The application can give a structured task
 to a separate CLI worker when YOU decide that work is necessary. Its result comes back to you as data.
@@ -229,13 +243,33 @@ delegate more work. Do not read raw worker output aloud. Never repeat a failed o
 task automatically; changes may already have happened. A follow-up task must be needed for
 the user's request. If delegation_allowed is false, task MUST be null: explain where things
 stand, including any unfinished work.
+A `user_interjection` event is a message the user sent while this reply was under way: it belongs
+to the same request, so answer it now, briefly, with anything else still due. `agent_heard` true
+means the running agents got it too and their results already allow for it. With `agent_running`
+events just before, those agents are still at work: answer the message now, briefly (a side question
+gets its answer, a change of plan a quick acknowledgement), and don't say their tasks are done; each
+`worker_result` comes later, and then you report on it without repeating what you already said. When
+the message asks for separate work (another agent, a different job) and delegation_allowed is true,
+give that task now: it starts at once and runs alongside the others. A change to work already running
+is not a new task; the agent has it. A `task_not_started`
+event means the task in your last response was held back because the user spoke before it began:
+ask for it again, adjusted, only if it is still wanted.
 The first input includes history and context. Later inputs are incremental: omitted context
 stays unchanged, and a turn containing only events continues the current request. Only a turn
 with a user field starts a new request. Do not repeat earlier tasks or web searches unless the
-current request needs them. A `weather` field is a live report from Apple WeatherKit fetched for
-this request: answer from it directly, in natural spoken words, without searching or delegating.
-Answer only what was asked, and if they asked about another place than the report covers, say
-so. For "what's the weather like?", conditions and temperature in one plain sentence, like a
+current request needs them.
+The weather is your `weather` tool, Apple WeatherKit, and nothing else: any question about weather,
+temperature, rain, forecasts or what it's like somewhere is answered from it, never from a web search,
+a delegated task or memory. A `weather` field in the input is a report already fetched for this
+request (home, or the place they named); if it answers the question, answer from it. Otherwise call the
+tool: set `weather` in your reply ({{"places": ["Austin, TX", "Lisbon"], "when": today|tomorrow|week}},
+[] for home) with a short `speech` or none and `task` null; the reports come back as a `weather` event
+and you then answer. Ask for every place in one call, up to twelve, with the state or country after the
+town ("Newark, NJ"), so the right one is found. A state, region or country is not a place to WeatherKit:
+for "the weather in ten cities in Texas" choose ten of its main towns yourself and ask for them all at
+once; for "the weather in Texas" pick its biggest few. For several places, one short sentence per place
+or a quick run through them, not a full report each.
+Answer only what was asked, and if the report covers another place than they asked about, say so. For "what's the weather like?", conditions and temperature in one plain sentence, like a
 friend glancing out of the window: "Mostly cloudy, sixty-five." Add a short second sentence only for
 rain or a change coming in the next few hours, or an alert, and for rain always say when it stops
 or that it lasts all day: "Rain from about seven till two, high of seventy-three." Skip "right now", the place (unless they asked about somewhere or the report fell
@@ -274,8 +308,25 @@ def validate_search(data: object) -> dict:
     return {"query": query, "recency": rec or None, "domains": hosts}
 
 
+def validate_weather(data: object) -> dict:
+    """The model's WeatherKit request, checked outside the model: {places (None for home), when}."""
+    from vision.weather import MAX_PLACES
+
+    if not isinstance(data, dict) or not {"places"} <= set(data) <= {"places", "when"}:
+        raise ValueError("a weather request needs places (empty for home) and nothing but places and when")
+    places = data["places"]
+    if not isinstance(places, list) or not all(p is None or isinstance(p, str) for p in places):
+        raise ValueError("places must be a list of place names")
+    if len(places) > MAX_PLACES:
+        raise ValueError(f"at most {MAX_PLACES} places at once")
+    when = data.get("when") or "today"
+    if when not in ("today", "tomorrow", "week"):
+        raise ValueError("when must be today, tomorrow or week")
+    return {"places": [" ".join((p or "").split())[:80] or None for p in places] or [None], "when": when}
+
+
 def validate_response(data: object) -> dict:
-    if (not isinstance(data, dict) or not {"speech", "task"} <= set(data) <= {"speech", "task", "search"}
+    if (not isinstance(data, dict) or not {"speech", "task"} <= set(data) <= {"speech", "task", "search", "weather"}
             or not isinstance(data["speech"], str)):
         raise BrainError("The voice model returned an invalid response.")
     if data["task"] is not None:
@@ -290,7 +341,14 @@ def validate_response(data: object) -> dict:
             raise BrainError(f"The voice model returned an invalid search: {e}") from e
         if data["task"] is not None:
             raise BrainError("The voice model asked for a search and a task at once.")
-    elif data["task"] is None and not data["speech"].strip():
+    if data.get("weather") is not None:
+        try:
+            data["weather"] = validate_weather(data["weather"])
+        except ValueError as e:
+            raise BrainError(f"The voice model returned an invalid weather request: {e}") from e
+        if data["task"] is not None or data.get("search") is not None:
+            raise BrainError("The voice model asked for the weather and another lookup or task at once.")
+    elif data.get("search") is None and data["task"] is None and not data["speech"].strip():
         raise BrainError("The voice model returned an empty reply.")
     return data
 
@@ -321,13 +379,14 @@ class ClaudeConversation:
             "--verbose", "--include-partial-messages", "--model", cfg.model,
             "--system-prompt", conversation_prompt(self.cfg.brain.address_user_as, cfg.web, front_end=self.cfg.router.mode == "on"),
             "--tools", "WebSearch,WebFetch" if cfg.web else "",
-            # dontAsk auto-denies anything that would prompt; safe mode ignores settings allow
-            # rules, so the read-only web tools must be pre-approved here or every call is refused.
-            "--allowedTools", "WebSearch,WebFetch" if cfg.web else "",
+            # Nothing is pre-approved: every web call comes to Vision as a can_use_tool control request
+            # (_answer_control), which lets ordinary lookups through and turns weather ones back to WeatherKit.
+            "--allowedTools", "",
+            "--permission-prompt-tool", "stdio",
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--safe-mode", "--disable-slash-commands", "--no-chrome",
             "--setting-sources", "", "--settings", '{"disableAllHooks":true}',
-            "--permission-mode", "dontAsk", "--no-session-persistence",
+            "--permission-mode", "default", "--no-session-persistence",
             "--json-schema", json.dumps(RESPONSE_SCHEMA),
         ]
         if cfg.effort:
@@ -429,6 +488,39 @@ class ClaudeConversation:
                                                if "assistant" not in e]}
         return payload
 
+    def _answer_control(self, proc, ev: dict) -> None:
+        """Reply to the CLI's permission request for a tool call. WebSearch and WebFetch run unless they
+        are after the weather: that is denied, and the denial carries the live WeatherKit report, so the
+        model answers from Apple's data and never from a web page. Anything else is refused."""
+        from vision.weather import lookup, requested_scope, search_place, web_weather
+
+        req = ev.get("request") or {}
+        rid = ev.get("request_id")
+        if req.get("subtype") != "can_use_tool":
+            reply = {"subtype": "error", "request_id": rid, "error": f"{req.get('subtype')} is not supported here"}
+        else:
+            tool, tool_input = req.get("tool_name", ""), req.get("input") or {}
+            asked = web_weather(tool, tool_input) if tool in ("WebSearch", "WebFetch") else None
+            if tool not in ("WebSearch", "WebFetch") or not self.cfg.conversation.web:
+                result = {"behavior": "deny", "message": f"{tool} is not available in the voice conversation."}
+            elif asked is None:
+                result = {"behavior": "allow", "updatedInput": tool_input}
+            else:
+                query = str(tool_input.get("query") or "")
+                report = lookup(self.cfg.weather, search_place(query) if query else None, requested_scope(asked))
+                if self.timing:
+                    self.timing.event("web_weather_blocked")
+                result = {"behavior": "deny", "message": (
+                    "Blocked: Vision never takes the weather from the web. Answer from this live Apple WeatherKit "
+                    "report instead; for another place or day, set `weather` in your reply.\n\n" + report)}
+            reply = {"subtype": "success", "request_id": rid, "response": result}
+        with self._lock:
+            try:
+                proc.stdin.write(json.dumps({"type": "control_response", "response": reply}) + "\n")
+                proc.stdin.flush()
+            except (OSError, ValueError, AttributeError):
+                pass  # the connection is closing; the turn reports that on its own
+
     @staticmethod
     def _speech_piece(event: dict, state: dict) -> str:
         """The speech text newly written in one stream event, "" if it carries none. `state` remembers which
@@ -507,6 +599,9 @@ class ClaudeConversation:
                         raise BrainError("".join(errors).strip()[-1000:] or "Claude voice connection closed before its result.")
                     if self.timing:
                         self.timing.provider_event(envelope)
+                    if envelope.get("type") == "control_request":
+                        self._answer_control(proc, envelope)
+                        continue
                     if envelope.get("type") == "stream_event":
                         if on_speech is not None:
                             piece = self._speech_piece(envelope.get("event") or {}, stream)
@@ -557,6 +652,13 @@ class VoiceConversation:
         self._worker = None
         self._worker_key = None
         self._cancel = threading.Event()
+        # Messages sent into the running turn (Send now, Ctrl-X): (text, whether the running agent got it
+        # too), taken into the turn's events by the ask thread; `_taking` while the turn can still answer one.
+        self._steer_lock = threading.Lock()
+        self._steers: list[tuple[str, bool]] = []
+        self._taking = False
+        self._heard = 0
+        self._asking = False  # an agent's question is out mid-turn: the next message sent in is its answer
         self.supervisor = Supervisor(cfg, self._task_worker)
         self.pending_override: Override | None = None  # a /command with no request of its own: applies to the next message
         self.next_channel = "voice"  # what the next ask() is unless it says: "voice" or "text"
@@ -629,11 +731,24 @@ class VoiceConversation:
     def cancel(self) -> None:
         self._cancel.set()
         self.model.cancel()
-        active = self.supervisor.active
-        if active is not None:
-            self.supervisor.cancel(active.id)
-        elif self._worker is not None:
+        running = self.supervisor.running()
+        for run in running:  # every agent at work, several when they run alongside each other
+            self.supervisor.cancel(run.id)
+        if not running and self._worker is not None:
             self._worker.cancel()
+
+    def steer(self, text: str) -> bool:
+        """A message sent into the running turn, as Claude Code takes one mid-reply: the conversation model
+        hears it at its next step (after the response it is writing, or when the worker returns) and
+        answers it in this turn; a worker running now also gets it as a task update. False when the turn
+        is over or cancelled: the caller queues it as the next turn."""
+        with self._steer_lock:  # held while the worker is told, so the turn can't end in between
+            if not self._taking or self._cancel.is_set():
+                return False
+            self._heard += 1
+            # An answer to an agent's question goes to that agent alone, never to the others as an update.
+            self._steers.append((text, False if self._asking else self.supervisor.steer(text)))
+        return True
 
     def _task_worker(self, model: str | None = None, effort: str | None = None, denied: list[str] | None = None):
         """The silent worker. On the legacy path (router off or auditing) it is the typed brain's
@@ -798,7 +913,7 @@ class VoiceConversation:
                 if weather.error:
                     packet["weather"] += f"\n(The place asked for was not available: {weather.error} This is the home report.)"
             elif weather.error:
-                packet["weather"] = f"WeatherKit could not answer ({weather.error}); use web search if allowed, else say so."
+                packet["weather"] = f"WeatherKit could not answer ({weather.error}): say so. Never look the weather up on the web."
         if usage is not None:
             usage.join(usage.timeout)
             if timing:
@@ -807,13 +922,103 @@ class VoiceConversation:
         # A search-only route: the lookup runs first, and the model answers from the results.
         searches = 0
         if act and route.kind == SEARCH:
-            current["events"].append({"search_results": self._search(text, None, None)})
+            current["events"].append(self._lookup(text, None, None))
             searches += 1
         # Delegation policy for this turn: the model may not ask for work on a search/weather route or
         # when the user said "locally"; on a delegated route the application launches the agent itself.
         tasks_allowed = not (act and (route.kind in (SEARCH, WEATHER) or (route.kind == LOCAL and route.explicit)))
         allow_more = True
         dispatched: set[str] = set()
+
+        asked_again = False  # a message came in since the model last spoke: it may launch work for it
+
+        def take_steers() -> None:
+            """Messages sent in since the model last looked, into the turn's events in the order they came.
+            Only this thread touches `current`: a model call diffs the events it has already sent."""
+            nonlocal asked_again
+            with self._steer_lock:
+                taken, self._steers = self._steers, []
+            asked_again = asked_again or bool(taken)
+            for said, heard in taken:
+                current["events"].append({"user_interjection": {"text": said, "agent_heard": heard}})
+
+        def steers_waiting() -> bool:
+            with self._steer_lock:
+                return bool(self._steers)
+
+        # Agents run in the background, so the turn stays open to the user: a message sent in meanwhile
+        # is answered at once, and that answer may launch another agent to work alongside the first.
+        jobs: list[dict] = []  # launched this turn and still at work: {"thread", "box", "label", "row", "more"}
+        asking: dict = {}  # a question an agent asked while others still work: the next message answers it
+
+        def start_job(call, label: str, row: AgentRun | None, more: bool) -> None:
+            """A blocking supervisor call (launch or answer) on a thread of its own. `more`: a completed
+            result lets the model ask for further work (false for the agent the application launched)."""
+            box: dict = {}
+
+            def work():
+                try:
+                    box["run"] = call()
+                except BaseException as e:  # noqa: BLE001  re-raised on the turn's thread
+                    box["error"] = e
+
+            t = threading.Thread(target=work, daemon=True, name="vision-agent-wait")
+            jobs.append({"thread": t, "box": box, "label": label, "row": row, "more": more})
+            t.start()
+
+        def wait_for_work() -> dict | None:
+            """Until an agent stops (its job, taken off the list) or the user sends a message in (None)."""
+            grace = None
+            while True:
+                for job in jobs:
+                    if not job["thread"].is_alive():
+                        jobs.remove(job)
+                        return job
+                if self._cancel.is_set():
+                    return None
+                if steers_waiting():
+                    # A result landing a moment after the message comes first, and the model hears both at once.
+                    grace = grace or time.monotonic() + 0.2
+                    if time.monotonic() >= grace:
+                        return None
+                time.sleep(0.02)
+
+        def settle(job: dict):
+            """A stopped job's Run, or its launch error raised here."""
+            nonlocal allow_more
+            if timing:
+                timing.event("worker_end")
+            if "error" in job["box"]:
+                raise job["box"]["error"]
+            run = job["box"]["run"]
+            row = job["row"]
+            if row is not None and run.worker is not None and row.tokens_fn is None:
+                row.tokens_fn = lambda w=run.worker: getattr(w, "output_tokens", 0) or 0
+            allow_more = job["more"] and run.state == "completed"
+            return run
+
+        def take_answer() -> bool:
+            """The user's reply to a question relayed mid-turn: back into that agent's session."""
+            with self._steer_lock:
+                if not asking or not self._steers:
+                    return False
+                said, _ = self._steers.pop(0)
+                self._asking = False
+            run = asking.pop("run")
+            current["events"].append({"answer_relayed": {"run_id": run.id, "answer": said}})
+            if on_status:
+                on_status(f"{model_label(run.model) or run.model} is carrying on…")
+            if run.row is not None:
+                run.row.done = False
+                if on_agent:
+                    on_agent(run.row)
+            if timing:
+                timing.event("worker_start")
+            start_job(lambda: self.supervisor.answer(
+                run.id, said, on_agent=on_agent, on_question=on_question,
+                on_tool=worker_tools(run.row) if run.row is not None else None, on_status=on_status),
+                run.row.label if run.row is not None else "the agent", run.row, False)
+            return True
 
         def worker_tools(row: AgentRun, who: str = ""):
             """The worker's tool calls as steps on its agent row, as a native subagent's are: the reply's
@@ -836,11 +1041,22 @@ class VoiceConversation:
 
             return tool_seen
 
-        def run_agent(task: dict, *, agent: str | None, model: str | None, effort: str, allowlist: bool, n: int, key: str = "") -> object:
-            """Launch through the supervisor and show the run as an agent row; returns the Run."""
-            nonlocal allow_more
+        def launch_agent(task: dict, *, agent: str | None, model: str | None, effort: str, allowlist: bool, n: int,
+                         key: str = "", more: bool = True) -> None:
+            """Launch through the supervisor in the background and show the run as an agent row. A choice
+            the allowlist refuses raises SupervisorError here, before anything starts."""
             label = task["objective"].strip().splitlines()[0][:80]
-            row = AgentRun(f"worker-{n}", "agent", label, model=model or "", effort=effort or "", started=time.monotonic())
+            others = [job["label"] for job in jobs]
+            if others:
+                # Agents already at work in the same folder: this one keeps off their files and builds.
+                task = dict(task, constraints=list(task.get("constraints") or []) + [
+                    "Other agents are working in this folder right now, on: " + "; ".join(others) + ". Stay off the "
+                    "files their work is likely to change, re-read any shared file just before you edit it, and don't "
+                    "build, install or run the app while they might be doing the same."])
+            # Unique across turns: the phone matches frames to rows by id, and a per-turn "worker-0"
+            # landed on the last turn's finished row, so the new one never showed while it ran.
+            row = AgentRun(f"worker-{n}-{uuid.uuid4().hex[:8]}","agent", label, model=model or "", effort=effort or "",
+                           started=time.monotonic(), prompt=task["objective"].strip())
             if allowlist:
                 agent, model, effort = self.supervisor.resolve(agent, model, effort)  # a visible error, before anything starts
                 row.kind, row.model, row.effort = model_label(model) or model, model, effort
@@ -854,20 +1070,33 @@ class VoiceConversation:
                 raise BrainError("cancelled")
             if timing:
                 timing.event("worker_start")
+            if others:
+                self.supervisor.tell_peers(label)  # and those already at work hear about this one
+            start_job(lambda: self.supervisor.launch(
+                task, agent=agent, model=model, effort=effort, allowlist=allowlist, row=row, key=key,
+                on_agent=on_agent, on_question=on_question, on_tool=worker_tools(row, row.kind if allowlist else "The worker"),
+                on_status=on_status, channel=channel), label, row, more)
 
-            run = self.supervisor.launch(task, agent=agent, model=model, effort=effort, allowlist=allowlist, row=row, key=key,
-                                         on_agent=on_agent, on_question=on_question,
-                                         on_tool=worker_tools(row, row.kind if allowlist else "The worker"),
-                                         on_status=on_status, channel=channel)
-            if run.worker is not None and row.tokens_fn is None:
-                row.tokens_fn = lambda w=run.worker: getattr(w, "output_tokens", 0) or 0
-            if timing:
-                timing.event("worker_end")
-            allow_more = run.state == "completed"
-            return run
+        def stopped(run) -> Turn | None:
+            """An agent's stop, into the turn: its result, or its question. With no other agent at work the
+            question ends the turn (the next message answers it); otherwise it is asked now and the next
+            message sent in goes back to that agent."""
+            if run.state != "waiting_for_user":
+                current["events"].append({"worker_result": run.result})
+                return None
+            if not jobs:
+                return relay_question(run)
+            relay_question(run)
+            with self._steer_lock:
+                asking["run"] = run
+                self._asking = True
+            return None
 
+        with self._steer_lock:
+            self._steers, self._taking, self._heard, self._asking = [], True, 0, False
         try:
             # -- the application delegates: the agent runs, the model narrates the result --------------
+            listen = True  # the model speaks next; false while it waits on agents
             if route.kind == ANSWER and waiting is not None:
                 current["events"].append({"answer_relayed": {"run_id": waiting.id, "answer": text}})
                 if on_status:
@@ -876,31 +1105,73 @@ class VoiceConversation:
                     waiting.row.done = False
                     if on_agent:
                         on_agent(waiting.row)
-                run = self.supervisor.answer(waiting.id, text, on_agent=on_agent, on_question=on_question,
-                                             on_tool=worker_tools(waiting.row) if waiting.row is not None else None, on_status=on_status)
-                if run.state == "waiting_for_user":
-                    return relay_question(run)
-                current["events"].append({"worker_result": run.result})
-                allow_more = False
+                start_job(lambda: self.supervisor.answer(
+                    waiting.id, text, on_agent=on_agent, on_question=on_question,
+                    on_tool=worker_tools(waiting.row) if waiting.row is not None else None, on_status=on_status),
+                    waiting.row.label if waiting.row is not None else "the agent", waiting.row, False)
+                listen = False
             elif route.kind == DELEGATE and act:
                 task = build_task(text, agent_label=model_label(routing.agent_model(rc, route.agent)) or route.agent,
                                   effort=route.effort, workdir=self.agent.workdir, mode=self.agent.cfg.mode, channel=channel,
                                   recent=recent, coding_context=context[-4000:], approval=rc.approval)
-                run = run_agent(task, agent=route.agent, model=None, effort=route.effort, allowlist=True, n=0, key=key)
-                dispatched.add(json.dumps(task, sort_keys=True))
-                if run.state == "waiting_for_user":
-                    return relay_question(run)
-                current["events"].append({"worker_result": run.result})
-                allow_more = False  # one delegated request, one agent; the model explains the outcome
+                launch_agent(task, agent=route.agent, model=None, effort=route.effort, allowlist=True, n=0, key=key, more=False)
+                dispatched.add(json.dumps(task, sort_keys=True))  # one delegated request, one agent; the model explains the outcome
+                listen = False
 
-            # -- the conversation model answers; it may ask for a search, or (when allowed) for work ------
+            # -- the conversation model answers; it may ask for a search, or (when allowed) for work,
+            #    and while agents work it answers what the user sends in, launching more if asked ------
             n = 0
             calls = 0
-            while calls <= self.cfg.conversation.max_delegations + MAX_SEARCHES:
-                calls += 1
+            reports = 0
+            results = 0
+            while True:
                 if self._cancel.is_set():
                     raise BrainError("cancelled")
-                packet["delegation_allowed"] = tasks_allowed and allow_more and n < self.cfg.conversation.max_delegations
+                if not listen:
+                    if not jobs:
+                        listen = True
+                        continue
+                    if take_answer():
+                        continue
+                    job = wait_for_work()
+                    if self._cancel.is_set():
+                        raise BrainError("cancelled")
+                    if job is None:
+                        if not take_answer():
+                            listen = True  # a message came in: answered now, with the agents still at work
+                        continue
+                    try:
+                        run = settle(job)
+                    except SupervisorError as e:
+                        if on_status:
+                            on_status("")
+                        if not jobs:
+                            return refuse(str(e))
+                        current["events"].append({"refused": str(e)})
+                        listen = True
+                        continue
+                    results += 1
+                    take_steers()  # said while it worked: ahead of its result
+                    ended = stopped(run)
+                    if ended is not None:
+                        return ended
+                    if on_status:
+                        on_status("")
+                    listen = run.state != "waiting_for_user"
+                    continue
+                # Each message sent in, and each agent's result, buys one more response.
+                calls += 1
+                if calls > self.cfg.conversation.max_delegations + MAX_SEARCHES + MAX_WEATHER + self._heard + results + 1:
+                    if jobs:
+                        listen = False
+                        continue
+                    break
+                take_steers()
+                for job in jobs:
+                    current["events"].append({"agent_running": job["label"]})
+                # A message sent in is a fresh ask: work for it may start even after a failed or app-launched run.
+                packet["delegation_allowed"] = tasks_allowed and (allow_more or asked_again) and n < self.cfg.conversation.max_delegations
+                asked_again = False
                 packet["worker_mode"] = self.agent.cfg.mode
                 if timing:
                     timing.event("conversation_start")
@@ -912,7 +1183,7 @@ class VoiceConversation:
                 if self._cancel.is_set():
                     raise BrainError("cancelled")
                 turn.usage = self.model.usage
-                task, search = response["task"], response.get("search")
+                task, search, wants_weather = response["task"], response.get("search"), response.get("weather")
                 if task is not None and not packet["delegation_allowed"]:
                     raise BrainError("The voice model requested more work when a spoken result was required."
                                      if tasks_allowed else "The conversation model tried to delegate on a route that forbids it.")
@@ -921,20 +1192,44 @@ class VoiceConversation:
                     raise BrainError("The voice model tried to repeat the same task.")
                 if search is not None and searches >= MAX_SEARCHES:
                     raise BrainError("The conversation model asked for too many searches in one turn.")
+                if wants_weather is not None and reports >= MAX_WEATHER:
+                    raise BrainError("The conversation model asked for too many weather reports in one turn.")
                 current["events"].append({"assistant": response})
                 if timing and response["speech"].strip():
-                    timing.event("acknowledgement_ready" if task is not None or search is not None else "answer_ready")
+                    timing.event("acknowledgement_ready" if task is not None or search is not None or wants_weather is not None
+                                 else "answer_ready")
                 finish_speech(response["speech"])
                 if search is not None:
                     if on_status:
                         on_status("searching the web…")
-                    current["events"].append({"search_results": self._search(search["query"], search.get("recency"), search.get("domains"))})
+                    current["events"].append(self._lookup(search["query"], search.get("recency"), search.get("domains")))
                     searches += 1
                     if on_status:
                         on_status("")
                     continue
+                if wants_weather is not None:
+                    from vision.weather import lookup_many
+
+                    if on_status:
+                        on_status("checking the weather…")
+                    current["events"].append({"weather": lookup_many(self.cfg.weather, wants_weather["places"], wants_weather["when"])})
+                    reports += 1
+                    if on_status:
+                        on_status("")
+                    continue
                 if task is None:
-                    break
+                    if jobs:
+                        listen = False  # agents still at work: wait for them, or for the next message
+                        continue
+                    with self._steer_lock:
+                        if not self._steers:
+                            self._taking = False  # answered: a message from here on queues as the next turn
+                            break
+                    continue  # one came in while it answered: the model hears it before the turn ends
+                if steers_waiting():
+                    # The user spoke before the work began; the model asks again with that in mind.
+                    current["events"].append({"task_not_started": "the user sent a message before it began"})
+                    continue
                 if self._cancel.is_set():
                     raise BrainError("cancelled")
                 # The worker shows as agent rows in the reply, where it was launched (on_agent): which brain it runs on, how long
@@ -948,21 +1243,18 @@ class VoiceConversation:
                         agent = routing.agent_for_model(rc, model) if model else rc.default_agent
                         if model and not agent:
                             raise SupervisorError(f"{model_label(model) or model} is not on the agent allowlist ({', '.join(routing.agent_names(rc)) or 'empty'})")
-                        run = run_agent(task, agent=agent, model=None, effort=effort or rc.default_effort, allowlist=True, n=n)
+                        launch_agent(task, agent=agent, model=None, effort=effort or rc.default_effort, allowlist=True, n=n)
                     else:
-                        run = run_agent(task, agent=None, model=model, effort=effort or "", allowlist=False, n=n)
+                        launch_agent(task, agent=None, model=model, effort=effort or "", allowlist=False, n=n)
                 except SupervisorError as e:
                     if on_status:
                         on_status("")
-                    return refuse(str(e))
-                if run.state == "waiting_for_user":
-                    return relay_question(run)
-                current["events"].append({"worker_result": run.result})
+                    if not jobs:
+                        return refuse(str(e))
+                    current["events"].append({"refused": str(e)})
+                    continue
                 n += 1
-                if on_status:
-                    on_status("")
-                if self._cancel.is_set():
-                    raise BrainError("cancelled")
+                listen = False
             return turn
         except Exception as e:
             turn.is_error = True
@@ -972,6 +1264,16 @@ class VoiceConversation:
                 speak("I've lost the conversation for a moment. I can't confirm anything more yet.")
             return turn
         finally:
+            with self._steer_lock:
+                self._taking = self._asking = False
+            take_steers()  # sent in as the turn stopped (a question, a cancel): the history keeps them
+            for job in list(jobs):
+                # Stopped early (an error, a cancel) with agents still out: they finish (a cancelled one
+                # quickly) before the turn ends, so none is left working unseen, and their results are kept.
+                job["thread"].join()
+                run = job["box"].get("run")
+                if run is not None:
+                    current["events"].append({"worker_result": run.result})
             self._remember(current)
 
     def _remember(self, current: dict) -> None:
@@ -982,6 +1284,16 @@ class VoiceConversation:
         # be large, but it is never cut in half or mistaken for a new instruction.
         while self.history and len(json.dumps(self.history)) > HISTORY_CHARS:
             self.history.pop(0)
+
+    def _lookup(self, query: str, recency: str | None, domains: list[str] | None) -> dict:
+        """The turn event for a search: its results, or, when it is after the weather, the WeatherKit
+        report in their place (the weather never comes from the web)."""
+        from vision.weather import lookup, requested_scope, search_place, web_weather
+
+        if web_weather("WebSearch", {"query": query, "domains": domains or []}) is not None:
+            self.supervisor.log("search_blocked", note="weather: answered from WeatherKit", text=query)
+            return {"weather": lookup(self.cfg.weather, search_place(query), requested_scope(query))}
+        return {"search_results": self._search(query, recency, domains)}
 
     def _search(self, query: str, recency: str | None, domains: list[str] | None) -> dict:
         """One search-only lookup, as the packet carries it: results or a short error, never a page."""

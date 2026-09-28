@@ -290,6 +290,251 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(create.call_count, 3)
         self.assertEqual([c.args[0].model for c in create.call_args_list], ["opus", "haiku", "opus"])
 
+    def test_a_message_sent_in_while_it_answers_is_answered_in_the_same_turn(self):
+        sent = []
+
+        class Model(FakeModel):
+            def complete(model, packet, cancel, on_speech=None):
+                if not sent:
+                    sent.append(self.voice.steer("Actually, make it Tuesday."))
+                return FakeModel.complete(model, packet, cancel)
+
+        self.voice.model = Model(dict(speech="Monday works.", task=None), dict(speech="Tuesday it is.", task=None))
+        turn = self.voice.ask("Book it for Monday")
+        self.assertEqual(sent, [True])
+        self.assertEqual(turn.text, "Monday works.\n\nTuesday it is.")
+        self.assertEqual(self.voice.model.packets[1]["turn"]["events"][-1],
+                         {"user_interjection": {"text": "Actually, make it Tuesday.", "agent_heard": False}})
+        self.assertFalse(self.voice.steer("too late"))  # the turn is over: the caller queues it
+
+    def test_a_message_sent_in_while_the_worker_runs_reaches_it_and_comes_before_its_result(self):
+        self.voice.model = FakeModel(dict(speech="On it.", task=TASK), dict(speech="Done, tests skipped.", task=None))
+        worker = Mock()
+        worker.steer.return_value = True
+        sent = []
+
+        def ask(prompt, on_question=None, on_tool=None):
+            sent.append(self.voice.steer("Skip the tests."))
+            return Turn(data=RESULT)
+
+        worker.ask.side_effect = ask
+        with patch("vision.conversation.create_brain", return_value=worker):
+            self.voice.ask("Fix it")
+        self.assertEqual(sent, [True])
+        self.assertEqual(json.loads(worker.steer.call_args.args[0]), {"type": "vision_task_update", "message": "Skip the tests."})
+        self.assertEqual(self.voice.model.packets[1]["turn"]["events"][-2:],
+                         [{"user_interjection": {"text": "Skip the tests.", "agent_heard": True}}, {"worker_result": RESULT}])
+
+    def test_a_message_sent_in_while_the_worker_runs_is_answered_before_it_finishes(self):
+        answered = threading.Event()
+
+        class Model(FakeModel):
+            def complete(model, packet, cancel, on_speech=None):
+                if any("agent_running" in e for e in packet["turn"]["events"]) and not answered.is_set():
+                    self.assertTrue(packet["delegation_allowed"])  # it may start more work alongside
+                    answered.set()
+                return FakeModel.complete(model, packet, cancel)
+
+        self.voice.model = Model(dict(speech="On it.", task=TASK), dict(speech="Because Sol was picked.", task=None),
+                                 dict(speech="Done.", task=None))
+        worker = Mock()
+        worker.steer.return_value = True
+
+        def ask(prompt, on_question=None, on_tool=None):
+            self.voice.steer("Why did I switch?")
+            self.assertTrue(answered.wait(5))  # the aside is spoken while the agent is still working
+            return Turn(data=RESULT)
+
+        worker.ask.side_effect = ask
+        with patch("vision.conversation.create_brain", return_value=worker):
+            turn = self.voice.ask("Fix it")
+        self.assertEqual(turn.text, "On it.\n\nBecause Sol was picked.\n\nDone.")
+        self.assertEqual(self.voice.model.packets[1]["turn"]["events"][-2:],
+                         [{"user_interjection": {"text": "Why did I switch?", "agent_heard": True}},
+                          {"agent_running": "Fix the failing check"}])
+        self.assertEqual(self.voice.model.packets[2]["turn"]["events"][-1], {"worker_result": RESULT})
+
+    def test_a_second_agent_launched_mid_run_works_alongside_the_first(self):
+        other = dict(TASK, objective="Polish the chat list")
+        first_going, narrated = threading.Event(), threading.Event()
+        order = []
+
+        class Model(FakeModel):
+            def complete(model, packet, cancel, on_speech=None):
+                if len(model.packets) == 1:  # the first agent is at work
+                    self.assertTrue(first_going.wait(5))
+                if len(model.packets) == 2:  # the second agent's result, told with the first still at work
+                    narrated.set()
+                return FakeModel.complete(model, packet, cancel)
+
+        self.voice.model = Model(dict(speech="On it.", task=TASK), dict(speech="Starting another.", task=other),
+                                 dict(speech="The list is done.", task=None), dict(speech="And the check.", task=None))
+
+        steers, seen_constraints = [], []
+
+        def worker():
+            w = Mock()
+            w.steer.side_effect = lambda text: steers.append(Mock(args=(text,))) or True
+
+            def ask(prompt, on_question=None, on_tool=None):
+                objective = json.loads(prompt)["task"]["objective"]
+                seen_constraints.append(" ".join(json.loads(prompt)["task"]["constraints"]))
+                if objective == TASK["objective"]:
+                    self.voice.steer("Get another agent on the chat list.")
+                    first_going.set()
+                    self.assertTrue(narrated.wait(5))  # still running when the second's result is told
+                    order.append("first")
+                else:
+                    order.append("second")
+                return Turn(data=RESULT)
+
+            w.ask.side_effect = ask
+            return w
+
+        rows = []
+        with patch("vision.conversation.create_brain", side_effect=lambda *a, **k: worker()):
+            turn = self.voice.ask("Fix it", on_agent=lambda r: rows.append(r.id))
+        self.assertFalse(turn.is_error, turn.error)
+        self.assertEqual(order, ["second", "first"])
+        prompts = [json.loads(c.args[0]) for c in steers]
+        self.assertIn({"type": "vision_peer_started", "objective": "Polish the chat list"}, prompts)  # the first hears of the second
+        self.assertIn("Fix the failing check", seen_constraints[-1])  # and the second knows the first is at work
+        self.assertEqual(len(set(rows)), 2)  # two agent rows
+        self.assertEqual(turn.text, "On it.\n\nStarting another.\n\nThe list is done.\n\nAnd the check.")
+        self.assertEqual(self.voice.model.packets[1]["turn"]["events"][-2:],
+                         [{"user_interjection": {"text": "Get another agent on the chat list.", "agent_heard": True}},
+                          {"agent_running": "Fix the failing check"}])
+        self.assertEqual(self.voice.model.packets[2]["turn"]["events"][-2:],
+                         [{"worker_result": RESULT}, {"agent_running": "Fix the failing check"}])
+
+    def test_a_question_from_one_agent_is_answered_while_another_works(self):
+        other = dict(TASK, objective="Polish the chat list")
+        asked, answered = threading.Event(), threading.Event()
+        NEEDS = dict(RESULT, status="needs_input", summary="Which colour?", question="Which colour?")
+
+        self.voice.model = Model = FakeModel(dict(speech="On it.", task=TASK), dict(speech="Another.", task=other),
+                                             dict(speech="Blue, done.", task=None), dict(speech="All sorted.", task=None))
+        sent = []
+
+        def worker():
+            w = Mock()
+            w.steer.return_value = True
+
+            def ask(prompt, on_question=None, on_tool=None):
+                msg = json.loads(prompt)
+                if msg["type"] == "vision_task_answer":
+                    sent.append(msg["answer"])
+                    answered.set()
+                    return Turn(data=RESULT)
+                if msg["task"]["objective"] == TASK["objective"]:
+                    self.voice.steer("And polish the chat list.")
+                    self.assertTrue(asked.wait(5))  # the question has been put to the user
+                    self.voice.steer("Blue.")  # the answer to the other agent's question
+                    self.assertTrue(answered.wait(5))
+                    return Turn(data=RESULT)
+                return Turn(data=NEEDS)
+
+            w.ask.side_effect = ask
+            return w
+
+        spoken = []
+
+        def said(delta):
+            spoken.append(delta)
+            if "Which colour?" in delta:
+                asked.set()
+
+        with patch("vision.conversation.create_brain", side_effect=lambda *a, **k: worker()):
+            turn = self.voice.ask("Fix it", on_text=said)
+        self.assertFalse(turn.is_error, turn.error)
+        self.assertEqual(sent, ["Blue."])
+        self.assertIn("Which colour?", "".join(spoken))
+        events = self.voice.history[-1]["events"]
+        self.assertIn({"answer_relayed": {"run_id": events[[i for i, e in enumerate(events) if "answer_relayed" in e][0]]["answer_relayed"]["run_id"], "answer": "Blue."}}, events)
+        self.assertNotIn({"user_interjection": {"text": "Blue.", "agent_heard": False}}, events)
+
+    def test_cancel_stops_every_agent_at_work(self):
+        other = dict(TASK, objective="Polish the chat list")
+        both = threading.Barrier(2, timeout=5)
+        workers = []
+        self.voice.model = FakeModel(dict(speech="On it.", task=TASK), dict(speech="Another.", task=other))
+
+        def worker():
+            w = Mock()
+            w.steer.return_value = True
+            stopped = threading.Event()
+            w.cancel.side_effect = stopped.set
+
+            def ask(prompt, on_question=None, on_tool=None):
+                if json.loads(prompt)["task"]["objective"] == TASK["objective"]:
+                    self.voice.steer("Another agent on the list, please.")
+                    both.wait()
+                    self.voice.cancel()
+                else:
+                    both.wait()
+                self.assertTrue(stopped.wait(5))
+                return Turn(is_error=True, error="cancelled")
+
+            w.ask.side_effect = ask
+            workers.append(w)
+            return w
+
+        with patch("vision.conversation.create_brain", side_effect=lambda *a, **k: worker()):
+            turn = self.voice.ask("Fix it")
+        self.assertEqual(turn.error, "cancelled")
+        self.assertEqual(len(workers), 2)
+        for w in workers:
+            w.cancel.assert_called_once()
+
+    def test_a_task_asked_for_just_before_a_message_came_in_waits_for_the_model_to_ask_again(self):
+        sent = []
+
+        class Model(FakeModel):
+            def complete(model, packet, cancel, on_speech=None):
+                if not sent:
+                    sent.append(self.voice.steer("Only the parser, mind."))
+                return FakeModel.complete(model, packet, cancel)
+
+        narrow = dict(TASK, constraints=["Only touch the parser"])
+        self.voice.model = Model(dict(speech="I'll check.", task=TASK), dict(speech="Just the parser.", task=narrow),
+                                 dict(speech="Sorted.", task=None))
+        worker = Mock()
+        worker.ask.return_value = Turn(data=RESULT)
+        with patch("vision.conversation.create_brain", return_value=worker):
+            turn = self.voice.ask("Fix it")
+        self.assertFalse(turn.is_error)
+        worker.ask.assert_called_once()
+        self.assertEqual(json.loads(worker.ask.call_args.args[0])["task"], narrow)
+        self.assertEqual(self.voice.model.packets[1]["turn"]["events"][-2:],
+                         [{"task_not_started": "the user sent a message before it began"},
+                          {"user_interjection": {"text": "Only the parser, mind.", "agent_heard": False}}])
+
+    def test_a_turn_takes_every_message_sent_in(self):
+        results = []
+
+        class Model(FakeModel):
+            def complete(model, packet, cancel, on_speech=None):
+                if not results:
+                    results.extend(self.voice.steer(f"note {i}") for i in range(10))
+                return FakeModel.complete(model, packet, cancel)
+
+        self.voice.model = Model(dict(speech="Right.", task=None), dict(speech="Noted.", task=None))
+        self.voice.ask("Hi")
+        self.assertEqual(results, [True] * 10)  # no cap: none is left queued behind the turn
+        self.assertEqual(len(self.voice.model.packets), 2)  # all heard together, answered once
+
+    def test_nothing_is_taken_between_turns_or_after_a_cancel(self):
+        self.assertFalse(self.voice.steer("nothing running"))
+        self.voice.model = FakeModel(dict(speech="One.", task=None))
+        sent = []
+
+        def on_text(_):
+            self.voice.cancel()
+            sent.append(self.voice.steer("after the cancel"))
+
+        self.voice.ask("Hi", on_text=on_text)
+        self.assertEqual(sent, [False])
+
 
 class VoiceModelTests(unittest.TestCase):
     """The voice model: the chat's own pick when it is a Claude, Codex or Local model; [conversation].model
@@ -374,7 +619,7 @@ class TransportTests(unittest.TestCase):
         with patch("vision.conversation.find_claude", return_value="claude"):
             cmd = model._command()
         self.assertEqual(cmd[cmd.index("--tools") + 1], "WebSearch,WebFetch")
-        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "WebSearch,WebFetch")
+        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "")  # each web call is vetted (the weather guard)
         self.assertEqual(json.loads(cmd[cmd.index("--mcp-config") + 1]), {"mcpServers": {}})
         for flag in ("--safe-mode", "--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands", "--system-prompt"):
             self.assertIn(flag, cmd)
@@ -388,7 +633,7 @@ class TransportTests(unittest.TestCase):
             cmd = ClaudeConversation(cfg)._command()
         self.assertEqual(cmd[cmd.index("--tools") + 1], "")
         self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "")
-        self.assertIn("no tools", cmd[cmd.index("--system-prompt") + 1])
+        self.assertIn("Your only tool is `weather`", cmd[cmd.index("--system-prompt") + 1])
 
     def model(self, mode="normal"):
         cfg = Config()

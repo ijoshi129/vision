@@ -1139,6 +1139,24 @@ class SubagentTests(unittest.TestCase):
         self.assertEqual(closes, [])  # a steered reply waits a moment for the queued message instead of closing at once
         self.assertFalse(brain.steer("after the turn"))
 
+    def test_a_task_worker_takes_an_update_and_its_last_result_stands(self):
+        brain = self._brain()
+        brain.task_mode = True
+        first = {"status": "completed", "summary": "Ran the tests."}
+        second = {"status": "completed", "summary": "Stopped before the tests, as asked."}
+        events = [{"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-x"}, *self._text("x"),
+                  {"type": "result", "subtype": "success", "session_id": "s1", "result": "", "structured_output": first},
+                  {"type": "result", "subtype": "success", "session_id": "s1", "result": "", "structured_output": second}]
+        proc = _Process(events)
+        proc.returncode = None
+        proc.wait = lambda timeout=None: 0
+        sent = []
+        with patch("subprocess.Popen", return_value=proc):
+            turn = brain.ask("task", on_text=lambda d: sent.append(brain.steer('{"type": "vision_task_update"}')))
+        self.assertEqual(sent, [True])
+        self.assertIn("vision_task_update", proc.stdin.value)
+        self.assertEqual(turn.data, second)
+
     def test_a_subagents_bash_task_is_not_a_second_agent_row(self):
         # A Bash command that runs a few seconds inside a subagent gets task events of its own
         # (task_type local_bash), which must not open an `agent · <description> · 0 tools · 0.0s` row.

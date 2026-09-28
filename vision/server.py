@@ -449,6 +449,7 @@ class Chat:
             "questions": self._questions if self._question is not None and not self._question.done() else [],
             "partial": self.partial if self.busy else "",
             "user_text": self.user_text if self.busy else "",
+            "queued": [item[0] for item in self._pending],  # a phone opened cold gets its queued bubbles back
             "agents": list(self.agents.values()) if self.busy else [],
             "tools": list(self.tools.values()) if self.busy else [],
             "created": self.created,
@@ -626,6 +627,10 @@ class Chat:
             try:
                 sp = await loop.run_in_executor(None, self.hub.speaker)
                 wire = WireSpeaker(sp, sink=lambda seq, wav: self.post({"type": "audio", "seq": seq, "wav": base64.b64encode(wav).decode()}))
+                if voice:
+                    from vision.cli import _arm_filler
+
+                    _arm_filler(wire, sp, self.hub.cfg.voice)  # "One sec." if the first words are late
             except Exception as e:  # noqa: BLE001
                 self.post({"type": "note", "text": f"voice unavailable: {e}"})
         self._wire = wire
@@ -915,6 +920,10 @@ class LinkedChat:
                 try:
                     sp = self.hub.speaker()
                     self._wire = WireSpeaker(sp, sink=lambda seq, wav: self.post({"type": "audio", "seq": seq, "wav": base64.b64encode(wav).decode()}))
+                    if ev.get("voice"):
+                        from vision.cli import _arm_filler
+
+                        _arm_filler(self._wire, sp, self.hub.cfg.voice)
                 except Exception as e:  # noqa: BLE001
                     self.post({"type": "note", "text": f"voice unavailable: {e}"})
             self.post(ev)
@@ -1240,9 +1249,14 @@ class Hub:
     # -- models (lazy, thread-safe)
     def speaker(self) -> Speaker:
         with self._lock:
-            if self._speaker is None:
+            fresh = self._speaker is None
+            if fresh:
                 self._speaker = Speaker(self.cfg.voice)
         self._speaker._load()
+        if fresh and self.cfg.voice.filler:
+            # Its "One sec." clips, made once and cached on disk; a turn before they are ready just stays quiet.
+            sp, phrases = self._speaker, self.cfg.voice.filler_phrases
+            threading.Thread(target=lambda: sp.prepare_fillers(phrases), daemon=True).start()
         return self._speaker
 
     def stt(self):

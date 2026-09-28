@@ -56,7 +56,10 @@ def _tool_notes(
     if weather:
         lines.append(
             "For the weather, run `vision weather [place]` in your shell (Apple WeatherKit, instant) instead of "
-            "searching the web; it names the place it answered for. It covers now and today; add `--tomorrow` or "
+            "searching the web, for every weather question; it names the place it answered for. Name towns with "
+            "their state or country (\"Austin, TX\"); several go in one call split by semicolons "
+            "(`vision weather \"Austin, TX; Dallas, TX\"`), and for a state or region pick its main towns yourself. "
+            "It covers now and today; add `--tomorrow` or "
             "`--week` only when the user asked that far ahead. Answer like a mate glancing out of the window: "
             "\"Mostly cloudy, 65.\" A short second sentence only for rain or a change coming today, or an alert: "
             "\"Rain from about seven till two, high of 73.\" For rain, always say when it stops or that it lasts all day. Skip \"right now\", the place unless they asked about one, and "

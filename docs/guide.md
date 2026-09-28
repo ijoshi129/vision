@@ -203,8 +203,7 @@ exclaims, conversational otherwise. `~/.local/state/vision/voice.log` records wh
 In a spoken conversation the reply's first words can take a while (transcription, then the model's own
 thinking: a second on a good turn, twenty on a hard one). Rather than dead air, the voice says a short
 "One sec." or "Let me see." when nothing has started `filler_after_ms` after you stop talking, and the
-reply follows it; "Still on it." once more if it is still coming `filler_again_ms` later. The phrases
-(`filler_phrases`, `filler_later_phrases` under `[voice]`) are made in your voice at warm-up and cached
+reply follows it. The phrases (`filler_phrases` under `[voice]`) are made in your voice at warm-up and cached
 under `~/.local/state/vision/fillers`, so they cost nothing on the turn; `filler = false` turns it off.
 
 Vision streams the model rather than waiting for whole clips. `vision/talker.py` replaces the library's
@@ -233,7 +232,11 @@ it. With an Apple Developer membership the same answer comes straight from Weath
 report while the rest of the turn is prepared and hands it to the voice
 model as data, so the model never searches. The report only goes as far as the question: "what's it
 like out?" gets now, the next twelve hours and today; "tomorrow" adds tomorrow; "the weekend", "this
-week" or a day name gets the whole outlook. The typed brain runs `vision weather [place]` for the
+week" or a day name gets the whole outlook. When the voice model needs a report it wasn't handed
+(another place, another day) it asks WeatherKit itself through the `weather` field of its reply. Its
+web tools never serve the weather: a Claude voice model's WebSearch or WebFetch call for the weather
+(or to a weather site) is refused in code and answered with the WeatherKit report, and so is a
+front-end search for it. The typed brain runs `vision weather [place]` for the
 same report. Apple requires the attribution, so every report ends with "Apple Weather".
 
 Setup, once, at [developer.apple.com](https://developer.apple.com/account/resources):

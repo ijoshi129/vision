@@ -78,6 +78,18 @@ class SplitReplyTests(unittest.TestCase):
     def _screen(self) -> ChatScreen:
         return _chat_screen(self)
 
+    def test_queue_hold_wins_after_worker_observed_readiness(self):
+        from vision.turnqueue import QueuedTurn, TurnQueue
+
+        turns = TurnQueue()
+        item = turns.put(QueuedTurn("edit me", shown=True))
+        self.assertTrue(turns.wait_free(0))
+        turns.hold()
+        self.assertEqual(turns.pop_if_free(), (False, None))
+        self.assertEqual(turns.shown(), [item])
+        turns.release()
+        self.assertEqual(turns.pop_if_free(), (True, item))
+
     def test_past_tool_calls_keep_their_place_and_can_be_opened(self):
         from vision.brain import ToolCall
 

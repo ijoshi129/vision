@@ -104,7 +104,17 @@ class Supervisor:
         self.runs: dict[str, Run] = {}
         self._by_key: dict[str, Run] = {}
         self._lock = threading.Lock()
-        self.active: Run | None = None  # the run executing right now (cancel target)
+        self._running: dict[str, Run] = {}  # runs executing right now, in launch order (several may at once)
+
+    @property
+    def active(self) -> Run | None:
+        """The run launched most recently of those executing now."""
+        with self._lock:
+            return next(reversed(self._running.values()), None)
+
+    def running(self) -> list[Run]:
+        with self._lock:
+            return list(self._running.values())
 
     # -- validation -----------------------------------------------------------------
     def resolve(self, agent: str | None, model: str | None, effort: str) -> tuple[str, str, str]:
@@ -257,7 +267,8 @@ class Supervisor:
         label = model_label(run.model) or run.model or "the worker"
         rc = self.cfg.router
         _set(run, "running")
-        self.active = run
+        with self._lock:
+            self._running[run.id] = run
         if on_status:
             on_status(f"{label} is starting…")
         box: dict = {}
@@ -278,7 +289,8 @@ class Supervisor:
             except Exception:  # noqa: BLE001
                 pass
             t.join(5)
-        self.active = None
+        with self._lock:
+            self._running.pop(run.id, None)
         turn: Turn | None = box.get("turn")
         if timed_out:
             run.error = f"timed out after {rc.timeout_s:.0f} s"
@@ -342,6 +354,37 @@ class Supervisor:
                 run.row.details = report_lines(run)
             self.log("cancelled", run=run)
         return run
+
+    def steer(self, text: str) -> bool:
+        """Pass what the user said mid-reply into every run working right now, as a task update each
+        folds into its own task at its next step (one it doesn't concern carries on). False when nothing
+        is running or no running brain can take one (a local worker); the conversation model still hears
+        it either way."""
+        heard = False
+        for run in self.running():
+            steer = getattr(run.worker, "steer", None) if run.state == "running" else None
+            if steer is None:
+                continue
+            try:
+                ok = bool(steer(json.dumps({"type": "vision_task_update", "message": text})))
+            except Exception:  # noqa: BLE001  (a worker that can't take it now just misses the update)
+                ok = False
+            if ok:
+                self.log("steered", run=run, text=text)
+                heard = True
+        return heard
+
+    def tell_peers(self, objective: str) -> None:
+        """Tell every run at work that another agent has started in the same folder, so each keeps off
+        the other's files and builds. One that can't take a message mid-run just misses it."""
+        for run in self.running():
+            steer = getattr(run.worker, "steer", None) if run.state == "running" else None
+            if steer is None:
+                continue
+            try:
+                steer(json.dumps({"type": "vision_peer_started", "objective": objective}))
+            except Exception:  # noqa: BLE001
+                pass
 
     def waiting(self) -> Run | None:
         """The run waiting for the user's answer (the most recent one, if several)."""

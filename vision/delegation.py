@@ -134,7 +134,15 @@ def worker_prompt(cfg, workdir: str, provider: str, sandbox: str = "", approval:
         "question instead of using AskUserQuestion. Plan approval forms are still allowed. "
         "The user's answer to a needs_input question arrives in this same session as a message "
         '{"type": "vision_task_answer", "answer": ...}: carry on with the original task from where you '
-        "stopped and return the result object again; never start the task over."
+        "stopped and return the result object again; never start the task over. "
+        'A message {"type": "vision_task_update", "message": ...} is the user speaking while you work: '
+        "if it changes what they want (stop, skip, narrow, add), adjust the same task; otherwise carry on. "
+        "Other agents may be working alongside you, so an update about separate work (another task, "
+        "another agent) is not yours: leave it to Vision and carry on with your own. "
+        'A message {"type": "vision_peer_started", "objective": ...} means another agent has just started '
+        "work in this same folder: keep off the files that work is likely to change, re-read any shared file "
+        "just before you edit it, and don't build, install or run the app at the same time as it; then carry on. "
+        "Your result always covers the whole task, never just the update."
         + (_approval_notes(approval) if approval else "")
         + ("\nWork in two steps. First call your tools to actually look and act: the task is about the real "
            "files and system, and a result written from imagination is a failure. Only when the tool "

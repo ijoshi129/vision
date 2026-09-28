@@ -1236,10 +1236,11 @@ class Brain:
         """Send a message into the running turn, as Claude Code does with what is typed while it works:
         the model takes it at its next step (between tool calls), or at once if the turn is only
         waiting on background work. False when no turn is running or it is already closing; the
-        caller then queues the message as the next turn."""
+        caller then queues the message as the next turn. A task worker takes one too (the voice
+        layer's task update): a result after it replaces the one before, so each covers the whole task."""
         with self._lock:
             proc = self._proc
-        if proc is None or proc.poll() is not None or self.task_mode:
+        if proc is None or proc.poll() is not None:
             return False
         with self._stdin_lock:
             if not self._stdin_open:

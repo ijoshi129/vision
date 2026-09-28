@@ -50,6 +50,13 @@ class TurnQueue:
         with self._lock:
             return self._items.pop(0) if self._items else None
 
+    def pop_if_free(self) -> tuple[bool, QueuedTurn | None]:
+        """Take the next turn only if editing has not claimed the queue."""
+        with self._lock:
+            if not self._free.is_set():
+                return False, None
+            return True, self._items.pop(0) if self._items else None
+
     def take(self, qid: int) -> QueuedTurn | None:
         """Out of the queue (to edit, remove or send now); None if it has already gone."""
         with self._lock:
@@ -81,10 +88,12 @@ class TurnQueue:
 
     # -- hold: picking or editing in the strip
     def hold(self) -> None:
-        self._free.clear()
+        with self._lock:
+            self._free.clear()
 
     def release(self) -> None:
-        self._free.set()
+        with self._lock:
+            self._free.set()
 
     @property
     def held(self) -> bool:

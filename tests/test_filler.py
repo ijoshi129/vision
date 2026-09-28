@@ -30,7 +30,6 @@ class FillerSpeaker(FakeSpeaker):
 
 
 CLIPS = [("One sec.", clip()), ("Let me see.", clip())]
-LATER = [("Still on it.", clip(0.2))]
 
 
 class FillerTimingTests(unittest.TestCase):
@@ -78,15 +77,14 @@ class FillerTimingTests(unittest.TestCase):
         ss.finish()
         self.assertEqual(ss._chunks, [])
 
-    def test_later_filler_once_when_the_reply_is_still_coming(self):
+    def test_only_one_filler_however_late_the_reply(self):
         sp = FillerSpeaker()
         ss = StreamingSpeaker(sp)
-        ss.arm_filler(CLIPS, 0.05, later=LATER, again_s=0.2)
+        ss.arm_filler(CLIPS, 0.05)
         time.sleep(0.8)
         ss.feed("Done. ")
         ss.finish()
-        self.assertEqual([c[0] for c in ss._chunks], [0, 0, len("Done. ")])
-        self.assertEqual(sp.last_filler, "Still on it.")
+        self.assertEqual([c[0] for c in ss._chunks], [0, len("Done. ")])
 
     def test_never_the_same_phrase_twice_running(self):
         sp = FillerSpeaker()

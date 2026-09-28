@@ -257,16 +257,13 @@ port = 8766
 # Output device index or name substring (a PipeWire sink name such as "Snowball" works too). Empty = system default.
 output_device = ""
 # A spoken conversation: when the reply's first words have not started filler_after_ms after you stop
-# talking (transcription and the model's own thinking time), the voice says a short "one sec" instead of
+# talking (transcription and the model's own thinking time), the voice says a short "hmm" instead of
 # leaving dead air, then the reply follows. The phrases are made in the current voice at warm-up and kept
-# under ~/.local/state/vision/fillers, so they cost nothing on the turn. One is picked at random, never the
-# same one twice running. If the reply still has not started filler_again_ms later, one of the later
-# phrases is said, once (0 = never). false turns the filler off.
+# under ~/.local/state/vision/fillers, so they cost nothing on the turn. With several listed, one is picked
+# at random, never the same one twice running. false turns the filler off.
 filler = true
 filler_after_ms = 700
-filler_again_ms = 10000
-filler_phrases = ["One sec.", "Let me see.", "Hmm, let me think.", "Right, let me have a look.", "Hang on a moment.", "Let me check."]
-filler_later_phrases = ["Still on it.", "Bear with me.", "Nearly there."]
+filler_phrases = ["Hmm."]
 
 [listen]
 # Input device index or name substring (a PipeWire source name such as "Snowball" works too).
@@ -367,9 +364,8 @@ VOICES = ("tara", "leah", "jess", "leo", "dan", "mia", "zac", "zoe")
 VOICE_PRESETS = {"friday": "tara"}
 
 
-# What the voice says while a spoken reply is still coming ([voice] filler_phrases / filler_later_phrases).
-FILLER_PHRASES = ("One sec.", "Let me see.", "Hmm, let me think.", "Right, let me have a look.", "Hang on a moment.", "Let me check.")
-FILLER_LATER_PHRASES = ("Still on it.", "Bear with me.", "Nearly there.")
+# What the voice says while a spoken reply is still coming ([voice] filler_phrases).
+FILLER_PHRASES = ("Hmm.",)
 
 
 def voice_dir(name: str) -> Path:
@@ -508,9 +504,7 @@ class VoiceConfig:
     # Something to say while the reply is still coming: see [voice] filler in DEFAULT_CONFIG.
     filler: bool = True
     filler_after_ms: int = 700
-    filler_again_ms: int = 10000
     filler_phrases: list[str] = field(default_factory=lambda: list(FILLER_PHRASES))
-    filler_later_phrases: list[str] = field(default_factory=lambda: list(FILLER_LATER_PHRASES))
 
 
 @dataclass
@@ -629,9 +623,7 @@ def load_config() -> Config:
     _read_cli_logins = cfg.brain.read_cli_logins is not False
     vc = cfg.voice
     vc.filler_after_ms = max(0, int(vc.filler_after_ms or 0))
-    vc.filler_again_ms = max(0, int(vc.filler_again_ms or 0))
     vc.filler_phrases = [str(x).strip() for x in (vc.filler_phrases if isinstance(vc.filler_phrases, list) else []) if str(x).strip()]
-    vc.filler_later_phrases = [str(x).strip() for x in (vc.filler_later_phrases if isinstance(vc.filler_later_phrases, list) else []) if str(x).strip()]
     router = raw.get("router", {})
     for k, v in router.items():
         if k in ("agents", "limits", "permissions"):

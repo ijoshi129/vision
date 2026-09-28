@@ -1405,17 +1405,15 @@ class StreamingSpeaker:
     # reply's stream, and the reply follows it after an ordinary sentence gap. A sentence that arrives
     # first cancels the clock. The clip is not in the reply's text, so it is counted as a chunk of zero
     # source characters: the text reveal waits on it, nothing runs ahead.
-    def arm_filler(self, clips: list[tuple[str, np.ndarray]], after_s: float,
-                   later: list[tuple[str, np.ndarray]] | None = None, again_s: float = 0.0) -> None:
-        """Say one of `clips` unless the reply starts within `after_s`; then one of `later` if it still
-        has not started `again_s` after that (0 = never)."""
+    def arm_filler(self, clips: list[tuple[str, np.ndarray]], after_s: float) -> None:
+        """Say one of `clips` unless the reply starts within `after_s`."""
         if not clips or after_s < 0:
             return
         with self._filler_lock:
             if self._emitted or self._closed:
                 return
             self._cancel_filler()
-            self._filler_timer = threading.Timer(after_s, self._fire_filler, args=(clips, later or [], again_s))
+            self._filler_timer = threading.Timer(after_s, self._fire_filler, args=(clips,))
             self._filler_timer.daemon = True
             self._filler_timer.start()
 
@@ -1424,7 +1422,7 @@ class StreamingSpeaker:
             self._filler_timer.cancel()
             self._filler_timer = None
 
-    def _fire_filler(self, clips, later, again_s: float) -> None:
+    def _fire_filler(self, clips) -> None:
         with self._filler_lock:
             if self._emitted or self._closed or self.speaker._stop.is_set():
                 return
@@ -1439,10 +1437,6 @@ class StreamingSpeaker:
             self._audio_q.put((self._shape(audio, True, True, pause), 0, True))
             if self.timing:
                 self.timing.event("filler")
-            if later and again_s > 0:
-                self._filler_timer = threading.Timer(again_s, self._fire_filler, args=(later, [], 0.0))
-                self._filler_timer.daemon = True
-                self._filler_timer.start()
 
     def _shape(self, audio: np.ndarray, first: bool, last: bool, pause: float = 0.0) -> np.ndarray:
         """Edge fades against clicks on a chunk's first and last piece, then `pause` seconds of silence."""

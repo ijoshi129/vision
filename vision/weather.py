@@ -33,12 +33,25 @@ ATTRIBUTION = "Apple Weather"
 # Words that make a spoken request about the weather. Kept deliberately narrow: "it's boiling in
 # here" is not a forecast request, "is it going to rain" is.
 _WEATHER_WORDS = re.compile(
-    r"\b((?<!under the )weather|forecast|temperature|rain(?:ing|y|fall)?|snow(?:ing|y)?|sunny|sunshine|cloudy|overcast|"
-    r"humid(?:ity)?|windy|wind speed|storm(?:y|s)?|thunder|hail|sleet|fog(?:gy)?|drizzle|umbrella|"
+    r"\b((?<!under the )(?:weather|wheather|weahter|weathr)|forecast|forcast|temperature|rain(?:ing|y|fall)?|snow(?:ing|y)?|"
+    r"sunny|sunshine|cloudy|overcast|humid(?:ity)?|muggy|windy|breezy|wind speed|wind ?chill|storm(?:y|s)?|thunder|hail|sleet|"
+    r"fog(?:gy)?|drizzle|umbrella|brolly|frost(?:y)?|heat ?wave|heat index|precipitation|uv index|sunrise|sunset|"
+    r"hurricane|tornado|blizzard|"
     r"degrees|celsius|fahrenheit|how (?:hot|cold|warm|chilly) (?:is it|will it be|is it going to be)|"
-    r"(?:hot|cold|warm|chilly|freezing|nice) (?:out|outside|today|tomorrow|tonight|this (?:morning|afternoon|evening|week|weekend)))\b",
+    r"(?:what(?:'s| is) the |the )temps?|temps? (?:out|outside|today|tonight|tomorrow)|"
+    r"(?:like|looking|doing) (?:out|outside|out there)|"
+    r"(?:need|bring|take|wear|grab|pack) (?:a |an |my |some )?(?:coat|jacket|raincoat|sunscreen|sun cream|gloves|scarf|layers)|"
+    r"(?:hot|cold|warm|chilly|freezing|nice|dry|wet|mild|icy|grey|gray|lovely|miserable) "
+    r"(?:out|outside|today|tomorrow|tonight|later|this (?:morning|afternoon|evening|week|weekend)))\b",
     re.IGNORECASE,
 )
+# "temperature" and "degrees" on their own are just as often about a model, an oven or a fever.
+_NOT_WEATHER = re.compile(
+    r"\b(?:model|llm|gpt|claude|sampling|top[_ -]?[pk]|api|param(?:eter)?s?|config|gpu|cpu|oven|fridge|freezer|body|"
+    r"fever|water|bath|room|coffee|tea|cook(?:ing)?|bake|baking|roast|university|college|angle|triangle|rotate|radians?|convert(?:ing)?|latitude)\b",
+    re.IGNORECASE,
+)
+_WEAK = ("temperature", "degrees", "celsius", "fahrenheit")
 _PLACE = re.compile(
     r"\b(?:in|for|at|around|over in|up in|down in)\s+"
     r"((?:[A-Z][\w'.-]*|St\.?|de|del|la|le|of|on|the|upon)(?:[ -](?:[A-Z][\w'.-]*|de|del|la|le|of|on|the|upon))*)"
@@ -78,12 +91,186 @@ class Place:
 
 
 def is_weather_request(text: str) -> bool:
-    return bool(_WEATHER_WORDS.search(text or ""))
+    hits = [m.group(0).lower() for m in _WEATHER_WORDS.finditer(text or "")]
+    if not hits:
+        return False
+    return not (all(h.startswith(_WEAK) for h in hits) and _NOT_WEATHER.search(text))
+
+
+# --- the web is never the weather source ---------------------------------------------------------
+# The conversation model has web tools for everything else; a weather search or a weather site is
+# turned back to WeatherKit in code (the model is told why and given the report). These checks are
+# stricter than is_weather_request: they judge a terse search query or a URL, and a false hit would
+# block an ordinary search.
+WEATHER_HOSTS = (
+    "weather.com", "accuweather.com", "wunderground.com", "weather.gov", "nws.noaa.gov", "metoffice.gov.uk",
+    "weatherbug.com", "windy.com", "meteoblue.com", "yr.no", "openweathermap.org", "weatherapi.com", "open-meteo.com",
+    "wttr.in", "weather.us", "theweathernetwork.com", "weatherzone.com.au", "weatheravenue.com", "foreca.com",
+    "weather-forecast.com", "timeanddate.com/weather", "bbc.co.uk/weather", "bbc.com/weather", "weather.apple.com",
+    "msn.com/en-us/weather", "weathernews.jp", "tomorrow.io", "ventusky.com", "zoom.earth", "weather.metoffice.gov.uk",
+)
+_CODE_HOSTS = ("github.com", "gitlab.com", "pypi.org", "npmjs.com", "stackoverflow.com", "developer.apple.com")
+_SEARCH_WEATHER = re.compile(
+    r"\b(?:(?<!under the )weather(?!\s+(?:the|a|an|out|through)\b)|wheather|weahter|"
+    r"(?:weather|rain|snow|temperature|pollen|uv|surf|ski|marine|hourly|daily|extended|local|\d+[- ]day|"
+    r"today'?s|tonight'?s|tomorrow'?s|weekend) forecasts?|forecasts? (?:for )?(?:today|tonight|tomorrow|this week(?:end)?)|"
+    r"(?:will|is|does) it (?:be )?(?:going to )?(?:rain|raining|snow|snowing|hot|cold|sunny|windy|freezing)|"
+    r"how (?:hot|cold|warm|chilly) is it|chance of (?:rain|snow|showers|storms|thunderstorms)|"
+    r"wind ?chill|heat index|feels like temperature|accuweather|wunderground|weatherbug|wttr)\b",
+    re.IGNORECASE,
+)
+_CONDITION = re.compile(
+    r"\b(?:temperature|temps|rain(?:ing|fall)?|snow(?:ing|fall)?|sunny|humidity|windy|wind speed|thunderstorms?|hail|sleet|"
+    r"foggy|drizzle|heat ?wave|frost|precipitation|uv index)\b",
+    re.IGNORECASE,
+)
+_LIVE = re.compile(  # case matters only for the place: "rain in Paris", not "rain in the garden"
+    r"(?i:\b(?:today|tonight|tomorrow|now|right now|currently|current|this (?:morning|afternoon|evening|week|weekend)|"
+    r"next (?:few|\d+) days|hourly|outside|near me|local|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|"
+    r"fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b)|\b(?:in|at|for|near)\s+[A-Z]",
+)
+_NOT_WEATHER_SEARCH = re.compile(
+    r"\b(?:api|sdk|library|package|npm|pip|github|python|javascript|swift|json|dataset|icon|emoji|stock|shares|ticker|"
+    r"recession|company|jobs?|lyrics|song|album|band|movie|film|sales|revenue|earnings|economic|"
+    r"economy|market|gdp|inflation|budget|demand|financial|election|polls?|llm|gpt|model|sampling|gpu|cpu|oven|body|fever)\b",
+    re.IGNORECASE,
+)
+
+
+def is_weather_search(query: str) -> bool:
+    """True when a web search query is after the weather: "London weather tomorrow", "will it rain
+    in Paris", "temperature in NYC now". "Weather API python", "Purple Rain lyrics" and "sales
+    forecast 2026" are ordinary searches."""
+    query = query or ""
+    if _NOT_WEATHER_SEARCH.search(query):
+        return False
+    if any(h in query.lower() for h in WEATHER_HOSTS):
+        return True
+    return bool(_SEARCH_WEATHER.search(query) or (_CONDITION.search(query) and _LIVE.search(query)))
+
+
+def is_weather_url(url: str) -> bool:
+    """True for a weather site or page: a known forecast host, a /weather or /forecast page, or a
+    search-engine URL whose query is a weather search."""
+    try:
+        parts = urllib.parse.urlsplit(url or "")
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower().removeprefix("www.")
+    where = host + parts.path.lower()
+    if any(where == h or where.startswith(h + "/") or host.endswith("." + h) or host == h for h in WEATHER_HOSTS):
+        return True
+    for value in urllib.parse.parse_qs(parts.query).get("q", []) + urllib.parse.parse_qs(parts.query).get("query", []):
+        if is_weather_search(value):
+            return True
+    if any(host == h or host.endswith("." + h) for h in _CODE_HOSTS):
+        return False
+    return bool(re.search(r"/(?:weather|forecast)(?:[/?#.-]|$)", parts.path.lower()))
+
+
+def web_weather(tool: str, tool_input: dict) -> str | None:
+    """What a web tool call is really asking the weather for, or None when it is an ordinary lookup:
+    the search query or fetched URL that gives it away. `tool` is WebSearch/WebFetch (Claude's names)
+    or web_search."""
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    if tool in ("WebFetch", "web_fetch"):
+        url = str(tool_input.get("url") or "")
+        return url if is_weather_url(url) else None
+    query = str(tool_input.get("query") or "")
+    domains = [str(d) for d in (tool_input.get("allowed_domains") or tool_input.get("domains") or [])]
+    if is_weather_search(query) or any(is_weather_url("https://" + d.split("://")[-1]) for d in domains):
+        return query or ", ".join(domains)
+    return None
+
+
+_SEARCH_FILLER = {
+    "what", "whats", "what's", "is", "it", "the", "a", "an", "like", "in", "for", "at", "near", "me", "now", "right", "current",
+    "currently", "today", "tonight", "tomorrow", "this", "week", "weekend", "morning", "afternoon", "evening", "next", "days",
+    "day", "hourly", "daily", "local", "forecast", "forecasts", "weather", "conditions", "temperature", "temps", "will", "be",
+    "going", "to", "rain", "raining", "snow", "snowing", "sunny", "humidity", "wind", "windy", "speed", "how", "hot", "cold",
+    "warm", "chance", "of", "report", "outside", "later", "and", "or", "degrees", "fahrenheit", "celsius", "live", "update",
+    "does", "do", "i", "need", "umbrella", "on", "extended", "radar", "precipitation", "uv", "index", "high", "low",
+    "accuweather", "wunderground", "weatherbug", "wttr",
+}
+
+
+def search_place(query: str) -> str | None:
+    """The place a weather search is about ("London weather tomorrow" → "London"), else None."""
+    place = requested_place(query)
+    if place:
+        return place
+    words = [w for w in re.findall(r"[A-Za-z][\w'.-]*", query or "") if w.lower().rstrip("'s") not in _SEARCH_FILLER
+             and w.lower() not in _SEARCH_FILLER and w not in _NOT_PLACES and not _WEEK.fullmatch(w)]
+    if words and len(words) <= 5 and any(w[0].isupper() for w in words):
+        return " ".join(words).rstrip(".,?!")
+    return None
+
+
+def lookup(cfg: WeatherConfig, place: str | None = None, scope: str = "today") -> str:
+    """A WeatherKit report as data for the conversation model, whatever happens: an unknown place
+    falls back to home (and says so), and a failure says to tell the user, never to try the web."""
+    if not cfg.enabled:
+        return "Weather is switched off in Vision's config ([weather] enabled = false): say so. Never look it up on the web."
+    scope = scope if scope in ("today", "tomorrow", "week") else "today"
+    try:
+        try:
+            return shared(cfg).report(place or None, scope=scope)
+        except WeatherError as e:
+            short = re.sub(r"(?:[ ,]+[A-Z]{2,3})+$", "", place or "")  # "Springfield IL" → "Springfield"
+            if short and short != place:
+                try:
+                    return shared(cfg).report(short, scope=scope)
+                except WeatherError:
+                    pass
+            if not place:
+                raise
+            return shared(cfg).report(None, scope=scope) + f"\n(The place asked for was not available: {e} This is the home report.)"
+    except WeatherError as e:
+        return f"WeatherKit could not answer ({e}): say so. Never look the weather up on the web."
+    except Exception as e:  # never let the weather break the conversation
+        return f"WeatherKit could not answer ({type(e).__name__}: {e}): say so. Never look the weather up on the web."
+
+
+def lookup_many(cfg: WeatherConfig, places: "list[str | None]", scope: str = "today") -> str:
+    """One WeatherKit report per place, fetched side by side, in the order asked: "ten cities in Texas"
+    is one request. A place that can't be found says so in its slot instead of falling back to home."""
+    places = list(dict.fromkeys(places or [None]))[:MAX_PLACES]
+    if len(places) == 1 or not cfg.enabled:
+        return lookup(cfg, places[0], scope)
+    reports: list[str] = [""] * len(places)
+
+    def one(i: int, place: str | None) -> None:
+        try:
+            reports[i] = shared(cfg).report(place, scope=scope if scope in ("today", "tomorrow", "week") else "today")
+        except Exception as e:  # noqa: BLE001  (one bad place doesn't sink the rest)
+            reports[i] = f"{place or 'home'}: WeatherKit could not answer ({e})."
+
+    threads = [threading.Thread(target=one, args=(i, p), daemon=True) for i, p in enumerate(places)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(15)
+    return "\n\n".join(r or f"{p or 'home'}: WeatherKit timed out." for p, r in zip(places, reports))
 
 
 _WEEK = re.compile(r"\b(week|weekend|next (few|couple of|\d+) days|coming days|days ahead|"
                    r"mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.IGNORECASE)
 _TOMORROW = re.compile(r"\btomorrow\b", re.IGNORECASE)
+_STATES = {  # "Austin, TX": the geocoder knows states by name only
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California", "CO": "Colorado",
+    "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana",
+    "ME": "Maine", "MD": "Maryland", "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
+    "NM": "New Mexico", "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
+    "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont", "VA": "Virginia",
+    "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+}
+# States whose names are not also a big city ("New York", "Washington" are), so asked on their own they
+# mean the region.
+_REGIONS = {s.lower() for s in _STATES.values()} - {"new york", "washington", "district of columbia"}
+MAX_PLACES = 12  # places in one weather request
 
 
 def requested_scope(text: str) -> str:
@@ -210,13 +397,23 @@ class WeatherKit:
         raise WeatherError("no home location: set weather.location (a place name) or latitude/longitude in the config.")
 
     def geocode(self, name: str) -> Place:
+        """A town by name. "Austin, TX" or "Paris, France" picks the match in that state or country
+        (Open-Meteo's search takes only the bare name); a bare "Texas" is a region, not a town, and is
+        refused rather than answered with a village that shares its name."""
         key = " ".join(name.lower().split())
+        town, *where = [p.strip() for p in name.split(",") if p.strip()] or [name.strip()]
+        if not where and town.lower() in _REGIONS:
+            raise WeatherError(f"{town} is a whole state, not a town: ask for its towns (\"Newark, NJ\").")
         cache = self._place_cache()
         if key in cache:
             return Place(**cache[key])
-        query = urllib.parse.urlencode({"name": name, "count": 1, "language": "en", "format": "json"})
+        query = urllib.parse.urlencode({"name": town, "count": 10, "language": "en", "format": "json"})
         data = self._fetch(f"{GEOCODE_URL}?{query}")
-        results = data.get("results") or []
+        results = [r for r in data.get("results") or [] if str(r.get("feature_code", "PPL")).startswith("PPL")]
+        wanted = [_STATES.get(w.upper().replace(".", ""), w).lower() for w in where]
+        if wanted:
+            results = [r for r in results if all(
+                w in {str(r.get(k) or "").lower() for k in ("admin1", "admin2", "country", "country_code")} for w in wanted)]
         if not results:
             raise WeatherError(f"I couldn't find a place called {name!r}.")
         r = results[0]
@@ -257,7 +454,7 @@ class WeatherKit:
             if not refresh and cached and time.monotonic() - cached[0] < REPORT_CACHE_S:
                 return cached[1]
             data = self._fetch(url, {"Authorization": f"Bearer {self.token()}"})
-            if key not in self._reports and len(self._reports) >= 8:
+            if key not in self._reports and len(self._reports) >= MAX_PLACES + 4:
                 self._reports.pop(next(iter(self._reports)))
             self._reports[key] = (time.monotonic(), data)
             return data

@@ -305,7 +305,7 @@ def _load_voice(speaker, vc) -> None:
     so this costs a few seconds once per voice. A clip that fails is simply not available."""
     speaker._load()
     if vc.filler:
-        speaker.prepare_fillers(vc.filler_phrases + vc.filler_later_phrases)
+        speaker.prepare_fillers(vc.filler_phrases)
 
 
 def _arm_filler(ss, speaker, vc) -> None:
@@ -314,8 +314,7 @@ def _arm_filler(ss, speaker, vc) -> None:
     if not vc.filler or vc.filler_after_ms <= 0:
         return
     try:
-        ss.arm_filler(speaker.fillers(vc.filler_phrases), vc.filler_after_ms / 1000,
-                      later=speaker.fillers(vc.filler_later_phrases), again_s=vc.filler_again_ms / 1000)
+        ss.arm_filler(speaker.fillers(vc.filler_phrases), vc.filler_after_ms / 1000)
     except Exception:  # noqa: BLE001  a filler is a nicety; never let it break a turn
         pass
 
@@ -1041,7 +1040,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             entry.gate = lambda: ss.spoken_position  # keep the sub-character timing for smooth frames
         started = time.time()
         journal_event("start", text=text)
-        link_post({"type": "start", "text": text, "speak": speak_remote})
+        link_post({"type": "start", "text": text, "speak": speak_remote, "voice": bool(voice_remote)})
         if link:
             link.post_summary(force=True)
 
@@ -1233,7 +1232,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                 if not pending.wait_free(0.25):
                     continue
                 with state["turn_lock"]:
-                    item = pending.pop()
+                    free, item = pending.pop_if_free()
+                    if not free:
+                        continue
                     if item is None:
                         # Hand the queue back while holding the same lock used by enqueue_turn.
                         # Otherwise a message arriving after pop() but before the old worker's
@@ -2097,7 +2098,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                     speaker().set_voice(arg or cfg.voice.voice)
                     note(f"voice → {speaker().voice}")
                     if speaker()._loaded and cfg.voice.filler:
-                        speaker().prepare_fillers(cfg.voice.filler_phrases + cfg.voice.filler_later_phrases)
+                        speaker().prepare_fillers(cfg.voice.filler_phrases)
                 except Exception as e:
                     note(f"[red]{e}[/red]")
             background(go)
@@ -2326,6 +2327,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             "busy": screen.busy or state["turn_active"],
             "waiting": screen.form_open,
             "questions": screen.pending_questions,
+            "queued": [item.text for item in state["turn_queue"].shown()],
         }
 
     def link_frame(frame: dict):
@@ -2868,7 +2870,7 @@ def say(
 
 @app.command()
 def weather(
-    place: list[str] = typer.Argument(None, help="A place name. Omit for the home location in the config."),
+    place: list[str] = typer.Argument(None, help="A place name (\"Austin, TX\"), or several split by ';'. Omit for home."),
     tomorrow: bool = typer.Option(False, "--tomorrow", help="Add tomorrow to the report."),
     week: bool = typer.Option(False, "--week", help="The whole outlook: tomorrow and the days after."),
     raw: bool = typer.Option(False, "--raw", help="Print the WeatherKit JSON instead of the report."),
@@ -2876,17 +2878,20 @@ def weather(
     """Live weather from Apple WeatherKit (the report the voice hears; also for the typed brain).
 
     Covers now, the next twelve hours and today unless --tomorrow or --week asks for more."""
-    from vision.weather import WeatherError, WeatherKit
+    from vision.weather import WeatherError, WeatherKit, lookup_many
 
     cfg = load_config()
     wk = WeatherKit(cfg.weather)
     name = " ".join(place).strip() if place else None
+    scope = "week" if week else "tomorrow" if tomorrow else "today"
     try:
-        if raw:
+        if name and ";" in name and not raw:
+            print(lookup_many(cfg.weather, [p.strip() for p in name.split(";") if p.strip()], scope))
+        elif raw:
             spot = wk.geocode(name) if name else wk.default_place()
             print(json.dumps(wk.raw(spot), indent=1))
         else:
-            print(wk.report(name, scope="week" if week else "tomorrow" if tomorrow else "today"))
+            print(wk.report(name, scope=scope))
     except WeatherError as e:
         raise SystemExit(f"weather: {e}")
 

@@ -51,6 +51,67 @@ class RequestParsingTests(unittest.TestCase):
         for text in ("fix the bug in Main Street", "I feel under the weather today", "what's the time", ""):
             self.assertFalse(is_weather_request(text), text)
 
+    def test_everyday_phrasings_are_recognised(self):
+        for text in ("what's it like outside", "how's it looking out there", "do I need a coat today", "should I bring a jacket",
+                     "is it cold out", "what's the temp outside", "any frost tonight", "heatwave this week?", "what time is sunset",
+                     "is it going to be dry tomorrow", "wheather tomorrow", "how's the forcast", "UV index today"):
+            self.assertTrue(is_weather_request(text), text)
+
+    def test_temperature_of_other_things_is_not_the_weather(self):
+        for text in ("set the temperature to 0.2 for the model", "what temperature should I bake bread at",
+                     "convert 30 degrees to radians"):
+            self.assertFalse(is_weather_request(text), text)
+        self.assertTrue(is_weather_request("what's the temperature in London"))
+
+
+class WebGuardTests(unittest.TestCase):
+    """The web is never the weather source: weather searches and weather sites are caught, ordinary
+    lookups are not."""
+
+    def test_weather_searches_are_caught_and_their_place_found(self):
+        for query, place in (("London weather tomorrow", "London"), ("will it rain in Paris tomorrow", "Paris"),
+                             ("current temperature New York City", "New York City"), ("10-day forecast Boston", "Boston"),
+                             ("weather this weekend London", "London"), ("accuweather Lisbon", "Lisbon"),
+                             ("snow today Denver", "Denver"), ("chance of rain tomorrow", None), ("Weather in Tokyo", "Tokyo")):
+            self.assertTrue(weather.is_weather_search(query), query)
+            self.assertEqual(weather.search_place(query), place, query)
+
+    def test_ordinary_searches_pass(self):
+        for query in ("weather API python", "Purple Rain lyrics", "sales forecast 2026", "how to weather a recession",
+                      "python 3.14 release date", "LLM temperature sampling", "best university degrees",
+                      "Weather Channel stock price", "OKC Thunder score tonight", "rain garden plants", "news today"):
+            self.assertFalse(weather.is_weather_search(query), query)
+
+    def test_weather_sites_are_caught(self):
+        for url in ("https://weather.com/weather/today/l/abc", "https://forecast.weather.gov/MapClick.php?x",
+                    "https://www.bbc.co.uk/weather/2643743", "https://www.timeanddate.com/weather/uk/london",
+                    "https://api.open-meteo.com/v1/forecast?lat=1", "https://www.google.com/search?q=london+weather",
+                    "https://wttr.in/London"):
+            self.assertTrue(weather.is_weather_url(url), url)
+        for url in ("https://github.com/foo/weather", "https://www.bbc.co.uk/news/world", "https://docs.python.org/3/"):
+            self.assertFalse(weather.is_weather_url(url), url)
+
+    def test_web_weather_judges_each_tool(self):
+        self.assertEqual(weather.web_weather("WebSearch", {"query": "London weather"}), "London weather")
+        self.assertIsNotNone(weather.web_weather("WebSearch", {"query": "today", "allowed_domains": ["accuweather.com"]}))
+        self.assertIsNotNone(weather.web_weather("WebFetch", {"url": "https://weather.com/x", "prompt": "summarise"}))
+        self.assertIsNone(weather.web_weather("WebSearch", {"query": "python news"}))
+        self.assertIsNone(weather.web_weather("WebFetch", {"url": "https://example.com/", "prompt": "is it raining in London"}))
+
+    def test_lookup_never_raises_and_never_points_at_the_web(self):
+        wk = Mock()
+        wk.report.side_effect = lambda place, **kw: "home" if place is None else (_ for _ in ()).throw(WeatherError("no such place"))
+        cfg = WeatherConfig()
+        with patch.object(weather, "shared", return_value=wk):
+            self.assertEqual(weather.lookup(cfg), "home")
+            self.assertIn("This is the home report", weather.lookup(cfg, "Mordor"))
+            wk.report.side_effect = WeatherError("401")
+            self.assertIn("Never look the weather up on the web", weather.lookup(cfg))
+        wk.report.side_effect = lambda place, **kw: f"report for {place}" if place == "Springfield" else (_ for _ in ()).throw(WeatherError("x"))
+        with patch.object(weather, "shared", return_value=wk):
+            self.assertEqual(weather.lookup(cfg, "Springfield IL", "week"), "report for Springfield")  # state code dropped
+        self.assertIn("switched off", weather.lookup(WeatherConfig(enabled=False)))
+
     def test_named_place(self):
         self.assertEqual(requested_place("Is it going to rain in Lisbon tomorrow?"), "Lisbon")
         self.assertEqual(requested_place("weather for New York City please"), "New York City")
@@ -267,6 +328,28 @@ class GeocodeTests(unittest.TestCase):
             WeatherKit(WeatherConfig(location="London"), fetch=Mock()).report()
         self.assertIn("weather.team_id", str(ctx.exception))
 
+    def test_a_state_after_the_town_picks_that_one(self):
+        results = [{"name": "Springfield", "admin1": "Missouri", "country_code": "US", "feature_code": "PPLA2",
+                    "latitude": 37.2, "longitude": -93.3, "timezone": "America/Chicago"},
+                   {"name": "Springfield", "admin1": "Illinois", "country_code": "US", "feature_code": "PPLA",
+                    "latitude": 39.8, "longitude": -89.6, "timezone": "America/Chicago"}]
+        with patch.object(weather, "GEOCODE_CACHE", Path(tempfile.mkdtemp()) / "places.json"):
+            fetch = Mock(return_value={"results": results})
+            place = WeatherKit(WeatherConfig(), fetch=fetch).geocode("Springfield, IL")
+            self.assertEqual(place.name, "Springfield, Illinois")
+            self.assertIn("name=Springfield&", fetch.call_args[0][0])
+            with self.assertRaises(WeatherError):
+                WeatherKit(WeatherConfig(), fetch=fetch).geocode("Springfield, Oregon")
+
+    def test_a_bare_state_is_not_a_town(self):
+        fetch = Mock(return_value={"results": [{"name": "New Jersey", "admin1": "Siparia", "country_code": "TT",
+                                                "latitude": 10.1, "longitude": -61.4, "timezone": "America/Port_of_Spain"}]})
+        with patch.object(weather, "GEOCODE_CACHE", Path(tempfile.mkdtemp()) / "places.json"):
+            with self.assertRaises(WeatherError) as ctx:
+                WeatherKit(WeatherConfig(), fetch=fetch).geocode("New Jersey")
+        self.assertIn("whole state", str(ctx.exception))
+        fetch.assert_not_called()
+
 
 class PrefetchTests(unittest.TestCase):
     def setUp(self):
@@ -355,7 +438,142 @@ class ConversationInjectionTests(unittest.TestCase):
             turn = self.voice.ask("is it raining?")
         self.assertFalse(turn.is_error)
         self.assertIn("WeatherKit could not answer (401 from weatherkit.apple.com)", model.complete.call_args[0][0]["weather"])
+        self.assertNotIn("web search", model.complete.call_args[0][0]["weather"])
         self.assertEqual(turn.text, "Grey and mild.")
+
+    def test_the_model_can_ask_weatherkit_itself(self):
+        model = self._model()
+        model.complete.side_effect = [{"speech": "", "task": None, "weather": {"places": ["Lisbon"], "when": "tomorrow"}},
+                                      {"speech": "Sunny in Lisbon tomorrow.", "task": None}]
+        wk = Mock()
+        wk.report.return_value = "Live weather for Lisbon.\nSource: Apple Weather."
+        with patch.object(weather, "shared", return_value=wk):
+            turn = self.voice.ask("and what about my trip")
+        self.assertFalse(turn.is_error, turn.error)
+        wk.report.assert_called_once_with("Lisbon", scope="tomorrow")
+        events = model.complete.call_args[0][0]["turn"]["events"]  # the turn's events as they ended: the reply follows the report
+        self.assertEqual(events[-2], {"weather": wk.report.return_value})
+        self.assertEqual(turn.text, "Sunny in Lisbon tomorrow.")
+
+    def test_many_places_are_one_weather_call(self):
+        model = self._model()
+        towns = ["Houston, TX", "Dallas, TX", "Austin, TX"]
+        model.complete.side_effect = [{"speech": "", "task": None, "weather": {"places": towns}},
+                                      {"speech": "Hot everywhere.", "task": None}]
+        wk = Mock()
+        wk.report.side_effect = lambda place, scope: f"Live weather for {place}."
+        with patch.object(weather, "shared", return_value=wk):
+            turn = self.voice.ask("what's it like in three Texas cities")
+        self.assertFalse(turn.is_error, turn.error)
+        self.assertEqual(wk.report.call_count, 3)
+        self.assertEqual(model.complete.call_args[0][0]["turn"]["events"][-2],
+                         {"weather": "\n\n".join(f"Live weather for {t}." for t in towns)})
+
+    def test_a_weather_search_is_answered_from_weatherkit_and_never_reaches_the_web(self):
+        model = self._model()
+        model.complete.side_effect = [{"speech": "", "task": None, "search": {"query": "Paris weather tomorrow"}},
+                                      {"speech": "Rain in Paris.", "task": None}]
+        wk = Mock()
+        wk.report.return_value = "Live weather for Paris."
+        with patch.object(weather, "shared", return_value=wk), patch("vision.search.search") as search:
+            turn = self.voice.ask("how's my trip looking")
+        self.assertFalse(turn.is_error, turn.error)
+        search.assert_not_called()
+        wk.report.assert_called_once_with("Paris", scope="tomorrow")
+        self.assertEqual(model.complete.call_args[0][0]["turn"]["events"][-2], {"weather": "Live weather for Paris."})
+
+    def test_an_ordinary_search_still_searches(self):
+        from vision.search import SearchResult
+
+        model = self._model()
+        model.complete.side_effect = [{"speech": "", "task": None, "search": {"query": "python 3.14 release date"}},
+                                      {"speech": "October.", "task": None}]
+        hit = [SearchResult("Python 3.14", "https://python.org/", "Released in October.", "python.org", "")]
+        with patch.object(weather, "shared") as shared, patch("vision.search.search", return_value=hit) as search:
+            turn = self.voice.ask("when did python 3.14 come out")
+        self.assertFalse(turn.is_error, turn.error)
+        search.assert_called_once()
+        shared.assert_not_called()
+        self.assertIn("search_results", model.complete.call_args[0][0]["turn"]["events"][-2])
+
+
+class ClaudeWebToolGuardTests(unittest.TestCase):
+    """The Claude voice model's own WebSearch/WebFetch calls come to Vision for permission: a weather
+    call is denied with the WeatherKit report, anything else runs."""
+
+    def setUp(self):
+        from vision.conversation import ClaudeConversation
+
+        self.cfg = Config()
+        self.model = ClaudeConversation(self.cfg)
+        self.proc = SimpleNamespace(stdin=Mock())
+
+    def answer(self, tool, tool_input, subtype="can_use_tool"):
+        self.proc.stdin.reset_mock()
+        self.model._answer_control(self.proc, {"type": "control_request", "request_id": "r1",
+                                               "request": {"subtype": subtype, "tool_name": tool, "input": tool_input}})
+        msg = json.loads(self.proc.stdin.write.call_args[0][0])
+        self.assertEqual((msg["type"], msg["response"]["request_id"]), ("control_response", "r1"))
+        return msg["response"]
+
+    def test_command_routes_every_web_call_through_vision(self):
+        with patch("vision.conversation.find_claude", return_value="claude"):
+            cmd = self.model._command()
+        self.assertEqual(cmd[cmd.index("--permission-prompt-tool") + 1], "stdio")
+        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "")
+        self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "default")
+
+    def test_weather_search_is_denied_with_the_report(self):
+        wk = Mock()
+        wk.report.return_value = "Live weather for Leeds: rain.\nSource: Apple Weather."
+        with patch.object(weather, "shared", return_value=wk):
+            reply = self.answer("WebSearch", {"query": "Leeds weather tomorrow"})
+        self.assertEqual(reply["response"]["behavior"], "deny")
+        self.assertIn("never takes the weather from the web", reply["response"]["message"])
+        self.assertIn(wk.report.return_value, reply["response"]["message"])
+        wk.report.assert_called_once_with("Leeds", scope="tomorrow")
+        with patch.object(weather, "shared", return_value=wk):
+            reply = self.answer("WebFetch", {"url": "https://www.accuweather.com/en/gb/leeds", "prompt": "forecast"})
+        self.assertEqual(reply["response"]["behavior"], "deny")
+
+    def test_ordinary_web_calls_run_and_other_tools_do_not(self):
+        with patch.object(weather, "shared") as shared:
+            reply = self.answer("WebSearch", {"query": "python 3.14 release date"})
+            self.assertEqual(reply["response"], {"behavior": "allow", "updatedInput": {"query": "python 3.14 release date"}})
+            reply = self.answer("WebFetch", {"url": "https://docs.python.org/3/whatsnew/", "prompt": "summarise"})
+            self.assertEqual(reply["response"]["behavior"], "allow")
+        shared.assert_not_called()
+        self.assertEqual(self.answer("Bash", {"command": "ls"})["response"]["behavior"], "deny")
+        self.assertEqual(self.answer("", {}, subtype="hook_callback")["subtype"], "error")
+
+    def test_control_requests_are_answered_mid_turn(self):
+        """A fake CLI asks permission for two searches in one turn, then replies once it has both answers."""
+        import sys
+
+        script = """
+import json, sys
+sys.stdin.readline()
+for i, q in enumerate(["Leeds weather now", "python news"]):
+    print(json.dumps({"type": "control_request", "request_id": f"r{i}", "request": {"subtype": "can_use_tool", "tool_name": "WebSearch", "input": {"query": q}}}), flush=True)
+    answer = json.loads(sys.stdin.readline())
+    print(json.dumps({"type": "assistant", "message": {"content": []}, "seen": answer}), flush=True)
+    sys.stderr.write(answer["response"]["response"]["behavior"] + "\\n")
+    sys.stderr.flush()
+    open(sys.argv[1], "a").write(answer["response"]["response"]["behavior"] + "\\n")
+print(json.dumps({"type": "result", "structured_output": {"speech": "done", "task": None}}), flush=True)
+sys.stdin.readline()
+"""
+        out = Path(self.enterContext(tempfile.TemporaryDirectory())) / "answers"
+        self.addCleanup(self.model.close)
+        wk = Mock()
+        wk.report.return_value = "Live weather for Leeds."
+        with patch.object(self.model, "_command", return_value=[sys.executable, "-u", "-c", script, str(out)]), \
+                patch.object(weather, "shared", return_value=wk):
+            import threading
+
+            reply = self.model.complete({"history": [], "turn": {"user": "hi", "events": []}}, threading.Event())
+        self.assertEqual(reply["speech"], "done")
+        self.assertEqual(out.read_text().split(), ["deny", "allow"])
 
 
 if __name__ == "__main__":
