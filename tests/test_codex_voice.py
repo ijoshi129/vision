@@ -1,14 +1,13 @@
 """The Codex voice driver against a fake `codex app-server` that speaks the JSON-RPC protocol."""
 import json
 import os
-import stat
-import sys
 import tempfile
 import textwrap
 import threading
 import unittest
 from unittest.mock import patch
 
+from fake_exe import python_command
 from vision.brain import BrainError
 from vision.codex_voice import CodexConversation, strict_schema
 from vision.config import Config
@@ -44,11 +43,7 @@ class CodexVoiceTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.log = os.path.join(self.dir.name, "log.jsonl")
-        exe = os.path.join(self.dir.name, "codex")
-        with open(exe, "w") as f:
-            f.write(f"#!{sys.executable}\n" + FAKE)
-        os.chmod(exe, os.stat(exe).st_mode | stat.S_IEXEC)
-        self.exe = exe
+        self.exe = python_command(os.path.join(self.dir.name, "codex"), FAKE)  # a .cmd beside it on Windows
         self.cfg = Config()
         self.cfg.conversation.model = "gpt-5.6-luna"
         self.cfg.conversation.effort = "low"

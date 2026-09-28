@@ -194,6 +194,34 @@ def lock_nonblocking(fd: int) -> None:
         os.lseek(fd, pos, os.SEEK_SET)
 
 
+def held_elsewhere(fd: int) -> bool:
+    """Whether another process holds lock_nonblocking's lock on this file. Only probes: nothing is
+    held afterwards."""
+    if not WINDOWS:
+        import fcntl
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    import msvcrt
+
+    pos = os.lseek(fd, 0, os.SEEK_CUR)
+    try:
+        os.lseek(fd, 1 << 30, os.SEEK_SET)  # the byte lock_nonblocking locks
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return True
+        os.lseek(fd, 1 << 30, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # right away: Windows may keep a closed handle's lock a while
+        return False
+    finally:
+        os.lseek(fd, pos, os.SEEK_SET)
+
+
 def copy_text_windows(text: str) -> bool:
     """Put text on the Windows clipboard (CF_UNICODETEXT). False if the clipboard is busy or absent."""
     import ctypes
