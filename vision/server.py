@@ -1081,7 +1081,9 @@ class Hub:
                 from vision.models import provider_for
 
                 sid = state["session_id"]
-                if state["interrupted"] and provider_for(cfg.brain.model) == "local":
+                from vision.providers import cap
+
+                if state["interrupted"] and not cap(provider_for(cfg.brain.model), "keeps_partial_turns", True):
                     sid = None  # its saved model context ends at the last completed turn
                 brain = create_brain(cfg.brain, voice_mode=False, session_id=sid)
                 chat = self.open_chat(brain, cfg, title=state["title"], chat_id=chat_id, restored=state)
@@ -1653,9 +1655,11 @@ def create_app(hub: Hub) -> FastAPI:
         {"ok", "outcome", "message", "provider": the fresh usage row}."""
         from vision.usage import use_banked, usage_data
 
+        from vision.providers import names
+
         provider = str(body.get("provider") or "")
-        if provider not in ("claude", "codex"):
-            raise HTTPException(status_code=400, detail="provider must be claude or codex")
+        if provider not in names(banked_resets=True):
+            raise HTTPException(status_code=400, detail=f"provider must be {' or '.join(names(banked_resets=True))}")
         c = hub.chat(body.get("chat"))
         brain = getattr(c, "brain", None)
         cfg = getattr(c, "cfg", None) or hub.cfg

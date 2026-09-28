@@ -14,15 +14,11 @@ from dataclasses import dataclass
 from vision import models
 from vision.models import provider_label
 
-PROVIDERS = ("claude", "codex", "grok")
+from vision import providers as _registry
 
-# Every CLI ships its own updater; `--version` output differs per tool, hence the parsing below.
-_UPDATE_ARGS = {"claude": ["update"], "codex": ["update"], "grok": ["update"]}
-_INSTALL_HINTS = {
-    "claude": "curl -fsSL https://claude.ai/install.sh | bash, then run `claude` to log in",
-    "codex": "npm i -g @openai/codex, then run `codex login`",
-    "grok": "https://x.ai/cli, then run `grok login`",
-}
+PROVIDERS = _registry.with_cli()  # the providers Vision drives through a CLI
+
+# Every CLI ships its own updater (Provider.update_args); `--version` output differs per tool, hence the parsing below.
 _VERSION = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.]+)?")
 
 
@@ -51,23 +47,15 @@ class CliInfo:
 
 def find_cli(provider: str) -> str:
     """The executable for a provider; raises that provider's error when it is not installed."""
-    if provider == "claude":
-        from vision.brain import find_claude
-
-        return find_claude()
-    if provider == "codex":
-        from vision.codex import find_codex
-
-        return find_codex()
-    if provider == "grok":
-        from vision.grok import find_grok
-
-        return find_grok()
-    raise ValueError(f"unknown provider {provider!r}")
+    p = _registry.get(provider)
+    find = p.hook("find_cli") if p else None
+    if find is None:
+        raise ValueError(f"unknown provider {provider!r}" if p is None else f"{p.label} has no CLI")
+    return find()
 
 
 def install_hint(provider: str) -> str:
-    return _INSTALL_HINTS.get(provider, "")
+    return _registry.cap(provider, "install_hint", "")
 
 
 def parse_version(text: str) -> str | None:
@@ -144,7 +132,7 @@ class UpdateResult:
 # Claude Code's installer resolves "latest" from this bucket (npm is the fallback); Codex is a standalone
 # build whose numbers track the npm package; Grok has a check-only mode that honours its release channel.
 _CLAUDE_LATEST_URL = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest"
-_NPM_LATEST = {"claude": "https://registry.npmjs.org/@anthropic-ai/claude-code/latest", "codex": "https://registry.npmjs.org/@openai/codex/latest"}
+_NPM_LATEST = "https://registry.npmjs.org/{package}/latest"
 CHECK_TTL = 6 * 3600  # a check per provider is good for this long (the status bar asks on every repaint)
 
 
@@ -193,26 +181,40 @@ def _http_text(url: str, timeout: float) -> str:
 
 
 def latest_version(provider: str, timeout: float = 15) -> str:
-    """The newest released version of a CLI. Raises (OSError, ValueError, …) when it cannot be found."""
-    if provider == "grok":
-        r = subprocess.run([find_cli("grok"), "update", "--check", "--json"], capture_output=True, text=True, timeout=timeout, env=_env(), encoding="utf-8")
-        data = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
-        if data.get("error"):
-            raise ValueError(data["error"])
-        if not data.get("latestVersion"):
-            raise ValueError((r.stderr or r.stdout).strip()[:200] or "no version in `grok update --check`")
-        return data["latestVersion"]
-    if provider == "claude":
+    """The newest released version of a CLI: its own latest_version hook, else npm. Raises (OSError,
+    ValueError, …) when it cannot be found."""
+    p = _registry.get(provider)
+    own = p.hook("latest_version") if p else None
+    if own is not None:
         try:
-            v = parse_version(_http_text(_CLAUDE_LATEST_URL, timeout))
+            v = own(timeout)
             if v:
                 return v
         except OSError:
-            pass
-    v = json.loads(_http_text(_NPM_LATEST[provider], timeout)).get("version")
+            if not (p and p.npm_package):
+                raise
+    if not (p and p.npm_package):
+        raise ValueError(f"no release feed for {provider}")
+    v = json.loads(_http_text(_NPM_LATEST.format(package=p.npm_package), timeout)).get("version")
     if not v:
         raise ValueError(f"no version from npm for {provider}")
     return v
+
+
+def grok_latest_version(timeout: float = 15) -> str:
+    """The Grok CLI asks its own update channel."""
+    r = subprocess.run([find_cli("grok"), "update", "--check", "--json"], capture_output=True, text=True, timeout=timeout, env=_env(), encoding="utf-8")
+    data = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
+    if data.get("error"):
+        raise ValueError(data["error"])
+    if not data.get("latestVersion"):
+        raise ValueError((r.stderr or r.stdout).strip()[:200] or "no version in `grok update --check`")
+    return data["latestVersion"]
+
+
+def claude_latest_version(timeout: float = 15) -> str | None:
+    """Claude Code's release bucket; None (or OSError) sends latest_version on to npm."""
+    return parse_version(_http_text(_CLAUDE_LATEST_URL, timeout))
 
 
 _checks: dict[str, UpdateCheck] = {}
@@ -258,12 +260,11 @@ def forget_checks(providers=PROVIDERS) -> None:
 # Asked of the provider itself (see models.CATALOGUES_ON), all in about a second and none of it billed:
 # Claude Code's `initialize` handshake, `codex debug models` and `grok models` (each rewrites its CLI's
 # cache, which Vision then re-reads), and llama-server's /v1/models.
-MODEL_PROVIDERS = ("claude", "codex", "grok", "local")
+MODEL_PROVIDERS = tuple(p.name for p in _registry.REGISTRY.values() if p.hooks.get("refresh_models"))
 MODELS_TTL = 6 * 3600  # a long-running Vision re-asks this often
 CLAUDE_MODELS_RECHECK = 600  # sooner when a Claude turn ran on a model the list lacks (at most this often)
 _models_at: dict[str, float] = {}
 _models_busy = {p: threading.Lock() for p in MODEL_PROVIDERS}
-_REFRESH_ARGS = {"codex": ["debug", "models"], "grok": ["models"]}
 
 
 def claude_catalogue(timeout: float = 30) -> list[dict]:
@@ -307,17 +308,26 @@ def refresh_models(provider: str, *, max_age: float = MODELS_TTL) -> bool:
             return False
         _models_at[provider] = time.time()
         try:
-            if provider == "claude":
-                return models.set_claude_catalogue(claude_catalogue())
-            if provider == "local":
-                return models.set_local_models(local_model_ids())
-            subprocess.run([find_cli(provider), *_REFRESH_ARGS[provider]], capture_output=True, timeout=60,
-                           env=_env(), stdin=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
-            return models.reload_cli_cache(provider)
+            return bool(_registry.get(provider).hook("refresh_models")(provider))
         except Exception:  # noqa: BLE001 - not installed, offline, Mac asleep, format changed: keep the list we have
             return False
     finally:
         lock.release()
+
+
+def refresh_claude_models(provider: str = "claude") -> bool:
+    return models.set_claude_catalogue(claude_catalogue())
+
+
+def refresh_local_models(provider: str = "local") -> bool:
+    return models.set_local_models(local_model_ids())
+
+
+def refresh_cli_models(provider: str) -> bool:
+    """A CLI that rewrites its own models cache when asked (Provider.models_args), then re-read it."""
+    subprocess.run([find_cli(provider), *_registry.get(provider).models_args], capture_output=True, timeout=60,
+                   env=_env(), stdin=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
+    return models.reload_cli_cache(provider)
 
 
 def refresh_models_soon(providers=MODEL_PROVIDERS, *, max_age: float = MODELS_TTL) -> None:
@@ -335,7 +345,7 @@ def update_cli(provider: str, *, stream: bool = False, timeout: float = 600) -> 
     before = cli_version(provider)
     if not before.ok:
         return UpdateResult(provider, None, None, 1, error=before.error)
-    cmd = [before.path, *_UPDATE_ARGS[provider]]
+    cmd = [before.path, *_registry.get(provider).update_args]
     try:
         r = subprocess.run(cmd, capture_output=not stream, text=True, timeout=timeout, env=_env(), stdin=subprocess.DEVNULL, encoding="utf-8")
     except subprocess.TimeoutExpired:
@@ -366,7 +376,7 @@ def _parse_providers(arg: str, command: str, extra: tuple[str, ...] = ()) -> tup
         return PROVIDERS
     bad = [w for w in words if w not in PROVIDERS and w not in extra]
     if bad:
-        raise ValueError(f"{command} takes all, claude, codex or grok, not {bad[0]!r}")
+        raise ValueError(f"{command} takes all, {', '.join(PROVIDERS[:-1])} or {PROVIDERS[-1]}, not {bad[0]!r}")
     return tuple(p for p in PROVIDERS + extra if p in words)
 
 

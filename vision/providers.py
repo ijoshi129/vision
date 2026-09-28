@@ -1,5 +1,10 @@
 """The providers Vision can think with, in one place: what each is called, whether it is set up on
-this machine, how to set it up, and which brain class drives it.
+this machine, how to set it up, which brain class drives it, what it can do, and where its own code
+lives (its sessions, usage, model list, persona lines).
+
+The rest of Vision asks the registry instead of testing provider names: a capability flag ("does it
+have a CLI", "can it hold a voice conversation") or a hook, a "module:function" that is imported
+only when called. A new provider is one more entry here plus the functions its hooks name.
 
 `[providers] enabled` in config.toml says which ones /model offers (/providers picks them). One that
 is enabled but not ready (its CLI is missing, its server does not answer) still shows in /model, as a
@@ -12,36 +17,146 @@ import socket
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from vision.config import PROVIDER_NAMES
+# Imports nothing else from Vision at load: config and models build on it.
 
 
 @dataclass(frozen=True)
 class Provider:
     name: str  # "claude", as in [providers] enabled and on the wire
-    label: str  # "Claude", the /model tab
-    note: str  # the tab's second line
+    label: str  # "Claude", the /model tab and every short mention
+    product: str  # "Claude Code", the thing that runs it (versions, usage headings)
+    note: str  # the /model tab's second line
     setup: str  # how to get it ready, shown when it is not
     brain: str  # "module:Class" of the driver
+    powered_by: str  # "You are powered by …" in the persona
+    # -- its command-line tool (None: Vision talks to it directly, no CLI)
+    cli: str | None = None  # the executable; blocked inside every turn so no run spends it behind the user's back
+    home_env: str = ""  # env var for the CLI's config dir: pointed at an empty one for every other provider's turns
+    turn_env: tuple[tuple[str, str], ...] = ()  # set for its own turns
+    install_hint: str = ""  # `vision doctor`'s "Install:" line
+    update_args: tuple[str, ...] = ("update",)
+    models_args: tuple[str, ...] = ()  # CLI args that make it rewrite its models cache (refresh_cli_models)
+    npm_package: str = ""  # where its latest version is published, when no hook says otherwise
+    # -- what it can do
+    has_usage: bool = False  # a subscription with windows /usage can read
+    banked_resets: bool = False  # /usage can spend a saved reset
+    usage_from_text: bool = False  # its brain's usage_report is CLI text Vision lays out itself (else usage_renderable)
+    conversation: str = ""  # "module:Class" of its voice conversation model; "" = it can't hold one
+    conversation_thinks: bool = True  # False: its voice replies never think (effort always off)
+    vision_runs_tools: bool = False  # Vision executes its tool calls (and tells it so), rather than its CLI
+    keeps_partial_turns: bool = True  # False: its context is saved only after a complete turn
+    plan_tool: bool = False  # plan mode ends with an approval tool (ExitPlanMode), not a plan in prose
+    fast_model: str = ""  # its fast mode runs only on this model
+    default_model: str = ""  # what it means with no model named, when its list has it (else the list's first)
+    default_effort_note: str = ""  # shown by its default effort level in /effort
+    title_scanner: str = ""  # LiveTitle method that reads a running session's title
+    hooks: dict[str, str] = field(default_factory=dict)
 
     def brain_class(self):
-        module, cls = self.brain.split(":")
-        return getattr(__import__(module, fromlist=[cls]), cls)
+        return _load(self.brain)
+
+    def conversation_class(self):
+        """Its voice conversation model's class (only when `conversation` is set)."""
+        return _load(self.conversation)
+
+    def hook(self, name: str):
+        """The function a hook names, or None when this provider has no such hook."""
+        target = self.hooks.get(name)
+        return _load(target) if target else None
+
+
+def _load(target: str):
+    module, attr = target.split(":")
+    return getattr(__import__(module, fromlist=[attr]), attr)
 
 
 REGISTRY: dict[str, Provider] = {p.name: p for p in (
-    Provider("claude", "Claude", "via Claude Code · Claude Subscription",
-             "install Claude Code (curl -fsSL https://claude.ai/install.sh | bash), then run `claude` to log in",
-             "vision.brain:Brain"),
-    Provider("codex", "Codex", "via Codex CLI · ChatGPT Subscription",
-             "install the Codex CLI (npm i -g @openai/codex), then run `codex login`", "vision.codex:CodexBrain"),
-    Provider("grok", "Grok", "via Grok CLI · Grok Subscription",
-             "install the Grok CLI (https://x.ai/cli), then run `grok login`", "vision.grok:GrokBrain"),
-    Provider("local", "Local", "via your llama-server · free",
-             "start llama-server and point [local] base_url in config.toml at it", "vision.local:LocalBrain"),
+    Provider(
+        "claude", "Claude", "Claude Code", "via Claude Code · Claude Subscription",
+        "install Claude Code (curl -fsSL https://claude.ai/install.sh | bash), then run `claude` to log in",
+        "vision.brain:Brain", "Claude",
+        cli="claude", home_env="CLAUDE_CONFIG_DIR", npm_package="@anthropic-ai/claude-code",
+        install_hint="curl -fsSL https://claude.ai/install.sh | bash, then run `claude` to log in",
+        has_usage=True, banked_resets=True, usage_from_text=True, conversation="vision.conversation:ClaudeConversation",
+        plan_tool=True, fast_model="opus", default_model="opus", title_scanner="_scan_claude",
+        hooks={
+            "find_cli": "vision.brain:find_claude",
+            "session_paths": "vision.sessions:claude_session_paths", "parse_session": "vision.sessions:_claude_session",
+            "history": "vision.sessions:claude_history", "usage": "vision.usage:_claude_data",
+            "use_banked": "vision.usage:use_claude_reset", "latest_version": "vision.clis:claude_latest_version",
+            "refresh_models": "vision.clis:refresh_claude_models", "tool_notes": "vision.persona:claude_tool_notes",
+        },
+    ),
+    Provider(
+        "codex", "Codex", "Codex", "via Codex CLI · ChatGPT Subscription",
+        "install the Codex CLI (npm i -g @openai/codex), then run `codex login`",
+        "vision.codex:CodexBrain", "OpenAI Codex",
+        cli="codex", home_env="CODEX_HOME", npm_package="@openai/codex",
+        install_hint="npm i -g @openai/codex, then run `codex login`", models_args=("debug", "models"),
+        has_usage=True, banked_resets=True, conversation="vision.codex_voice:CodexConversation",
+        default_effort_note="Codex default", title_scanner="_scan_codex",
+        hooks={
+            "find_cli": "vision.codex:find_codex",
+            "session_paths": "vision.sessions:codex_session_paths", "parse_session": "vision.sessions:_codex_session",
+            "history": "vision.sessions:codex_history", "usage": "vision.usage:_codex_data",
+            "use_banked": "vision.usage:use_codex_reset", "refresh_models": "vision.clis:refresh_cli_models",
+            "models_cache": "vision.models:_codex_models_from_cache", "tool_notes": "vision.persona:codex_tool_notes",
+        },
+    ),
+    Provider(
+        "grok", "Grok", "Grok", "via Grok CLI · Grok Subscription",
+        "install the Grok CLI (https://x.ai/cli), then run `grok login`",
+        "vision.grok:GrokBrain", "Grok",
+        cli="grok", home_env="GROK_HOME", install_hint="https://x.ai/cli, then run `grok login`", models_args=("models",),
+        turn_env=(("GROK_MEMORY", "0"), ("GROK_DISABLE_AUTOUPDATER", "1")),  # Vision's MEMORY.md is the shared store
+        has_usage=True, title_scanner="_scan_grok",
+        hooks={
+            "find_cli": "vision.grok:find_grok",
+            "session_paths": "vision.sessions:grok_session_paths", "parse_session": "vision.sessions:_grok_session",
+            "history": "vision.sessions:grok_history", "usage": "vision.usage:grok_usage",
+            "latest_version": "vision.clis:grok_latest_version", "refresh_models": "vision.clis:refresh_cli_models",
+            "models_cache": "vision.models:_grok_models_from_cache", "tool_notes": "vision.persona:grok_tool_notes",
+        },
+    ),
+    Provider(
+        "local", "Local", "llama-server", "via your llama-server · free",
+        "start llama-server and point [local] base_url in config.toml at it",
+        "vision.local:LocalBrain", "an open model on the user's own hardware",
+        conversation="vision.local:LocalConversation", conversation_thinks=False,
+        vision_runs_tools=True, keeps_partial_turns=False,
+        hooks={
+            "session_paths": "vision.sessions:local_session_paths", "parse_session": "vision.sessions:_local_session",
+            "history": "vision.sessions:local_history", "refresh_models": "vision.clis:refresh_local_models",
+            "tool_notes": "vision.persona:local_tool_notes",
+        },
+    ),
 )}
-assert tuple(REGISTRY) == PROVIDER_NAMES
+PROVIDER_NAMES = tuple(REGISTRY)
+
+
+def names(**caps) -> tuple[str, ...]:
+    """Provider names in registry order, those whose fields match every given value:
+    names(has_usage=True) → the ones with a /usage page; names(cli=None) is not supported (use with_cli())."""
+    return tuple(p.name for p in REGISTRY.values() if all(getattr(p, k) == v for k, v in caps.items()))
+
+
+def with_cli() -> tuple[str, ...]:
+    """Providers driven through a command-line tool, in registry order."""
+    return tuple(p.name for p in REGISTRY.values() if p.cli)
+
+
+def conversation_names() -> tuple[str, ...]:
+    """Providers whose models can hold a voice conversation."""
+    return tuple(p.name for p in REGISTRY.values() if p.conversation)
+
+
+def cap(provider: str, attr: str, default=None):
+    """One capability of a provider by name ("" or unknown → default)."""
+    p = REGISTRY.get(provider)
+    return getattr(p, attr) if p is not None else default
+
 
 SETUP_PREFIX = "setup:"  # a /model row value that means "tell me how to set this up", not a model
 _READY_TTL = 30.0

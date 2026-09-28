@@ -33,7 +33,7 @@ HANDOFF_USER_PREFIX = "This conversation is being handed over to a different mod
 @dataclass
 class SessionInfo:
     id: str
-    provider: str  # "claude" | "codex" | "grok" | "local"
+    provider: str  # a providers.REGISTRY name
     title: str
     last_active: float  # epoch seconds
     cwd: str = ""
@@ -172,30 +172,43 @@ def _newest_first(paths: list[str]) -> list[str]:
     return sorted(paths, key=mtime, reverse=True)
 
 
-PROVIDERS = ("claude", "codex", "grok", "local")
-PROVIDER_TITLES = {"claude": "Claude", "codex": "Codex", "grok": "Grok", "local": "Local"}
+from vision.providers import REGISTRY as _REGISTRY
+from vision.providers import get as _provider
+
+PROVIDERS = tuple(_REGISTRY)
+PROVIDER_TITLES = {p.name: p.label for p in _REGISTRY.values()}
+
+
+# Where each provider keeps its conversations (the registry's session_paths hooks).
+def claude_session_paths() -> list[str]:
+    return glob.glob(os.path.join(CLAUDE_PROJECTS, "*", "*.jsonl"))
+
+
+def codex_session_paths() -> list[str]:
+    from vision.codex import CODEX_SESSIONS
+
+    return glob.glob(os.path.join(CODEX_SESSIONS, "*", "*", "*", "rollout-*.jsonl"))
+
+
+def grok_session_paths() -> list[str]:
+    from vision.grok import GROK_SESSIONS
+
+    return glob.glob(os.path.join(GROK_SESSIONS, "*", "*", "summary.json"))
+
+
+def local_session_paths() -> list[str]:
+    from vision.local import SESSIONS_DIR
+
+    return glob.glob(os.path.join(str(SESSIONS_DIR), "*.json"))
 
 
 def list_sessions(provider: str, limit: int = 15) -> list[SessionInfo]:
     """The most recently active Vision conversations for a provider, newest first."""
-    if provider == "codex":
-        from vision.codex import CODEX_SESSIONS
-
-        paths = glob.glob(os.path.join(CODEX_SESSIONS, "*", "*", "*", "rollout-*.jsonl"))
-        parse = _codex_session
-    elif provider == "grok":
-        from vision.grok import GROK_SESSIONS
-
-        paths = glob.glob(os.path.join(GROK_SESSIONS, "*", "*", "summary.json"))
-        parse = _grok_session
-    elif provider == "local":
-        from vision.local import SESSIONS_DIR
-
-        paths = glob.glob(os.path.join(str(SESSIONS_DIR), "*.json"))
-        parse = _local_session
-    else:
-        paths = glob.glob(os.path.join(CLAUDE_PROJECTS, "*", "*.jsonl"))
-        parse = _claude_session
+    p = _provider(provider)
+    paths_of, parse = (p.hook("session_paths"), p.hook("parse_session")) if p else (None, None)
+    if paths_of is None or parse is None:
+        return []
+    paths = paths_of()
     out: list[SessionInfo] = []
     seen: set[str] = set()
     for path in _newest_first(paths):
@@ -551,14 +564,9 @@ def session_history(provider: str, session_id: str, limit: int = HISTORY_LIMIT, 
     """
     if not session_id:
         return []
-    if provider == "codex":
-        history = codex_history(session_id, limit, include_context=include_context)
-    elif provider == "grok":
-        history = grok_history(session_id, limit, include_context=include_context)
-    elif provider == "local":
-        history = local_history(session_id, limit, include_context=include_context)
-    else:
-        history = claude_history(session_id, limit, include_context=include_context)
+    p = _provider(provider) or _provider("claude")
+    read = p.hook("history")
+    history = read(session_id, limit, include_context=include_context) if read else []
     if include_context:
         return history
     from vision.agentlog import attach
@@ -634,13 +642,10 @@ class LiveTitle:
         elif now - self._checked < self.POLL:
             return self._title
         self._checked = now
+        scanner = getattr(self, (_provider(provider) or _provider("claude")).title_scanner or "", None)
         try:
-            if provider == "codex":
-                self._scan_codex(session_id)
-            elif provider == "grok":
-                self._scan_grok(session_id)
-            else:
-                self._scan_claude(session_id)
+            if scanner is not None:
+                scanner(session_id)
         except OSError:
             pass
         return self._title

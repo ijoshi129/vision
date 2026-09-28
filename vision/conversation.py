@@ -698,27 +698,21 @@ class VoiceConversation:
         effort is always off; a Claude or Codex model keeps the current level, fitted to the model's own
         levels (Haiku has none, so none is sent)."""
         from vision.models import THINKING_OFF, coerce_effort, provider_for
+        from vision.providers import get
 
-        provider = provider_for(model)
+        p = get(provider_for(model)) or get("claude")
+        if not p.conversation:
+            p = get("claude")  # voice_model() never picks one that can't talk; the config's own fallback might
         if self.model is not None:
             self.model.close()
         self.cfg.conversation.model = model
-        if provider == "local":
+        if not p.conversation_thinks:
             self.cfg.conversation.effort = THINKING_OFF
         else:
             # Back from a local model or Haiku (no level): the config default, not the model's resting one.
             effort = self.cfg.conversation.effort if self.cfg.conversation.effort not in (THINKING_OFF, "") else "low"
             self.cfg.conversation.effort, _ = coerce_effort(model, effort)
-        if provider == "local":
-            from vision.local import LocalConversation
-
-            self.model = LocalConversation(self.cfg)
-        elif provider == "codex":
-            from vision.codex_voice import CodexConversation
-
-            self.model = CodexConversation(self.cfg)
-        else:
-            self.model = ClaudeConversation(self.cfg)
+        self.model = p.conversation_class()(self.cfg)
 
     def new_session(self) -> None:
         self.model.close()

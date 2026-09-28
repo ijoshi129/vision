@@ -130,3 +130,75 @@ class PreselectedFormTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# -- a provider Vision has never heard of, wired only through the registry ------------------------
+_SEEN: dict = {}
+
+
+def fake_paths():
+    return ["/nowhere/a.json"]
+
+
+def fake_parse(path):
+    from vision.sessions import SessionInfo
+
+    return SessionInfo(id="acme-1", provider="acme", title="from the fake", last_active=0.0)
+
+
+def fake_history(session_id, limit, include_context=False):
+    _SEEN["history"] = session_id
+    return [{"role": "user", "text": "hi"}]
+
+
+def fake_usage(brain):
+    return {"plan": "Acme Max", "windows": []}
+
+
+def fake_notes(tools, sandbox, denied_tools, weather):
+    return ["ACME NOTE"]
+
+
+class NewProviderTests(unittest.TestCase):
+    """A fifth provider needs a registry entry and the functions its hooks name, nothing else."""
+
+    def setUp(self):
+        here = __name__  # the hooks must land in this very module (its _SEEN)
+        self.p = providers.Provider(
+            "acme", "Acme", "Acme CLI", "via Acme", "install acme", "vision.brain:Brain", "Acme's model",
+            cli="acme", home_env="ACME_HOME", turn_env=(("ACME_QUIET", "1"),), has_usage=True,
+            hooks={"session_paths": f"{here}:fake_paths", "parse_session": f"{here}:fake_parse",
+                   "history": f"{here}:fake_history", "usage": f"{here}:fake_usage", "tool_notes": f"{here}:fake_notes"})
+        providers.REGISTRY["acme"] = self.p
+        self.addCleanup(providers.REGISTRY.pop, "acme", None)
+
+    def test_sessions_history_usage_and_persona(self):
+        from vision import persona, sessions, usage
+
+        self.assertEqual([s.id for s in sessions.list_sessions("acme")], ["acme-1"])
+        with patch("vision.agentlog.attach", side_effect=lambda turns, provider, sid: turns):
+            self.assertEqual(sessions.session_history("acme", "acme-1")[0]["text"], "hi")
+        self.assertEqual(_SEEN["history"], "acme-1")
+        with patch("vision.usage.provider_default", return_value="x", create=True):
+            row = usage.usage_data(Config(), type("B", (), {"provider": "acme"})(), "acme")
+        self.assertEqual((row["plan"], row["error"]), ("Acme Max", None))
+        prompt = persona.system_prompt(False, "", "/w", ["Bash"], provider="acme", memory="")
+        self.assertIn("You are powered by Acme's model", prompt)
+        self.assertIn("ACME NOTE", prompt)
+
+    def test_its_cli_is_blocked_elsewhere_and_its_env_set_on_its_own_turns(self):
+        from vision import brain
+
+        with tempfile.TemporaryDirectory() as d, patch.object(brain, "DATA_DIR", Path(d)):
+            own, other = brain.brain_env("acme"), brain.brain_env("claude")
+            self.assertTrue((Path(d) / "shims" / "acme").exists())  # its CLI is blocked inside every turn
+        self.assertEqual(own.get("ACME_QUIET"), "1")
+        self.assertNotEqual(own.get("ACME_HOME"), other.get("ACME_HOME"))
+        self.assertIn("no-credentials", other["ACME_HOME"])
+
+    def test_capability_queries(self):
+        self.assertIn("acme", providers.with_cli())
+        self.assertIn("acme", providers.names(has_usage=True))
+        self.assertNotIn("acme", providers.conversation_names())
+        self.assertEqual(providers.cap("acme", "powered_by"), "Acme's model")
+        self.assertIsNone(providers.cap("nope", "powered_by"))

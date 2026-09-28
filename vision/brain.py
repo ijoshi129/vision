@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from vision.config import DATA_DIR, STATE_DIR, WORKSPACE_DIR, BrainConfig, weather_ready
 from vision import clis, compat, models
 from vision.persona import system_prompt
+from vision.providers import REGISTRY as _REGISTRY
 from vision.reply import READING, THINKING, dedupe_status, retry_label
 
 _RETRY_REASONS = {529: "overloaded", 429: "rate limited", 500: "API error", 502: "API error", 503: "API error", 504: "API error"}
@@ -121,12 +122,6 @@ echo blocked by Vision: '%~n0' cannot be run from inside a Vision turn (it would
 exit /b 1
 """
 
-_SHIM_NAMES = ("claude", "codex", "grok")
-_PROVIDER_HOME = {
-    "claude": "CLAUDE_CONFIG_DIR",
-    "codex": "CODEX_HOME",
-    "grok": "GROK_HOME",
-}
 
 
 def _shim_dir() -> str:
@@ -134,7 +129,7 @@ def _shim_dir() -> str:
     d = DATA_DIR / "shims"
     try:
         d.mkdir(parents=True, exist_ok=True)
-        for name in _SHIM_NAMES:
+        for name in [p.cli for p in _REGISTRY.values() if p.cli]:  # every provider CLI, blocked inside a turn
             f = d / name
             if not f.exists() or f.read_text(encoding="utf-8") != _SHIM:
                 f.write_text(_SHIM, encoding="utf-8", newline="\n")  # LF even on Windows: "#!/bin/sh\r" is no shebang
@@ -166,12 +161,11 @@ def brain_env(provider: str) -> dict[str, str]:
         empty.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
-    for other, var in _PROVIDER_HOME.items():
-        if other != provider:
-            env[var] = str(empty)
-    if provider == "grok":
-        env["GROK_MEMORY"] = "0"  # Vision's MEMORY.md is the shared long-term store
-        env["GROK_DISABLE_AUTOUPDATER"] = "1"
+    for other in _REGISTRY.values():
+        if other.home_env and other.name != provider:
+            env[other.home_env] = str(empty)
+    own = _REGISTRY.get(provider)
+    env.update(dict(own.turn_env) if own else {})  # e.g. Grok's memory off: Vision's MEMORY.md is the shared store
     return env
 
 

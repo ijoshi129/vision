@@ -15,6 +15,8 @@ import re
 import sys
 from dataclasses import dataclass
 
+from vision.providers import REGISTRY as _REGISTRY
+
 EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")  # base levels, ascending
 THINKING_OFF = "off"  # below "low": no reasoning at all; only the local models offer it (their thinking switch)
 CLAUDE_DEFAULT_EFFORT = "high"  # what a Claude model gets when it inherits an empty effort
@@ -39,8 +41,8 @@ GROK_HOME = os.path.expanduser(os.environ.get("GROK_HOME", "~/.grok"))
 GROK_MODELS_CACHE = os.path.join(GROK_HOME, "models_cache.json")
 # Typed nickname for a provider's newest model (`/model grok` → Grok's current default); see provider_default.
 NICKNAMES = {"grok": "grok"}
-PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex", "grok": "Grok", "local": "Local"}
-PROVIDER_CLIS = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok", "local": "llama-server"}
+PROVIDER_LABELS = {p.name: p.label for p in _REGISTRY.values()}
+PROVIDER_CLIS = {p.name: p.product for p in _REGISTRY.values()}
 
 
 @dataclass(frozen=True)
@@ -245,16 +247,10 @@ MODELS: list[ModelInfo] = CLAUDE_MODELS + CODEX_MODELS + GROK_MODELS + LOCAL_MOD
 
 # (name, rows, note) tabs for the /model pickers, one per provider (←/→ switches); rows are
 # (value, label, description) and the note is shown beside the tab bar when that tab is active.
-MODEL_TABS = [
-    ("Claude", [(m.alias, m.label, m.description) for m in CLAUDE_MODELS], "via Claude Code · Claude Subscription"),
-    ("Codex", [(m.alias, m.label, m.description) for m in CODEX_MODELS], "via Codex CLI · ChatGPT Subscription"),
-    ("Grok", [(m.alias, m.label, m.description) for m in GROK_MODELS], "via Grok CLI · Grok Subscription"),
-    ("Local", [(m.alias, m.label, m.description) for m in LOCAL_MODELS], "via your llama-server · free"),
-]
-MODEL_CHOICES = [(m.alias, m.label, f"{PROVIDER_LABELS.get(m.provider, m.provider)} · {m.description}") for m in MODELS]
-
-
 _LISTS = {"claude": CLAUDE_MODELS, "codex": CODEX_MODELS, "grok": GROK_MODELS, "local": LOCAL_MODELS}
+assert tuple(_LISTS) == tuple(_REGISTRY)
+MODEL_TABS = [(p.label, [(m.alias, m.label, m.description) for m in _LISTS[p.name]], p.note) for p in _REGISTRY.values()]
+MODEL_CHOICES = [(m.alias, m.label, f"{PROVIDER_LABELS.get(m.provider, m.provider)} · {m.description}") for m in MODELS]
 
 
 def _swap(provider: str, new: list[ModelInfo]) -> None:
@@ -289,7 +285,8 @@ def set_claude_catalogue(rows) -> bool:
 
 def reload_cli_cache(provider: str) -> bool:
     """Re-read the Codex or Grok CLI's models cache (after the CLI refreshed it). False if unreadable."""
-    new = (_codex_models_from_cache if provider == "codex" else _grok_models_from_cache)()
+    read = _REGISTRY[provider].hook("models_cache") if provider in _REGISTRY else None
+    new = read() if read else None
     if not new:
         return False
     _swap(provider, new)
@@ -314,8 +311,9 @@ def provider_default(provider: str) -> str:
     """The model a provider means when none is named: Opus for Claude, else the provider's first listed
     model (Codex's own priority order, Grok's newest, whatever llama-server serves)."""
     models = _LISTS.get(provider) or []
-    if provider == "claude" and any(m.alias == "opus" for m in models):
-        return "opus"
+    preferred = _REGISTRY[provider].default_model if provider in _REGISTRY else ""
+    if preferred and any(m.alias == preferred for m in models):
+        return preferred
     return models[0].alias if models else ""
 
 
@@ -327,7 +325,7 @@ def _resolve(alias: str) -> str:
 # The conversation model (what answers spoken input, `[conversation].model`) talks through Claude Code,
 # `codex app-server` (vision/codex_voice.py) or straight to llama-server: Grok has no tool-free
 # structured-output mode, so only these three can talk.
-CONVERSATION_PROVIDERS = ("claude", "codex", "local")
+CONVERSATION_PROVIDERS = tuple(p.name for p in _REGISTRY.values() if p.conversation)
 
 
 def find(alias: str) -> ModelInfo | None:
@@ -424,8 +422,9 @@ def effort_choices(alias: str) -> list[tuple[str, str, str]]:
     rows = []
     for lv in levels:
         desc = EFFORT_DESCRIPTIONS.get(lv, "")
-        if m and m.provider == "codex" and lv == m.default_effort:
-            desc += "  (Codex default)"
+        note = _REGISTRY[m.provider].default_effort_note if m and m.provider in _REGISTRY else ""
+        if note and lv == m.default_effort:
+            desc += f"  ({note})"
         rows.append((lv, lv, desc))
     if not rows:
         rows.append(("", "n/a", f"{model_label(alias)} has no effort setting"))

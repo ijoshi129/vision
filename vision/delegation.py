@@ -110,6 +110,12 @@ def _approval_notes(rules: list[str]) -> str:
     )
 
 
+def _vision_runs_tools(provider: str) -> bool:
+    from vision.providers import cap
+
+    return bool(cap(provider, "vision_runs_tools", False))
+
+
 def worker_prompt(cfg, workdir: str, provider: str, sandbox: str = "", approval: list[str] | None = None) -> str:
     """The worker's system prompt. `approval` names the deny rules the user can lift for this run
     (the supervisor's approval-only commands), so the worker asks instead of giving up."""
@@ -148,7 +154,7 @@ def worker_prompt(cfg, workdir: str, provider: str, sandbox: str = "", approval:
            "files and system, and a result written from imagination is a failure. Only when the tool "
            "results are in do you reply, and that reply is the JSON object alone. Findings, changes and "
            "checks must each come from a tool result you received in this session."
-           if provider == "local" else "")
+           if _vision_runs_tools(provider) else "")
     )
 
 

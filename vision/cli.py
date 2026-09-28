@@ -49,6 +49,8 @@ from vision.config import (
     voice_dir,
 )
 from vision.models import THINKING_OFF, coerce_effort, effort_choices, model_label, provider_default, provider_for, provider_label, replace_retired_models, supports_effort
+from vision.providers import PROVIDER_NAMES, cap
+from vision.providers import names as provider_names
 from vision.reply import status_label
 from rich.markup import escape
 from vision.ui import PLACEHOLDER, ChatScreen, ReplyView, SlashCommand, answered_grid, header_renderable, notice_grid, pick, short_path, show_header, show_user, user_grid, reply_grid, hearing_grid
@@ -171,9 +173,10 @@ def _switch_model(cfg: Config, brain, model: str, voice_mode: bool, effort: str 
     if new_provider != old_provider:
         transcript = _handoff_text(brain, history) or transcript
     cfg.brain.model = model
-    if new_provider == "claude" and model != "opus" and cfg.brain.fast:
-        cfg.brain.fast = False  # Claude fast mode is Opus-only; /model away from Opus turns it off.
-        fast_note = "fast mode off (Claude fast mode uses Opus)"
+    fast_model = cap(new_provider, "fast_model", "")
+    if fast_model and model != fast_model and cfg.brain.fast:
+        cfg.brain.fast = False  # e.g. Claude fast mode is Opus-only; /model away from Opus turns it off.
+        fast_note = f"fast mode off ({provider_label(new_provider)} fast mode uses {model_label(fast_model).split(' ')[0]})"
     else:
         fast_note = ""
     if effort is not None:
@@ -246,8 +249,9 @@ def _fast_value(arg: str, current: bool) -> bool:
 def _set_fast(cfg: Config, brain, enabled: bool, voice_mode: bool):
     """Apply native fast mode, including Claude Code's automatic move to Opus."""
     detail = ""
-    if enabled and brain.provider == "claude" and cfg.brain.model != "opus":
-        brain, detail = _switch_model(cfg, brain, "opus", voice_mode=voice_mode, full=True)
+    fast_model = cap(brain.provider, "fast_model", "")
+    if enabled and fast_model and cfg.brain.model != fast_model:
+        brain, detail = _switch_model(cfg, brain, fast_model, voice_mode=voice_mode, full=True)
     cfg.brain.fast = enabled
     return brain, detail
 
@@ -509,13 +513,13 @@ def _render_usage(usage: dict | None, refreshed: bool):
 
 
 def _usage_for(brain, full: bool = False):
-    if brain.provider != "claude":
+    if not cap(brain.provider, "usage_from_text", False):
         return brain.usage_renderable(full)
     text = brain.usage_report()
     return _usage_renderable(text, full) if text else _usage_fallback_renderable(brain.last_usage or brain.cached_usage())
 
 
-_USAGE_PROVIDERS = ("claude", "codex", "grok")  # each one's throwaway brain runs models.provider_default
+_USAGE_PROVIDERS = provider_names(has_usage=True)  # each one's throwaway brain runs models.provider_default
 
 
 def _split_usage_arg(arg: str) -> tuple[str | None, bool]:
@@ -528,7 +532,7 @@ def _split_usage_arg(arg: str) -> tuple[str | None, bool]:
         elif w == "all" or w in _USAGE_PROVIDERS:
             provider = w
         else:
-            raise ValueError(f"/usage takes all, claude, codex or grok (and 'full'), not '{w}'")
+            raise ValueError(f"/usage takes all, {', '.join(_USAGE_PROVIDERS)} (and 'full'), not '{w}'")
     return provider, full
 
 
@@ -759,7 +763,7 @@ def _menu_commands(cfg: Config, brain_ref: Callable[[], object]) -> list[SlashCo
 
     return [
         SlashCommand("model", "switch model for this session", models),
-        SlashCommand("providers", "which providers /model offers", lambda: [(n, "") for n in ("claude", "codex", "grok", "local")]),
+        SlashCommand("providers", "which providers /model offers", lambda: [(n, "") for n in PROVIDER_NAMES]),
         SlashCommand("effort", "reasoning effort for this session", efforts),
         SlashCommand("fast", "toggle faster, higher-usage inference", lambda: [("on", "use the fast service tier"), ("off", "use standard inference")]),
         SlashCommand("default", "choose and save the default model + effort", lambda: [("reset", "back to Opus 5 · high")]),
@@ -822,7 +826,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
         sid = recovered["session_id"]
         # The local provider saves its model context only after a complete turn. Carry
         # the journal's transcript into a fresh context when it stopped mid-turn.
-        if provider_for(cfg.brain.model) == "local":
+        if not cap(provider_for(cfg.brain.model), "keeps_partial_turns", True):
             sid = None
         brain = create_brain(cfg.brain, voice_mode=False, session_id=sid)
         if not sid:

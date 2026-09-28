@@ -15,6 +15,9 @@ from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 
+from vision.providers import get as _provider
+from vision.providers import names as _provider_names
+
 ACCENT = "bright_cyan"
 
 
@@ -157,7 +160,9 @@ def usage_group(*parts) -> Group:
 
 # ---------------------------------------------------------------- structured data (the phone's /usage page)
 USAGE_LINE = re.compile(r"^(?P<label>[^:]+):\s+(?P<pct>\d+)% used(?:\s+·\s+resets\s+(?P<reset>.+))?$")
-PROVIDERS = ("claude", "codex", "grok")  # a throwaway brain for one runs its default model (models.provider_default)
+# Providers with a subscription /usage can read, in registry order; a throwaway brain for one runs its
+# default model (models.provider_default).
+PROVIDERS = _provider_names(has_usage=True)
 
 
 def _claude_reset_ts(text: str) -> float | None:
@@ -374,11 +379,12 @@ CLAUDE_RESET_URL = "https://api.anthropic.com/api/organizations/{org}/reset_rate
 def use_banked(provider: str, reset_id: str | None = None) -> dict:
     """Spend one banked reset, the one `reset_id` names or else the provider's pick:
     {"ok", "outcome", "message"}, the message worded for the person."""
-    if provider == "claude":
-        return use_claude_reset(reset_id)
-    if provider == "codex":
-        return use_codex_reset(reset_id)
-    return {"ok": False, "outcome": "unsupported", "message": "Only Claude and Codex bank resets."}
+    p = _provider(provider)
+    spend = p.hook("use_banked") if p and p.banked_resets else None
+    if spend is None:
+        banked = " and ".join(q.label for q in map(_provider, _provider_names(banked_resets=True)))
+        return {"ok": False, "outcome": "unsupported", "message": f"Only {banked} bank resets."}
+    return spend(reset_id)
 
 
 def _pick_claude_grant(block: dict, grant_id: str | None = None) -> tuple[dict | None, str | None]:
@@ -544,6 +550,11 @@ def _codex_data(brain) -> dict:
     }
 
 
+def grok_usage(brain) -> dict:
+    """The registry's usage hook for Grok: its allowance doesn't need the brain."""
+    return _grok_data()
+
+
 def _grok_data() -> dict:
     from vision.grok import fetch_subscription
 
@@ -585,14 +596,12 @@ def usage_data(cfg, brain, provider: str) -> dict:
             from vision.brain import create_brain
 
             brain = create_brain(replace(cfg.brain, model=provider_default(provider)), continue_session=True)
-        if provider == "claude":
-            out.update(_claude_data(brain))
-        elif provider == "codex":
-            out.update(_codex_data(brain))
-        elif provider == "grok":
-            out.update(_grok_data())
-        else:
+        p = _provider(provider)
+        read = p.hook("usage") if p and p.has_usage else None
+        if read is None:
             out["error"] = f"no usage for {provider}"
+        else:
+            out.update(read(brain))
     except Exception as e:  # one unavailable CLI should not hide the other providers
         out["error"] = f"{provider_label(provider)} usage unavailable: {e}"
     return out
@@ -627,7 +636,7 @@ def requested_providers(text: str) -> tuple[str, ...]:
     named = tuple(p for p in PROVIDERS if re.search(rf"\b{p}\b", text or "", re.IGNORECASE))
     if re.search(r"\b(?:all|every|each)\b", text or "", re.IGNORECASE) and not named:
         return PROVIDERS
-    return named or ("claude",)
+    return named or PROVIDERS[:1]
 
 
 def usage_text(rows: list[dict]) -> str:

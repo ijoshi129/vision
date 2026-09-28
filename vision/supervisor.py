@@ -155,9 +155,10 @@ class Supervisor:
         missing one is an error, never a fallback to another brain."""
         from vision import clis
         from vision.models import model_label
+        from vision.providers import cap
 
-        if provider == "local":
-            return
+        if not cap(provider, "cli"):
+            return  # no CLI to find (a local server is checked when it's asked)
         try:
             clis.find_cli(provider)
         except Exception as e:  # noqa: BLE001  (that provider's own "not installed" message)

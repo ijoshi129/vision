@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from vision.models import THINKING_OFF, provider_for
+from vision.providers import PROVIDER_NAMES
 
 # Windows starts in plan mode: none of the Linux sandboxes exist there, and denied_tools only knows
 # POSIX commands. "auto" still works; set it under [brain] or press Shift-Tab.
@@ -419,7 +420,6 @@ class LocalConfig:
     brave_api_key: str = ""  # WebSearch uses Brave's API with a key, DuckDuckGo's HTML results without
 
 
-PROVIDER_NAMES = ("claude", "codex", "grok", "local")
 
 
 @dataclass
@@ -666,8 +666,10 @@ def load_config() -> Config:
     cfg.router.max_rounds = max(1, int(cfg.router.max_rounds or 4))
     cfg.router.max_output_tokens = max(1000, int(cfg.router.max_output_tokens or 200_000))
     cfg.conversation.max_delegations = min(8, max(1, int(cfg.conversation.max_delegations)))
-    if provider_for(cfg.conversation.model) == "local":
-        cfg.conversation.effort = THINKING_OFF  # LocalConversation always sends enable_thinking=False (grammar mode)
+    from vision.providers import cap
+
+    if cap(provider_for(cfg.conversation.model), "conversation_thinks", True) is False:
+        cfg.conversation.effort = THINKING_OFF  # e.g. LocalConversation always sends enable_thinking=False (grammar mode)
     cfg.conversation.timeout_s = max(10, float(cfg.conversation.timeout_s))
     cfg.brain.stall_s = max(0.0, float(cfg.brain.stall_s or 0))
     if cfg.weather.units not in ("metric", "imperial"):
