@@ -88,9 +88,15 @@ class GrokAgentModeTests(unittest.TestCase):
         self.assertEqual(rows[-1], ("Bash", "the command", True, False, "hi\n"))
 
     def test_deny_rules_reject_the_command(self):
-        turn = self.brain().ask("run sudo rm -rf /opt")
-        self.assertEqual(turn.text, "permission no.")
+        seen = []
+        brain = self.brain()
+        turn = brain.ask("run sudo rm -rf /opt", on_text=seen.append)
+        # Grok cancels the turn on a rejection; Vision says why instead of showing a bare "cancelled"
+        self.assertFalse(turn.is_error)
+        self.assertEqual(turn.text, "I didn't run `sudo rm -rf /opt`: it matches your Bash(sudo:*) rule.")
+        self.assertEqual("".join(seen), turn.text)
         self.assertTrue(turn.tools[0].is_error)
+        self.assertTrue(brain.session_id)
 
     def test_plan_mode_runs_in_the_read_only_sandbox(self):
         self.brain(mode="plan").ask("hi")

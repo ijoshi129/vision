@@ -73,6 +73,24 @@ class GrokAgentTests(_Tmp):
         self.assertFalse(grok_tool_call(subs, {"type": "tool_call", "toolCallId": "c3", "toolName": "read_file"}, calls))
 
 
+    def test_background_spawn_as_grok_really_reports_it(self):
+        # shapes from the live run on 2026-09-28
+        turn, calls = Turn(), {}
+        subs = AgentTracker(turn, None, model="grok-4.7")
+        grok_tool_call(subs, {"toolCallId": "c1", "toolName": "spawn_subagent",
+                              "rawInput": {"description": "Count lines in vision/server.py", "prompt": "…", "background": True}}, calls)
+        text = "Subagent started in background.\nsubagent_id: 01a0e89e-ff00\ndescription: Count lines in vision/server.py\n"
+        grok_tool_update(subs, {"toolCallId": "c1", "status": "completed", "rawOutput": {"type": "Text", "text": text},
+                                "content": [{"type": "content", "content": {"type": "text", "text": text}}]}, calls)
+        self.assertFalse(turn.agents[0].done)
+        grok_tool_call(subs, {"toolCallId": "c2", "toolName": "get_command_or_subagent_output", "rawInput": {"task_ids": ["01a0e89e-ff00"], "timeout_ms": 1}}, calls)
+        output = "2043\n\n<subagent_meta>id=01a0e89e-ff00, tool_calls=1, turns=1, duration_ms=6444</subagent_meta>\n<worktree_path>/x</worktree_path>"
+        grok_tool_update(subs, {"toolCallId": "c2", "status": "completed", "rawOutput": {"type": "TaskOutput", "Result": {
+            "task_id": "01a0e89e-ff00", "status": "completed", "duration_secs": 6.4, "output": output}}}, calls)
+        run = turn.agents[0]
+        self.assertEqual((run.done, run.failed, run.summary, run.tool_uses), (True, False, "2043", 1))
+
+
 class AgentFrameTests(unittest.TestCase):
     def test_detail_snapshot_survives_reconnect_and_completion(self):
         run = AgentRun("a1", "Explore", "Map", prompt="Find every config entry point")

@@ -216,6 +216,27 @@ class AppServerTurnTests(unittest.TestCase):
         self.assertEqual([(r.label, r.done, r.failed, r.summary) for r in turn.agents], [("Probe the TTS queue", True, False, "40 ms")])
         self.assertEqual(rows[-1], ("Probe the TTS queue", True))
 
+    def test_sub_agent_threads_stay_out_of_the_reply(self):
+        # live 2026-09-28: the children's own items came through with their threadId and leaked into the reply
+        child = "child-A"
+        act = {"id": "call_1", "type": "subAgentActivity", "kind": "started", "agentThreadId": child, "agentPath": "/root/brain_count"}
+        cmd = {"id": "exec-9", "type": "commandExecution", "command": "wc -l vision/brain.py", "status": "inProgress"}
+        server = FakeAppServer(_setup(**{"turn/start": lambda p: ({"turn": {"id": "turn-1"}}, [
+            ("item/completed", {"threadId": TID, "item": act}),
+            ("item/started", {"threadId": child, "turnId": "t-child", "item": cmd}),
+            ("item/completed", {"threadId": child, "turnId": "t-child", "item": {**cmd, "status": "completed", "aggregatedOutput": "1358"}}),
+            ("item/agentMessage/delta", {"threadId": child, "turnId": "t-child", "itemId": "cm", "delta": "vision/brain.py: 1,358 lines."}),
+            ("item/completed", {"threadId": child, "item": {"id": "cm", "type": "agentMessage", "text": "vision/brain.py: 1,358 lines."}}),
+            ("thread/tokenUsage/updated", {"threadId": child, "tokenUsage": {"last": {"inputTokens": 5}, "modelContextWindow": 9}}),
+            ("turn/completed", {"threadId": child, "turn": {"id": "t-child", "status": "completed"}}),
+            ("item/completed", {"threadId": TID, "item": {**act, "id": "done-1", "kind": "completed"}}),
+            _delta("Done."), DONE])}))
+        brain, turn = self._ask(server)
+        self.assertEqual((turn.text, turn.tools), ("Done.", []))
+        self.assertEqual([(r.label, r.done, r.failed, r.tool_uses, r.summary) for r in turn.agents],
+                         [("brain_count", True, False, 1, "vision/brain.py: 1,358 lines.")])
+        self.assertNotEqual(getattr(brain, "context", None), (5, 9))
+
     def test_cancel_interrupts_the_turn(self):
         brain = CodexBrain(BrainConfig())
 

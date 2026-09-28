@@ -13,11 +13,17 @@ shapes their own logs and binaries point to (2026-09-26 research):
 
 Every sub-agent event is also appended raw to ~/.local/state/vision/subagent-events.jsonl (kept
 short), so the first real run shows whether these guesses match.
+
+Live run 2026-09-28 (scripts/live_transports.py): Codex's app-server reports spawns as
+sub_agent_activity (started / completed) and streams each child thread's own items under its
+threadId (vision.codex_app keeps those out of the reply); Grok's background spawn answers with a Text
+result naming the subagent_id, and get_command_or_subagent_output with {type: TaskOutput, Result}.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 
@@ -165,6 +171,18 @@ def _raw(value) -> dict:
     return {}
 
 
+def _grok_text(ev: dict, out: dict) -> str:
+    """A tool result's words: rawOutput {type: Text, text} or the ACP content blocks."""
+    if isinstance(out.get("text"), str):
+        return out["text"]
+    return "".join(c.get("content", {}).get("text", "") for c in ev.get("content") or [] if isinstance(c, dict))
+
+
+def _grok_summary(output: str) -> str:
+    """A sub-agent's answer without the <subagent_meta>/<worktree_path>/<subagent_result> trailer."""
+    return output.split("<subagent_meta>", 1)[0].strip()
+
+
 def grok_tool_call(tracker: AgentTracker, ev: dict, calls: dict[str, str]) -> bool:
     """A `tool_call` event: a spawn opens a row; a follow-up call is remembered by its call id."""
     name = ev.get("toolName") or ev.get("title") or ""
@@ -196,6 +214,9 @@ def grok_tool_update(tracker: AgentTracker, ev: dict, calls: dict[str, str]) -> 
     out = _raw(ev.get("rawOutput"))
     if name == GROK_SPAWN:
         sub = out.get("subagent_id") or out.get("task_id") or out.get("id")
+        if not sub:  # live 2026-09-28: {type: Text, text: "Subagent started in background.\nsubagent_id: …"}
+            found = re.search(r"subagent_id:\s*(\S+)", _grok_text(ev, out))
+            sub = found.group(1) if found else None
         if sub:
             tracker.alias(tid, str(sub))
         if status in ("failed", "error", "cancelled"):
@@ -205,7 +226,9 @@ def grok_tool_update(tracker: AgentTracker, ev: dict, calls: dict[str, str]) -> 
         return
     if status != "completed":
         return
-    results = out.get("results") if isinstance(out.get("results"), list) else [out]
+    # live 2026-09-28: {type: TaskOutput, Result: {task_id, status, duration_secs, output}}
+    results = out.get("results") or out.get("Result") or out
+    results = results if isinstance(results, list) else [results]
     for r in results:
         if not isinstance(r, dict):
             continue
@@ -214,4 +237,9 @@ def grok_tool_update(tracker: AgentTracker, ev: dict, calls: dict[str, str]) -> 
         if name == GROK_FOLLOW[1]:
             tracker.finish(key, failed=True, summary="stopped")
         elif state in DONE_STATES:
-            tracker.finish(key, failed=DONE_STATES[state], summary=str(r.get("output") or r.get("result") or ""))
+            output = str(r.get("output") or r.get("result") or "")
+            run = tracker.get(key)
+            calls = re.search(r"<subagent_meta>[^<]*tool_calls=(\d+)", output)
+            if run is not None and calls:
+                run.tool_uses = int(calls.group(1))
+            tracker.finish(key, failed=DONE_STATES[state], summary=_grok_summary(output))

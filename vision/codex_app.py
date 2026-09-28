@@ -233,6 +233,7 @@ def run_turn(brain: "CodexBrain", prompt: str, *, on_text=None, on_status=None, 
     tools: dict[str, ToolCall] = {}
     streamed: set[str] = set()  # agent messages that arrived as deltas
     state = {"done": False, "status": "", "error": "", "last_error": "", "usage": None, "last_message": None}
+    child_said: dict[str, str] = {}  # a sub-agent thread's latest message: its row's summary when it completes
 
     def tool_changed(call: ToolCall) -> None:
         if on_tool:
@@ -278,7 +279,22 @@ def run_turn(brain: "CodexBrain", prompt: str, *, on_text=None, on_status=None, 
         elif kind == "error" and item.get("message"):
             state["last_error"] = item["message"]
 
+    def child_event(thread: str, method: str, params: dict) -> None:
+        """A sub-agent's own thread (live run 2026-09-28: the app-server streams its items too). Its tool
+        calls are steps on its row and its messages the row's summary; none of it is the reply."""
+        item = params.get("item") or {}
+        kind = item.get("type", "")
+        if method == "item/started" and kind in TOOL_LABELS:
+            label = TOOL_LABELS[kind] if kind != "mcpToolCall" else (item.get("tool") or "MCP")
+            subs.step(thread, label, str(item.get("command") or item.get("query") or item.get("path") or ""))
+        elif method == "item/completed" and kind == "agentMessage" and item.get("text"):
+            child_said[thread] = item["text"]
+
     def notification(method: str, params: dict) -> None:
+        thread = params.get("threadId") or ""
+        if thread and rpc.thread_id and thread != rpc.thread_id:
+            child_event(thread, method, params)
+            return
         if method == "item/agentMessage/delta":
             item_id, delta = params.get("itemId") or "", params.get("delta") or ""
             if delta:
@@ -289,7 +305,12 @@ def run_turn(brain: "CodexBrain", prompt: str, *, on_text=None, on_status=None, 
                 reply.add(delta)
         elif method in ("item/started", "item/completed", "item/updated"):
             item = params.get("item") or {}
-            if codex_item(subs, _normalized(item), method == "item/completed"):
+            norm = _normalized(item)
+            if codex_item(subs, norm, method == "item/completed"):
+                child = subs.get(norm.get("agent_thread_id"))
+                if child is not None and child.done and not child.summary and child_said.get(norm["agent_thread_id"]):
+                    child.summary = child_said[norm["agent_thread_id"]]
+                    subs._changed(child)
                 if method == "item/started" and on_status:
                     on_status("Agent")
                 return
@@ -395,6 +416,9 @@ def run_turn(brain: "CodexBrain", prompt: str, *, on_text=None, on_status=None, 
 
 def _normalized(item: dict) -> dict:
     """An app-server item in the shape vision.subagents reads (the exec stream's snake_case)."""
+    if item.get("type") == "subAgentActivity":
+        return {"type": "sub_agent_activity", "id": item.get("id"), "kind": item.get("kind"),
+                "agent_thread_id": item.get("agentThreadId"), "agent_path": item.get("agentPath")}
     if item.get("type") != "collabAgentToolCall":
         return item
     out = _snake(item)

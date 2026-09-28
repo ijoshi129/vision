@@ -255,9 +255,10 @@ def _usage(u: dict) -> dict:
             "reasoning_tokens": int(u.get("reasoningTokens") or 0)}
 
 
-def permission(brain: "GrokBrain", params: dict) -> dict:
+def permission(brain: "GrokBrain", params: dict, refused: list | None = None) -> dict:
     """Answer a session/request_permission: allow once, unless a deny rule matches the command or
-    plan mode meets a write. Never an "always" option: that would outlive Vision's rules."""
+    plan mode meets a write. Never an "always" option: that would outlive Vision's rules.
+    A refusal is appended to `refused` as (what, why): Grok ends the turn on one, so the caller says why."""
     from vision.localtools import denied
 
     call = params.get("toolCall") or {}
@@ -268,6 +269,8 @@ def permission(brain: "GrokBrain", params: dict) -> dict:
         refuse = denied(str(raw["command"]), brain.cfg.denied_tools)
     if not refuse and brain.cfg.mode == "plan" and (kind in _WRITES or _tool_name(call) in ("search_replace", "write")):
         refuse = "plan mode is read-only"
+    if refuse and refused is not None:
+        refused.append((str(raw.get("command") or call.get("title") or _tool_name(call) or "that"), refuse))
     options = params.get("options") or []
     want = ("reject_once",) if refuse else ("allow_once",)
     pick = next((o for o in options if o.get("kind") in want), None)
@@ -296,6 +299,7 @@ def run_turn(brain: "GrokBrain", prompt: str, *, on_text=None, on_status=None, o
     tools: dict[str, ToolCall] = {}
     usage: dict = {}
     state = {"prompting": False, "busy": False, "last_error": "", "cancelled": False}
+    refused: list[tuple[str, str]] = []  # Vision's own refusals this turn (Grok cancels the turn after one)
 
     def tool_changed(call: ToolCall) -> None:
         if on_tool:
@@ -315,7 +319,12 @@ def run_turn(brain: "GrokBrain", prompt: str, *, on_text=None, on_status=None, o
         elif kind == "tool_call":
             name = _tool_name(update)
             tid = update.get("toolCallId") or name
-            grok_tool_call(subs, {**update, "toolName": name}, sub_calls)
+            if grok_tool_call(subs, {**update, "toolName": name}, sub_calls):
+                turn.tools_used.append("Agent")  # a sub-agent has its own row (on_agent), as with Claude
+                reply.tool()
+                if on_status:
+                    on_status("Agent")
+                return
             label = TOOL_LABELS.get(name) or _KIND_LABELS.get(update.get("kind") or "") or name or "tool"
             turn.tools_used.append(label)
             reply.tool()
@@ -367,7 +376,7 @@ def run_turn(brain: "GrokBrain", prompt: str, *, on_text=None, on_status=None, o
 
     def request(method: str, params: dict) -> dict | None:
         if method == "session/request_permission":
-            return permission(brain, params)
+            return permission(brain, params, refused)
         return None  # ask_user_question, plan-mode tools: headless turned them off; refused here
 
     sandbox = sandbox_for(brain.cfg)
@@ -435,6 +444,16 @@ def run_turn(brain: "GrokBrain", prompt: str, *, on_text=None, on_status=None, o
                 tool_changed(call)
 
     turn.text = reply.finish()
+    if cancelled and refused and not brain._killed:
+        # Grok stops the turn as "cancelled" when a permission is rejected; nobody cancelled it, so say what was refused.
+        what, why = refused[-1]
+        rule = f"it matches your {why} rule" if why.startswith("Bash(") else why
+        note = f"I didn't run `{what}`: {rule}."
+        lead = "\n\n" if turn.text.strip() else ""
+        turn.text = f"{turn.text.rstrip()}{lead}{note}"
+        if on_text:
+            on_text(lead + note)
+        cancelled = False
     if usage:
         turn.usage = usage
     if cancelled:

@@ -78,6 +78,9 @@ def run_prompt(rid, text):
         ok = outcome.get("optionId") == "yes"
         update({"sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed" if ok else "failed",
                 "content": [{"type": "content", "content": {"type": "text", "text": "hi\n" if ok else "rejected"}}]})
+        if not ok:  # real Grok (2026-09-28): a rejected permission ends the turn as cancelled, nothing said
+            end_turn(rid, "cancelled")
+            return
         chunk(f"permission {outcome.get('optionId') or outcome.get('outcome')}.")
     elif text == "late":  # the reply is over in Grok, the prompt's answer not yet sent: an interject now is a turn of its own
         chunk("Done.")
@@ -99,12 +102,16 @@ def run_prompt(rid, text):
     else:
         chunk("Hello ")
         chunk("there.")
+    end_turn(rid, "end_turn")
+
+
+def end_turn(rid, stop):
     send({"jsonrpc": "2.0", "method": "_x.ai/queue/changed", "params": {"sessionId": SID, "entries": []}})
     send({"jsonrpc": "2.0", "method": "_x.ai/session_notification", "params": {"sessionId": SID, "update": {
-        "sessionUpdate": "turn_completed", "prompt_id": "p1", "stop_reason": "end_turn",
+        "sessionUpdate": "turn_completed", "prompt_id": "p1", "stop_reason": stop,
         "usage": {"inputTokens": 100, "outputTokens": 7, "cachedReadTokens": 50, "cacheCreationTokens": 0, "reasoningTokens": 3}}}})
-    send({"jsonrpc": "2.0", "method": "_x.ai/session/prompt_complete", "params": {"sessionId": SID, "promptId": "p1", "stopReason": "end_turn"}})
-    send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+    send({"jsonrpc": "2.0", "method": "_x.ai/session/prompt_complete", "params": {"sessionId": SID, "promptId": "p1", "stopReason": stop}})
+    send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": stop}})
 
 
 for line in sys.stdin:
