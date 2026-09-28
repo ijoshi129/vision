@@ -375,6 +375,19 @@ Its conversations list under their own `/session` tab. A table Vision can't use 
 
 `[local]` is the same kind of provider with a shorter name: its models stay bare (`qwen3.6`).
 
+`vision provider add` asks the same questions (name, URL, key variable), checks the server lists its
+models, and writes the table; `vision provider list` shows every provider with whether it is on and set
+up here, `vision provider remove <name>` takes a table out. With nothing set up at all, a new chat says
+so and points at the CLIs' installers and `vision provider add`.
+
+A provider with its own protocol can come from a package: a `vision.providers` entry point that is a
+`vision.providers.Provider` (or a callable returning one or a list), giving its brain class and the
+hooks it supports; `pip install` it and it appears in `/model`, `/providers` and `vision provider list`
+(`source = "plugin"`). The registry is documented at the top of `vision/providers.py`.
+
+The phone draws every provider the laptop's way (`GET /providers`: label, SF Symbol, tint, whether it is
+on and ready), so a server added on the laptop gets its own look on the phone without an app update.
+
 All three CLI providers work in the directory where you launch Vision (or `[brain].workdir`). Install and log in
 to the provider you want with `claude`, `codex login` or `grok login`; `vision doctor` checks all three
 (version, login, and subscription usage; `--no-usage` skips the usage tables).

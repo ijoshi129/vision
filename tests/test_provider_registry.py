@@ -202,3 +202,54 @@ class NewProviderTests(unittest.TestCase):
         self.assertNotIn("acme", providers.conversation_names())
         self.assertEqual(providers.cap("acme", "powered_by"), "Acme's model")
         self.assertIsNone(providers.cap("nope", "powered_by"))
+
+
+class PluginAndTableTests(unittest.TestCase):
+    def tearDown(self):
+        providers.REGISTRY.pop("acme", None)
+        providers._plugins_loaded = False
+
+    def test_plugins_come_from_entry_points(self):
+        made = providers.Provider("acme", "Acme", "Acme", "via Acme", "install acme", "vision.brain:Brain", "Acme")
+
+        class EP:
+            name, value = "acme", "acme_pkg:provider"
+
+            def load(self):
+                return lambda: [made]
+
+        class Bad:
+            name, value = "broken", "broken_pkg:x"
+
+            def load(self):
+                raise ImportError("no such module")
+
+        providers._plugins_loaded = False
+        with patch("importlib.metadata.entry_points", return_value=[EP(), Bad()]):
+            notes = providers.load_plugins()
+        self.assertEqual(providers.REGISTRY["acme"].source, "plugin")
+        self.assertEqual(len(notes), 1)
+        self.assertIn("broken", notes[0])
+        self.assertEqual(providers.load_plugins(), [])  # once per process
+        # a config table can't take a plugin's name
+        self.assertIn("taken", providers.register_endpoints({"acme": {"base_url": "http://x/v1"}})[0])
+
+    def test_provider_table_written_and_removed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            path.write_text("[brain]\nmodel = \"opus\"\n\n[providers]\nenabled = [\"claude\"]\n", encoding="utf-8")
+            with patch.object(config, "CONFIG_PATH", path), patch.object(config, "ensure_dirs"):
+                config.save_provider_table("ollama", {"base_url": "http://h/v1", "label": "", "api_key_env": "K", "context": 4096, "models": ["a", "b"]})
+                config.save_provider_table("ollama", {"base_url": "http://h2/v1", "context": None, "models": []})  # rewrite
+                cfg = config.load_config()
+                self.assertEqual(providers.REGISTRY["ollama"].endpoint.base_url, "http://h2/v1")
+                self.assertEqual(cfg.providers.enabled, ["claude"])  # an explicit list stays as it is
+                self.assertNotIn("api_key_env", path.read_text())
+                config.remove_provider_table("ollama")
+                self.assertNotIn("[providers.ollama]", path.read_text())
+                self.assertIn('enabled = ["claude"]', path.read_text())
+        providers.register_endpoints({})
+
+    def test_describe_for_the_phone(self):
+        d = providers.REGISTRY["local"].describe()
+        self.assertEqual((d["name"], d["icon"], d["tint"], d["conversation"], d["ready"]), ("local", "desktopcomputer", "#615CED", True, None))

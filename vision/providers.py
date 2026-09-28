@@ -80,11 +80,21 @@ class Provider:
     default_effort_note: str = ""  # shown by its default effort level in /effort
     title_scanner: str = ""  # LiveTitle method that reads a running session's title
     endpoint: Endpoint | None = None  # a config-defined server (the built-in "local" reads [local] instead)
+    source: str = "builtin"  # "builtin", "config" ([providers.<name>]) or "plugin" (a vision.providers entry point)
+    icon: str = "cpu"  # SF Symbol the phone draws it with
+    tint: str = "#8E8E93"  # its colour there
     hooks: dict[str, str] = field(default_factory=dict)
 
     @property
     def builtin(self) -> bool:
-        return self.endpoint is None
+        return self.source == "builtin"
+
+    def describe(self, cfg=None) -> dict:
+        """What a client needs to draw and offer it (the phone's /providers)."""
+        return {"name": self.name, "label": self.label, "product": self.product, "note": self.note, "icon": self.icon,
+                "tint": self.tint, "source": self.source, "setup": self.setup, "has_usage": self.has_usage,
+                "banked_resets": self.banked_resets, "conversation": bool(self.conversation),
+                "enabled": cfg is None or self in enabled(cfg), "ready": ready(self.name, cfg) if cfg is not None else None}
 
     def brain_class(self):
         return _load(self.brain)
@@ -113,6 +123,7 @@ REGISTRY: dict[str, Provider] = {p.name: p for p in (
         install_hint="curl -fsSL https://claude.ai/install.sh | bash, then run `claude` to log in",
         has_usage=True, banked_resets=True, usage_from_text=True, conversation="vision.conversation:ClaudeConversation",
         plan_tool=True, fast_model="opus", default_model="opus", title_scanner="_scan_claude",
+        icon="sparkles", tint="#D9785A",
         hooks={
             "find_cli": "vision.brain:find_claude",
             "session_paths": "vision.sessions:claude_session_paths", "parse_session": "vision.sessions:_claude_session",
@@ -128,7 +139,7 @@ REGISTRY: dict[str, Provider] = {p.name: p for p in (
         cli="codex", home_env="CODEX_HOME", npm_package="@openai/codex",
         install_hint="npm i -g @openai/codex, then run `codex login`", models_args=("debug", "models"),
         has_usage=True, banked_resets=True, conversation="vision.codex_voice:CodexConversation",
-        default_effort_note="Codex default", title_scanner="_scan_codex",
+        default_effort_note="Codex default", title_scanner="_scan_codex", icon="terminal", tint="#0F997A",
         hooks={
             "find_cli": "vision.codex:find_codex",
             "session_paths": "vision.sessions:codex_session_paths", "parse_session": "vision.sessions:_codex_session",
@@ -143,7 +154,7 @@ REGISTRY: dict[str, Provider] = {p.name: p for p in (
         "vision.grok:GrokBrain", "Grok",
         cli="grok", home_env="GROK_HOME", install_hint="https://x.ai/cli, then run `grok login`", models_args=("models",),
         turn_env=(("GROK_MEMORY", "0"), ("GROK_DISABLE_AUTOUPDATER", "1")),  # Vision's MEMORY.md is the shared store
-        has_usage=True, title_scanner="_scan_grok",
+        has_usage=True, title_scanner="_scan_grok", icon="bolt.fill", tint="#5C6680",
         hooks={
             "find_cli": "vision.grok:find_grok",
             "session_paths": "vision.sessions:grok_session_paths", "parse_session": "vision.sessions:_grok_session",
@@ -157,7 +168,7 @@ REGISTRY: dict[str, Provider] = {p.name: p for p in (
         "start llama-server and point [local] base_url in config.toml at it",
         "vision.local:LocalBrain", "an open model on the user's own hardware",
         conversation="vision.local:LocalConversation", conversation_thinks=False,
-        vision_runs_tools=True, keeps_partial_turns=False,
+        vision_runs_tools=True, keeps_partial_turns=False, icon="desktopcomputer", tint="#615CED",
         hooks={
             "session_paths": "vision.sessions:local_session_paths", "parse_session": "vision.sessions:_local_session",
             "history": "vision.sessions:local_history", "refresh_models": "vision.clis:refresh_local_models",
@@ -173,13 +184,13 @@ def register_endpoints(specs: dict[str, dict]) -> list[str]:
     """Replace the config-defined providers with these `[providers.<name>]` tables. A bad one is
     skipped with its name and reason in the returned notes (an unknown type, a built-in name, no URL)."""
     notes: list[str] = []
-    for name in [n for n, p in REGISTRY.items() if not p.builtin]:
+    for name in [n for n, p in REGISTRY.items() if p.source == "config"]:
         del REGISTRY[name]
     for raw_name, spec in specs.items():
         name = str(raw_name).strip().lower()
         if not isinstance(spec, dict):
             continue
-        if name in PROVIDER_NAMES or not name.replace("-", "").replace("_", "").isalnum():
+        if name in REGISTRY or not name.replace("-", "").replace("_", "").isalnum():
             notes.append(f"[providers.{raw_name}]: that name is taken or not a plain word; skipped")
             continue
         kind = str(spec.get("type") or "openai").strip().lower()
@@ -199,8 +210,44 @@ def register_endpoints(specs: dict[str, dict]) -> list[str]:
             name, label, label, f"via {url} · your own server", f"start the server at {url}, or fix base_url in [providers.{name}]",
             "vision.local:LocalBrain", f"an open model served by {label}",
             conversation="vision.local:LocalConversation", conversation_thinks=False,
-            vision_runs_tools=True, keeps_partial_turns=False, endpoint=ep, hooks=_ENDPOINT_HOOKS)
+            vision_runs_tools=True, keeps_partial_turns=False, endpoint=ep, source="config",
+            icon="server.rack", tint=_TINTS[len(REGISTRY) % len(_TINTS)], hooks=_ENDPOINT_HOOKS)
         forget_ready()
+    return notes
+
+
+_TINTS = ("#C2410C", "#0E7490", "#7C3AED", "#B45309", "#15803D", "#BE185D")  # config-defined servers, in turn
+PLUGIN_GROUP = "vision.providers"
+_plugins_loaded = False
+
+
+def load_plugins() -> list[str]:
+    """Providers from installed packages: each `vision.providers` entry point is a Provider, or a callable
+    returning one or a list of them. Loaded once per process; a broken plugin is skipped with a note."""
+    global _plugins_loaded
+    if _plugins_loaded:
+        return []
+    _plugins_loaded = True
+    notes: list[str] = []
+    try:
+        from importlib.metadata import entry_points
+
+        eps = list(entry_points(group=PLUGIN_GROUP))
+    except Exception as e:  # noqa: BLE001
+        return [f"provider plugins could not be listed: {e}"]
+    for ep in eps:
+        try:
+            obj = ep.load()
+            found = obj() if callable(obj) and not isinstance(obj, Provider) else obj
+            for p in (found if isinstance(found, (list, tuple)) else [found]):
+                if not isinstance(p, Provider):
+                    raise TypeError(f"{type(p).__name__} is not a Provider")
+                if p.name in REGISTRY:
+                    raise ValueError(f"the name {p.name!r} is taken")
+                REGISTRY[p.name] = p if p.source == "plugin" else Provider(**{**p.__dict__, "source": "plugin"})
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"provider plugin {ep.name} ({ep.value}) was skipped: {e}")
+    forget_ready()
     return notes
 
 
@@ -211,6 +258,8 @@ def endpoint_for(provider: str, cfg) -> Endpoint | None:
         return None
     if p.endpoint is not None:
         return p.endpoint
+    if p.name != "local":
+        return None  # a plugin provider with no CLI and no endpoint drives itself
     local = getattr(cfg, "local", None)
     if local is None:
         return Endpoint()
@@ -375,7 +424,8 @@ def settle(cfg) -> str:
     other = first_ready_model(cfg)
     if not other:
         hints = "; ".join(f"{p.label}: {p.setup}" for p in enabled(cfg)) or "turn one on with /providers"
-        return f"No provider is set up yet, so Vision can't answer. {hints}."
+        return (f"No provider is set up yet, so Vision can't answer. {hints}. "
+                "Or add a model server of your own (Ollama, LM Studio, an API) with `vision provider add`.")
     cfg.brain.model = other
     cfg.brain.effort, _ = coerce_effort(other, cfg.brain.effort)
     return f"{why} Using {model_label(other)} for now (config.toml unchanged)."

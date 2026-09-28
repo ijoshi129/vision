@@ -3047,6 +3047,97 @@ def voices(
 voice_app = typer.Typer(help="Make and manage voices for the Qwen3-TTS engine.", no_args_is_help=True)
 app.add_typer(voice_app, name="voice")
 
+provider_app = typer.Typer(help="The model providers /model offers: the built-in CLIs, and any OpenAI-compatible server you add.", no_args_is_help=True)
+app.add_typer(provider_app, name="provider")
+
+
+@provider_app.command("list")
+def provider_list():
+    """Every provider Vision knows, whether it is on (/providers) and set up here."""
+    from vision.providers import REGISTRY, ready
+
+    cfg = load_config()
+    t = Table(header_style=ACCENT, show_edge=False)
+    for col in ("provider", "on", "ready", "runs through"):
+        t.add_column(col)
+    for p in REGISTRY.values():
+        on = p.name in cfg.providers.enabled
+        ok = ready(p.name, cfg)
+        where = p.endpoint.base_url if p.endpoint else p.product if p.cli else p.note.removeprefix("via ")
+        t.add_row(f"{p.label} [dim]({p.name})[/dim]", "[green]yes[/green]" if on else "[dim]no[/dim]",
+                  "[green]yes[/green]" if ok else f"[yellow]no[/yellow] [dim]{p.setup}[/dim]", where)
+    console.print(t)
+    for n in cfg.providers.notes:
+        console.print(f"[yellow]{n}[/yellow]")
+
+
+@provider_app.command("add")
+def provider_add(
+    name: Optional[str] = typer.Argument(None, help="A short name: ollama, openrouter, lmstudio… (its models show as <name>/<model>)."),
+    url: Optional[str] = typer.Option(None, "--url", help="The server's OpenAI-compatible base URL, ending in /v1."),
+    label: Optional[str] = typer.Option(None, "--label", help="How /model names it (default: the name capitalised)."),
+    key_env: Optional[str] = typer.Option(None, "--key-env", help="Environment variable holding its API key, if it needs one."),
+    context: Optional[int] = typer.Option(None, "--context", help="Context size in tokens (default 32768)."),
+    models: Optional[str] = typer.Option(None, "--models", help="Comma-separated model ids, when the server can't list its own."),
+):
+    """Add an OpenAI-compatible server (Ollama, LM Studio, vLLM, OpenRouter, a hosted API) as a provider:
+    asks what it needs, checks the server answers, writes [providers.<name>] to config.toml."""
+    import os
+    import re
+
+    from vision.config import save_provider_table
+    from vision.providers import REGISTRY, Endpoint
+
+    name = (name or typer.prompt("Short name (e.g. ollama)")).strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+        raise typer.BadParameter("a plain lowercase word: letters, digits, - or _")
+    if name in REGISTRY and REGISTRY[name].source != "config":
+        raise typer.BadParameter(f"{name} is a built-in provider")
+    url = (url or typer.prompt("Base URL", default="http://localhost:11434/v1")).strip().rstrip("/")
+    if not re.match(r"https?://", url):
+        raise typer.BadParameter("the URL must start with http:// or https://")
+    if key_env is None:
+        key_env = typer.prompt("Environment variable holding the API key (blank if none)", default="", show_default=False).strip()
+    if key_env and not os.environ.get(key_env):
+        console.print(f"[yellow]{key_env} is not set in this shell; the server will be asked without a key for now.[/yellow]")
+    ep = Endpoint(url, api_key_env=key_env or "", context=context or 32768)
+    ids: list[str] = [m.strip() for m in (models or "").split(",") if m.strip()]
+    if not ids:
+        with console.status("[dim]asking the server for its models…[/dim]"):
+            try:
+                import urllib.request
+
+                req = urllib.request.Request(url + "/models", headers={"User-Agent": "vision", **ep.headers()})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    data = json.loads(r.read().decode())
+                ids = [str(m["id"]) for m in data.get("data") or [] if isinstance(m, dict) and m.get("id")]
+            except Exception as e:  # noqa: BLE001
+                console.print(f"[red]{url}/models did not answer: {e}[/red]")
+                if not typer.confirm("Save it anyway?", default=False):
+                    raise typer.Exit(1)
+    if ids:
+        console.print(f"[dim]{len(ids)} model{'s' if len(ids) != 1 else ''}: {', '.join(ids[:6])}{'…' if len(ids) > 6 else ''}[/dim]")
+    values = {"base_url": url, "label": label or "", "api_key_env": key_env or "", "context": context, "models": [m.strip() for m in (models or "").split(",") if m.strip()]}
+    save_provider_table(name, values)
+    console.print(f"[green]✓[/green] [providers.{name}] saved to {CONFIG_PATH}: its models show in /model as {name}/<model>."
+                  + " Restart Vision (`vision restart`) to pick it up." )
+
+
+@provider_app.command("remove")
+def provider_remove(name: str = typer.Argument(..., help="The provider's short name.")):
+    """Remove a [providers.<name>] table from config.toml (built-in providers are switched off with /providers instead)."""
+    from vision.config import remove_provider_table
+    from vision.providers import REGISTRY
+
+    load_config()
+    p = REGISTRY.get(name)
+    if p is not None and p.source != "config":
+        raise typer.BadParameter(f"{name} is not a config-defined provider; switch it off with /providers")
+    if p is None:
+        raise typer.BadParameter(f"no [providers.{name}] in {CONFIG_PATH}")
+    remove_provider_table(name)
+    console.print(f"[green]✓[/green] [providers.{name}] removed from {CONFIG_PATH}")
+
 
 def _save_voice(name: str, audio, transcript: str | None, design: str | None) -> Path:
     import soundfile as sf

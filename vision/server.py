@@ -1611,6 +1611,14 @@ def create_app(hub: Hub) -> FastAPI:
         hub.log(f"default saved from the phone → {model} · {effort or 'effort off'}")
         return defaults_payload(model, effort)
 
+    @app.get("/providers", dependencies=[Depends(bearer)])
+    async def providers_list() -> dict:
+        """Every provider the laptop knows, with how to draw it (icon, tint) and whether it is on and ready."""
+        from vision.providers import REGISTRY
+
+        rows = await asyncio.get_running_loop().run_in_executor(None, lambda: [p.describe(hub.cfg) for p in REGISTRY.values()])
+        return {"providers": rows}
+
     @app.get("/sessions", dependencies=[Depends(bearer)])
     async def sessions() -> list[dict]:
         from vision.sessions import list_all_sessions

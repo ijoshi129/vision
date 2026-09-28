@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from vision.models import THINKING_OFF, provider_for
-from vision.providers import PROVIDER_NAMES, REGISTRY, register_endpoints
+from vision.providers import PROVIDER_NAMES, REGISTRY, load_plugins, register_endpoints
 
 # Windows starts in plan mode: none of the Linux sandboxes exist there, and denied_tools only knows
 # POSIX commands. "auto" still works; set it under [brain] or press Shift-Tab.
@@ -639,7 +639,7 @@ def load_config() -> Config:
         raise SystemExit(f"Config error in {CONFIG_PATH}: {e}")
     cfg = Config()
     providers_raw = raw.get("providers", {}) if isinstance(raw.get("providers"), dict) else {}
-    cfg.providers.notes = register_endpoints({k: v for k, v in providers_raw.items() if isinstance(v, dict)})
+    cfg.providers.notes = load_plugins() + register_endpoints({k: v for k, v in providers_raw.items() if isinstance(v, dict)})
     for section, target in (("brain", cfg.brain), ("providers", cfg.providers), ("codex", cfg.codex), ("grok", cfg.grok), ("local", cfg.local), ("conversation", cfg.conversation), ("voice", cfg.voice), ("listen", cfg.listen), ("wake", cfg.wake), ("buddy", cfg.buddy), ("remote", cfg.remote), ("weather", cfg.weather)):
         for k, v in raw.get(section, {}).items():
             if hasattr(target, k):
@@ -828,6 +828,44 @@ def save_wake_enabled(enabled: bool) -> None:
 def save_enabled_providers(names: list[str]) -> None:
     """Persist `[providers] enabled` in config.toml."""
     save_config_value("providers", "enabled", "[" + ", ".join(f'"{n}"' for n in names) + "]")
+
+
+def _toml_str(s: str) -> str:
+    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def save_provider_table(name: str, values: dict) -> None:
+    """Write (or rewrite) a `[providers.<name>]` table in config.toml, comments elsewhere untouched."""
+    ensure_dirs()
+    text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else DEFAULT_CONFIG
+    lines = remove_provider_table(name, text).rstrip("\n").splitlines()
+    block = [f"[providers.{name}]"]
+    for k, v in values.items():
+        if v in ("", None, []):
+            continue
+        lit = _toml_str(v) if isinstance(v, str) else "[" + ", ".join(_toml_str(x) for x in v) + "]" if isinstance(v, list) else str(v)
+        block.append(f"{k} = {lit}")
+    out = "\n".join(lines + ["", *block]) + "\n"
+    tomllib.loads(out)
+    CONFIG_PATH.write_text(out, encoding="utf-8")
+
+
+def remove_provider_table(name: str, text: str | None = None) -> str:
+    """config.toml without the `[providers.<name>]` table (returned; written back when `text` is None)."""
+    write = text is None
+    text = CONFIG_PATH.read_text(encoding="utf-8") if text is None and CONFIG_PATH.exists() else (text or "")
+    out, skipping = [], False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            skipping = s[1:-1].strip() == f"providers.{name}"
+        if not skipping:
+            out.append(line)
+    result = "\n".join(out).rstrip("\n") + "\n"
+    if write:
+        tomllib.loads(result)
+        CONFIG_PATH.write_text(result, encoding="utf-8")
+    return result
 
 
 def save_input_device(spec: str) -> None:
