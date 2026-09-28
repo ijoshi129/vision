@@ -44,9 +44,10 @@ The extras are `voice` (speech in and out), `serve` (the remote API), `weather` 
 `all`. If a command needs one you don't have, Vision tells you which to install.
 
 Log in to whichever brains you want with their own tools first: `claude`, `codex login`, `grok login`.
-No subscription? `vision provider add ollama` (or any OpenAI-compatible server or API) makes it a brain
-in a minute. With nothing set up yet, `vision` still opens and tells you what it needs; `/providers`
-picks which brains `/model` offers.
+No subscription? `vision provider setup` walks you through it: a CLI (installed and logged in for you
+on request), Ollama or any OpenAI-compatible server or API, or an ACP agent. `vision` starts that
+setup by itself the first time it runs with nothing ready; `/providers` picks which brains `/model`
+offers afterwards.
 
 ## Use
 

@@ -400,8 +400,11 @@ blocked inside every other provider's turns, like the built-in CLIs. `vision pro
 --command "gemini --experimental-acp"` writes the table. Built against the protocol's standard slice
 (tests/fake_acp_agent.py); not yet run against a real agent.
 
-`vision provider add` asks the same questions (name, URL, key variable), checks the server lists its
-models, and writes the table; `vision provider list` shows every provider with whether it is on and set
+`vision provider setup` is the guided way in: pick a brain (a Claude, ChatGPT or Grok CLI, a server on
+this machine, a hosted API, an ACP agent), and it installs and logs in on request or points Vision at
+the server, then saves the model to start on. `vision` runs it by itself the first time it starts with
+nothing ready (set `VISION_NO_SETUP=1` to skip that). `vision provider add` asks the same questions
+for one server (name, URL, key variable), checks the server lists its models, and writes the table; `vision provider list` shows every provider with whether it is on and set
 up here, `vision provider remove <name>` takes a table out. With nothing set up at all, a new chat says
 so and points at the CLIs' installers and `vision provider add`.
 

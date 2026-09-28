@@ -815,6 +815,11 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
     import uuid
 
     cfg = _cfg(model, voice, effort, quiet=True)
+    if not join:
+        from vision.welcome import first_run
+
+        if first_run(cfg):  # nothing to think with yet: the guided setup, then a fresh read of what it saved
+            cfg = _cfg(model, voice, effort, quiet=True)
     recovery = latest_terminal_recovery() if not (cont or join or model or effort) else None
     turn_journal = ChatJournal(recovery[0] if recovery else f"terminal-{uuid.uuid4().hex}")
     if not turn_journal.claim():  # another window opened the same crashed chat a moment ago
@@ -3069,6 +3074,16 @@ def provider_list():
     console.print(t)
     for n in cfg.providers.notes:
         console.print(f"[yellow]{n}[/yellow]")
+
+
+@provider_app.command("setup")
+def provider_setup():
+    """Guided setup: pick a brain (a Claude, ChatGPT or Grok CLI, a server on this machine, a hosted API,
+    an ACP agent), install and log in or point Vision at it, and choose the model to start on. `vision`
+    runs this by itself the first time it starts with nothing ready."""
+    from vision.welcome import ConsoleIO, Wizard
+
+    Wizard(ConsoleIO(console)).run()
 
 
 @provider_app.command("add")

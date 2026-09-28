@@ -73,6 +73,9 @@ class Provider:
     home_env: str = ""  # env var for the CLI's config dir: pointed at an empty one for every other provider's turns
     turn_env: tuple[tuple[str, str], ...] = ()  # set for its own turns
     install_hint: str = ""  # `vision doctor`'s "Install:" line
+    install_cmd: str = ""  # a shell line the guided setup can run to install it ("" = only a page to visit)
+    install_url: str = ""  # where to get it when there is no command
+    login_cmd: tuple[str, ...] = ()  # what to run, interactively, to log in
     update_args: tuple[str, ...] = ("update",)
     models_args: tuple[str, ...] = ()  # CLI args that make it rewrite its models cache (refresh_cli_models)
     npm_package: str = ""  # where its latest version is published, when no hook says otherwise
@@ -132,6 +135,7 @@ REGISTRY: dict[str, Provider] = {p.name: p for p in (
         "vision.brain:Brain", "Claude",
         cli="claude", home_env="CLAUDE_CONFIG_DIR", npm_package="@anthropic-ai/claude-code",
         install_hint="curl -fsSL https://claude.ai/install.sh | bash, then run `claude` to log in",
+        install_cmd="curl -fsSL https://claude.ai/install.sh | bash", login_cmd=("claude",),
         has_usage=True, banked_resets=True, usage_from_text=True, conversation="vision.conversation:ClaudeConversation",
         plan_tool=True, fast_model="opus", default_model="opus", title_scanner="_scan_claude",
         icon="sparkles", tint="#D9785A",
@@ -149,6 +153,7 @@ REGISTRY: dict[str, Provider] = {p.name: p for p in (
         "vision.codex:CodexBrain", "OpenAI Codex",
         cli="codex", home_env="CODEX_HOME", npm_package="@openai/codex",
         install_hint="npm i -g @openai/codex, then run `codex login`", models_args=("debug", "models"),
+        install_cmd="npm i -g @openai/codex", login_cmd=("codex", "login"),
         has_usage=True, banked_resets=True, conversation="vision.codex_voice:CodexConversation",
         default_effort_note="Codex default", title_scanner="_scan_codex", icon="terminal", tint="#0F997A",
         hooks={
@@ -164,6 +169,7 @@ REGISTRY: dict[str, Provider] = {p.name: p for p in (
         "install the Grok CLI (https://x.ai/cli), then run `grok login`",
         "vision.grok:GrokBrain", "Grok",
         cli="grok", home_env="GROK_HOME", install_hint="https://x.ai/cli, then run `grok login`", models_args=("models",),
+        install_url="https://x.ai/cli", login_cmd=("grok", "login"),
         turn_env=(("GROK_MEMORY", "0"), ("GROK_DISABLE_AUTOUPDATER", "1")),  # Vision's MEMORY.md is the shared store
         has_usage=True, title_scanner="_scan_grok", icon="bolt.fill", tint="#5C6680",
         hooks={
