@@ -3106,11 +3106,12 @@ def provider_add(
         console.print(f"[green]✓[/green] [providers.{name}] saved to {CONFIG_PATH}: an ACP agent, in /model as {name}/default"
                       + (f" and {name}/<model>" if ids else "") + ". Restart Vision (`vision restart`) to pick it up.")
         return
+    asked = url is None  # given as options, the rest isn't asked for either (scripts, no terminal)
     url = (url or typer.prompt("Base URL", default="http://localhost:11434/v1")).strip().rstrip("/")
     if not re.match(r"https?://", url):
         raise typer.BadParameter("the URL must start with http:// or https://")
     if key_env is None:
-        key_env = typer.prompt("Environment variable holding the API key (blank if none)", default="", show_default=False).strip()
+        key_env = typer.prompt("Environment variable holding the API key (blank if none)", default="", show_default=False).strip() if asked else ""
     if key_env and not os.environ.get(key_env):
         console.print(f"[yellow]{key_env} is not set in this shell; the server will be asked without a key for now.[/yellow]")
     ep = Endpoint(url, api_key_env=key_env or "", context=context or 32768)
