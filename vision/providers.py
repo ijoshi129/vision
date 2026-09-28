@@ -50,6 +50,16 @@ class Endpoint:
 
 
 @dataclass(frozen=True)
+class AcpAgent:
+    """A command that speaks ACP over stdio (vision/acp.py drives it)."""
+
+    command: tuple[str, ...]  # ("gemini", "--experimental-acp")
+    models: tuple[str, ...] = ()  # ids the agent takes; () = its own default only ("<name>/default")
+    model_flag: str = ""  # the flag that picks one ("--model"); "" = the agent's default always
+    env: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
 class Provider:
     name: str  # "claude", as in [providers] enabled and on the wire
     label: str  # "Claude", the /model tab and every short mention
@@ -80,6 +90,7 @@ class Provider:
     default_effort_note: str = ""  # shown by its default effort level in /effort
     title_scanner: str = ""  # LiveTitle method that reads a running session's title
     endpoint: Endpoint | None = None  # a config-defined server (the built-in "local" reads [local] instead)
+    acp: AcpAgent | None = None  # a config-defined ACP agent
     source: str = "builtin"  # "builtin", "config" ([providers.<name>]) or "plugin" (a vision.providers entry point)
     icon: str = "cpu"  # SF Symbol the phone draws it with
     tint: str = "#8E8E93"  # its colour there
@@ -193,9 +204,30 @@ def register_endpoints(specs: dict[str, dict]) -> list[str]:
         if name in REGISTRY or not name.replace("-", "").replace("_", "").isalnum():
             notes.append(f"[providers.{raw_name}]: that name is taken or not a plain word; skipped")
             continue
-        kind = str(spec.get("type") or "openai").strip().lower()
+        kind = str(spec.get("type") or ("acp" if spec.get("command") else "openai")).strip().lower()
+        label = str(spec.get("label") or name.capitalize())
+        if kind == "acp":
+            command = spec.get("command") or ()
+            command = tuple(str(c) for c in command) if isinstance(command, (list, tuple)) else tuple(str(command).split())
+            if not command or not command[0]:
+                notes.append(f"[providers.{raw_name}]: an acp provider needs command; skipped")
+                continue
+            models = spec.get("models") or ()
+            env = spec.get("env") if isinstance(spec.get("env"), dict) else {}
+            agent = AcpAgent(command, tuple(str(m) for m in models if str(m).strip()) if isinstance(models, (list, tuple)) else (),
+                             str(spec.get("model_flag") or ""), tuple((str(k), str(v)) for k, v in env.items()))
+            REGISTRY[name] = Provider(
+                name, label, label, f"via `{' '.join(command)}` · an ACP agent",
+                f"install {command[0]} so that `{command[0]}` is on PATH, and log in to it if it needs that",
+                "vision.acp:AcpBrain", f"{label}, an agent Vision drives over ACP",
+                cli=command[0], acp=agent, source="config", icon="cpu", tint=_TINTS[len(REGISTRY) % len(_TINTS)],
+                hooks={"session_paths": "vision.sessions:local_session_paths", "parse_session": "vision.sessions:_local_session",
+                       "history": "vision.sessions:local_history", "refresh_models": "vision.clis:refresh_acp_models",
+                       "tool_notes": "vision.persona:acp_tool_notes"})
+            forget_ready()
+            continue
         if kind != "openai":
-            notes.append(f"[providers.{raw_name}]: type {kind!r} is not supported (only \"openai\"); skipped")
+            notes.append(f"[providers.{raw_name}]: type {kind!r} is not supported (\"openai\" or \"acp\"); skipped")
             continue
         url = str(spec.get("base_url") or "").strip().rstrip("/")
         if not url:
@@ -205,7 +237,6 @@ def register_endpoints(specs: dict[str, dict]) -> list[str]:
         ep = Endpoint(url, str(spec.get("api_key") or ""), str(spec.get("api_key_env") or ""),
                       float(spec.get("timeout_s") or 180), int(spec.get("context") or 32768),
                       tuple(str(m) for m in models if str(m).strip()) if isinstance(models, (list, tuple)) else ())
-        label = str(spec.get("label") or name.capitalize())
         REGISTRY[name] = Provider(
             name, label, label, f"via {url} · your own server", f"start the server at {url}, or fix base_url in [providers.{name}]",
             "vision.local:LocalBrain", f"an open model served by {label}",
@@ -336,6 +367,10 @@ def ready(name: str, cfg=None) -> bool:
             return hit[1]
     if ep is not None:
         ok = _server_answers(ep.base_url)
+    elif p is not None and p.acp is not None:
+        import shutil
+
+        ok = bool(shutil.which(p.acp.command[0]))
     elif name in REGISTRY:
         from vision import clis
 

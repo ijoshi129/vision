@@ -154,6 +154,13 @@ enabled = ["claude", "codex", "grok", "local"]
 # base_url = "https://openrouter.ai/api/v1"
 # api_key_env = "OPENROUTER_API_KEY"
 # models = ["anthropic/claude-sonnet-4.5", "google/gemini-2.5-pro"]
+#
+# An agent that speaks ACP (Gemini CLI and others) is `type = "acp"` with its command; it brings its
+# own tools and Vision answers its permission prompts (see docs/guide.md, "Choosing providers").
+#
+# [providers.gemini]
+# type = "acp"
+# command = ["gemini", "--experimental-acp"]
 
 [codex]
 # Sandbox used for GPT/Codex models in auto mode: "auto" (= danger-full-access, matching Claude's auto
@@ -848,6 +855,27 @@ def save_provider_table(name: str, values: dict) -> None:
     out = "\n".join(lines + ["", *block]) + "\n"
     tomllib.loads(out)
     CONFIG_PATH.write_text(out, encoding="utf-8")
+    _enable_provider(name, True)
+
+
+def _enable_provider(name: str, on: bool) -> None:
+    """Keep an explicit `[providers] enabled` list in step with a table added or removed (one that is
+    left out already offers everything)."""
+    try:
+        raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return
+    listed = (raw.get("providers") or {}).get("enabled")
+    if not isinstance(listed, list):
+        return
+    names = [str(x) for x in listed]
+    if on and name not in names:
+        names.append(name)
+    elif not on and name in names:
+        names.remove(name)
+    else:
+        return
+    save_enabled_providers(names)
 
 
 def remove_provider_table(name: str, text: str | None = None) -> str:
@@ -865,6 +893,7 @@ def remove_provider_table(name: str, text: str | None = None) -> str:
     if write:
         tomllib.loads(result)
         CONFIG_PATH.write_text(result, encoding="utf-8")
+        _enable_provider(name, False)
     return result
 
 

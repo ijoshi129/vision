@@ -375,6 +375,31 @@ Its conversations list under their own `/session` tab. A table Vision can't use 
 
 `[local]` is the same kind of provider with a shorter name: its models stay bare (`qwen3.6`).
 
+An agent that speaks ACP (the Agent Client Protocol, JSON-RPC over stdio: Gemini CLI with
+`--experimental-acp`, and others adopting it) is a provider too, with `type = "acp"` and the command:
+
+```toml
+[providers.gemini]
+type = "acp"
+command = ["gemini", "--experimental-acp"]
+models = ["default", "gemini-2.5-pro"]   # optional; "default" is the agent's own
+model_flag = "--model"                    # how a named model is passed, if the agent takes one
+[providers.gemini.env]                    # optional, set for its turns
+GEMINI_SANDBOX = "false"
+```
+
+Vision starts the command for each turn, opens or resumes a session, and shows its text, tool rows
+and thinking the way it shows Grok's agent mode (`vision/acp.py`, on the same transport). The agent
+brings its own tools; Vision answers its permission prompts, approving everything `denied_tools`
+doesn't rule out and refusing writes in plan mode, and says what it refused when the agent then
+ends the turn. Plain ACP has no rules channel, so the persona leads the first prompt of a fresh
+session; no way into a running prompt either, so a message sent mid-reply queues for the next turn.
+Vision keeps its own transcript of every agent session (in the local-sessions folder), so `/session`
+lists them and a session the agent has lost carries its history into a fresh one. The command is
+blocked inside every other provider's turns, like the built-in CLIs. `vision provider add gemini
+--command "gemini --experimental-acp"` writes the table. Built against the protocol's standard slice
+(tests/fake_acp_agent.py); not yet run against a real agent.
+
 `vision provider add` asks the same questions (name, URL, key variable), checks the server lists its
 models, and writes the table; `vision provider list` shows every provider with whether it is on and set
 up here, `vision provider remove <name>` takes a table out. With nothing set up at all, a new chat says

@@ -155,6 +155,16 @@ def grok_tool_notes(tools: list[str], sandbox: str, denied_tools: list[str] | No
     return lines
 
 
+def acp_tool_notes(tools: list[str], sandbox: str, denied_tools: list[str] | None, weather: bool) -> list[str]:
+    """An ACP agent brings its own tools; Vision only answers its permission prompts."""
+    lines = ["You have your own tools for the shell, files and the web; use them as you normally would. Vision "
+             "approves each of your tool calls unless it matches one of the user's forbidden patterns."]
+    if denied_tools:
+        lines.append("The user's forbidden command patterns are: " + ", ".join(denied_tools) +
+                     ". Vision refuses them; a refused call comes back as an error, so don't retry it another way.")
+    return lines
+
+
 def local_tool_notes(tools: list[str], sandbox: str, denied_tools: list[str] | None, weather: bool) -> list[str]:
     """The tools Vision runs for a local model, which has to be told how they work."""
     lines: list[str] = []

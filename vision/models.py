@@ -321,6 +321,20 @@ def set_local_models(ids, provider: str = "local") -> bool:
     return True
 
 
+def set_agent_models(provider: str, ids) -> bool:
+    """The models an ACP agent can be asked for: named <provider>/<id>, no effort setting (the agent's own)."""
+    _ensure_provider(provider)
+    label = PROVIDER_LABELS.get(provider, provider)
+    new = [ModelInfo(provider, qualified(provider, str(i)), "default" if str(i) == "default" else str(i),
+                     f"{label}'s own default model" if str(i) == "default" else f"via {label} (ACP agent)", ())
+           for i in dict.fromkeys(str(i) for i in ids if str(i).strip())]
+    if not new:
+        return False
+    _swap(provider, new)
+    LIVE.add(provider)
+    return True
+
+
 def qualified(provider: str, model_id: str) -> str:
     """The alias a config-defined server's model goes by in /model: "ollama/qwen3"; the built-in local server's stay bare."""
     if provider == "local" or model_id.startswith(provider + "/"):

@@ -243,7 +243,7 @@ class PluginAndTableTests(unittest.TestCase):
                 config.save_provider_table("ollama", {"base_url": "http://h2/v1", "context": None, "models": []})  # rewrite
                 cfg = config.load_config()
                 self.assertEqual(providers.REGISTRY["ollama"].endpoint.base_url, "http://h2/v1")
-                self.assertEqual(cfg.providers.enabled, ["claude"])  # an explicit list stays as it is
+                self.assertEqual(cfg.providers.enabled, ["claude", "ollama"])  # an explicit list takes the new one
                 self.assertNotIn("api_key_env", path.read_text())
                 config.remove_provider_table("ollama")
                 self.assertNotIn("[providers.ollama]", path.read_text())

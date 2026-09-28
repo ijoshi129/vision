@@ -17,7 +17,7 @@ from vision.models import provider_label
 
 from vision import providers as _registry
 
-PROVIDERS = _registry.with_cli()  # the providers Vision drives through a CLI
+PROVIDERS = _registry.with_cli()  # the built-in providers Vision drives through a CLI (/update, /version)
 
 # Every CLI ships its own updater (Provider.update_args); `--version` output differs per tool, hence the parsing below.
 _VERSION = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.]+)?")
@@ -49,6 +49,13 @@ class CliInfo:
 def find_cli(provider: str) -> str:
     """The executable for a provider; raises that provider's error when it is not installed."""
     p = _registry.get(provider)
+    if p is not None and p.acp is not None:
+        import shutil
+
+        exe = shutil.which(p.acp.command[0])
+        if not exe:
+            raise FileNotFoundError(f"{p.acp.command[0]} (the {p.label} agent) is not on PATH")
+        return exe
     find = p.hook("find_cli") if p else None
     if find is None:
         raise ValueError(f"unknown provider {provider!r}" if p is None else f"{p.label} has no CLI")
@@ -337,6 +344,12 @@ def refresh_claude_models(provider: str = "claude") -> bool:
 
 def refresh_local_models(provider: str = "local") -> bool:
     return models.set_local_models(local_model_ids(provider=provider), provider)
+
+
+def refresh_acp_models(provider: str) -> bool:
+    """An ACP agent's models are whatever its table lists (else just its default): nothing to ask."""
+    p = _registry.get(provider)
+    return bool(p and p.acp and models.set_agent_models(provider, p.acp.models or ("default",)))
 
 
 def refresh_cli_models(provider: str) -> bool:

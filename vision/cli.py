@@ -3079,11 +3079,15 @@ def provider_add(
     key_env: Optional[str] = typer.Option(None, "--key-env", help="Environment variable holding its API key, if it needs one."),
     context: Optional[int] = typer.Option(None, "--context", help="Context size in tokens (default 32768)."),
     models: Optional[str] = typer.Option(None, "--models", help="Comma-separated model ids, when the server can't list its own."),
+    command: Optional[str] = typer.Option(None, "--command", help="An ACP agent instead of a server: the command that speaks ACP over stdio, e.g. \"gemini --experimental-acp\"."),
+    model_flag: Optional[str] = typer.Option(None, "--model-flag", help="ACP agent: the flag that picks a model (\"--model\"), when --models names several."),
 ):
-    """Add an OpenAI-compatible server (Ollama, LM Studio, vLLM, OpenRouter, a hosted API) as a provider:
-    asks what it needs, checks the server answers, writes [providers.<name>] to config.toml."""
+    """Add a provider: an OpenAI-compatible server (Ollama, LM Studio, vLLM, OpenRouter, a hosted API), or
+    with --command an agent that speaks ACP. Asks what it needs, checks it answers, writes [providers.<name>]
+    to config.toml."""
     import os
     import re
+    import shutil
 
     from vision.config import save_provider_table
     from vision.providers import REGISTRY, Endpoint
@@ -3093,6 +3097,15 @@ def provider_add(
         raise typer.BadParameter("a plain lowercase word: letters, digits, - or _")
     if name in REGISTRY and REGISTRY[name].source != "config":
         raise typer.BadParameter(f"{name} is a built-in provider")
+    if command:
+        argv = command.split()
+        if not shutil.which(argv[0]):
+            console.print(f"[yellow]{argv[0]} is not on PATH here; the provider will show as not set up until it is.[/yellow]")
+        ids = [m.strip() for m in (models or "").split(",") if m.strip()]
+        save_provider_table(name, {"type": "acp", "command": argv, "label": label or "", "models": ids, "model_flag": model_flag or ""})
+        console.print(f"[green]✓[/green] [providers.{name}] saved to {CONFIG_PATH}: an ACP agent, in /model as {name}/default"
+                      + (f" and {name}/<model>" if ids else "") + ". Restart Vision (`vision restart`) to pick it up.")
+        return
     url = (url or typer.prompt("Base URL", default="http://localhost:11434/v1")).strip().rstrip("/")
     if not re.match(r"https?://", url):
         raise typer.BadParameter("the URL must start with http:// or https://")
