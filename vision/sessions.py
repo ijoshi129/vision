@@ -309,18 +309,25 @@ def _parse_iso(stamp: str) -> float | None:
 
 
 def _grok_session(summary_path: str) -> SessionInfo | None:
-    """Parse one Grok session directory; None unless system_prompt.txt carries Vision's persona."""
+    """Parse one Grok session directory; None unless Vision started it (its own index, see
+    vision.grok.remember_session_id; older sessions may carry the persona in system_prompt.txt)."""
+    from vision.grok import known_session_ids
+
     folder = os.path.dirname(summary_path)
     try:
-        with open(os.path.join(folder, "system_prompt.txt"), encoding="utf-8", errors="replace") as f:
-            if VISION_MARKER not in f.read(8192):
-                return None
         with open(summary_path, encoding="utf-8") as f:
             data = json.loads(f.read())
     except (OSError, ValueError):
         return None
     info = data.get("info") if isinstance(data.get("info"), dict) else {}
     sid = info.get("id") or os.path.basename(folder)
+    if sid not in known_session_ids():
+        try:
+            with open(os.path.join(folder, "system_prompt.txt"), encoding="utf-8", errors="replace") as f:
+                if VISION_MARKER not in f.read(8192):
+                    return None
+        except OSError:
+            return None
     cwd = info.get("cwd") or ""
     title = (data.get("generated_title") or data.get("session_summary") or "").strip()
     last = _parse_iso(data.get("last_active_at") or "") or _parse_iso(data.get("updated_at") or "")

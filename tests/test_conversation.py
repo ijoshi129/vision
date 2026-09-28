@@ -588,7 +588,8 @@ class VoiceModelTests(unittest.TestCase):
         self.cfg.brain.model = "haiku"
         self.voice.follow()
         self.assertEqual((self.cfg.conversation.model, self.cfg.conversation.effort), ("haiku", ""))
-        self.assertNotIn("--effort", self.voice.model._command())
+        with patch("vision.conversation.find_claude", return_value="claude"):  # the command is built, not run
+            self.assertNotIn("--effort", self.voice.model._command())
         self.cfg.brain.model = "sonnet"
         self.voice.follow()
         self.assertEqual(self.cfg.conversation.effort, "low")

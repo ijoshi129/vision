@@ -243,6 +243,31 @@ def _cli_model(alias: str) -> str:
     return m.alias if m else (alias or "")
 
 
+SESSIONS_INDEX = STATE_DIR / "sessions.grok.json"  # ids of the Grok sessions Vision started, newest last
+SESSIONS_INDEX_MAX = 500
+
+
+def remember_session_id(sid: str) -> None:
+    """Add a session to Vision's own index: Grok keeps Vision's persona (its rules) out of the files
+    it saves, so /session can't tell Vision's conversations from Grok's own without this."""
+    ids = known_session_ids()
+    if sid in ids:
+        return
+    ids.append(sid)
+    try:
+        SESSIONS_INDEX.write_text(json.dumps(ids[-SESSIONS_INDEX_MAX:]), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def known_session_ids() -> list[str]:
+    try:
+        ids = json.loads(SESSIONS_INDEX.read_text(encoding="utf-8"))
+        return [str(i) for i in ids] if isinstance(ids, list) else []
+    except (OSError, ValueError):
+        return []
+
+
 class GrokBrain:
     """Same interface as the Claude brain so the CLI does not care which one is thinking."""
 
@@ -297,6 +322,7 @@ class GrokBrain:
         if self.session_id:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
             LAST_SESSION_FILE.write_text(json.dumps({"id": self.session_id, "model": self.cfg.model, "at": time.time()}), encoding="utf-8")
+            remember_session_id(self.session_id)
 
     def new_session(self) -> None:
         self.session_id = None

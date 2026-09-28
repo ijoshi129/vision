@@ -200,7 +200,12 @@ class GracefulRestartTests(unittest.TestCase):
 
         cfg = Config()
         with patch("vision.brain.create_brain", side_effect=lambda config, **kw: Brain(config, kw.get("session_id"))):
-            return Hub(cfg, Brain(cfg.brain), "token", log=lambda *_: None, open_initial=False, journal_enabled=True)
+            hub = Hub(cfg, Brain(cfg.brain), "token", log=lambda *_: None, open_initial=False, journal_enabled=True)
+        # open_chat builds a brain later (importing create_brain then), which must not need a real `claude` on PATH
+        p = patch("vision.brain.create_brain", side_effect=lambda config, **kw: Brain(config, kw.get("session_id")))
+        p.start()
+        self.addCleanup(p.stop)
+        return hub
 
     def test_restart_waits_for_busy_chats_then_holds_new_messages(self):
         with TemporaryDirectory() as tmp, patch("vision.turnjournal.JOURNAL_DIR", Path(tmp)), \
