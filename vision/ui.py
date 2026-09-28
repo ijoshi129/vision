@@ -892,7 +892,8 @@ class QuestionForm:
         self.qs = [q for q in questions if q.get("options")] or [{"question": "?", "header": "", "options": [], "multiSelect": False}]
         self.q = 0
         self.idx = 0
-        self.picks: list[set[int]] = [set() for _ in self.qs]
+        # "preselected": option indices ticked when the form opens (Vision's own forms, e.g. /providers)
+        self.picks: list[set[int]] = [{i for i in q.get("preselected") or () if isinstance(i, int)} for q in self.qs]
         self.typed: list[str] = ["" for _ in self.qs]
         self.done: list[bool] = [False for _ in self.qs]
 
@@ -910,26 +911,40 @@ class QuestionForm:
         return self.cur["options"]
 
     @property
+    def has_own(self) -> bool:
+        """Whether the question takes a typed answer ("other": false on Vision's own forms turns it off)."""
+        return self.cur.get("other", True) is not False
+
+    @property
     def own(self) -> int:
-        """Index of the "type your own" row, which sits after the last option."""
-        return len(self.options)
+        """Index of the "type your own" row, which sits after the last option (-1 when there is none)."""
+        return len(self.options) if self.has_own else -1
+
+    @property
+    def submit(self) -> int:
+        """Index of a multi-select's Submit row, the last one (-1 for single-select)."""
+        return len(self.options) + self.has_own if self.multi else -1
+
+    @property
+    def rows(self) -> int:
+        return len(self.options) + self.has_own + self.multi
 
     def up(self) -> None:
-        self.idx = (self.idx - 1) % (len(self.options) + 1)
+        self.idx = (self.idx - 1) % self.rows
 
     def down(self) -> None:
-        self.idx = (self.idx + 1) % (len(self.options) + 1)
+        self.idx = (self.idx + 1) % self.rows
 
     def goto(self, step: int) -> None:
         self.q = (self.q + step) % len(self.qs)
-        if self.typed[self.q] and not self.picks[self.q]:
+        if self.typed[self.q] and not self.picks[self.q] and self.has_own:
             self.idx = self.own
         else:
             self.idx = min(self.picks[self.q] or {0}) if not self.multi else 0
 
     def typing(self, text: str) -> None:
         """Input box changed: any text drags the cursor onto the ✎ row (like Claude Code's "Other")."""
-        if text.strip():
+        if text.strip() and self.has_own:
             self.idx = self.own
 
     def toggle(self, i: int | None = None) -> None:
@@ -954,7 +969,7 @@ class QuestionForm:
         typed = typed.strip()
         if typed:
             self.typed[self.q] = typed
-        if not self.multi and not typed and self.idx < self.own:
+        if not self.multi and not typed and self.idx < len(self.options):
             self.picks[self.q] = {self.idx}
         if not self.picks[self.q] and not self.typed[self.q]:
             return False  # nothing chosen yet (Enter on an empty ✎ row is a no-op)
@@ -962,6 +977,22 @@ class QuestionForm:
         if all(self.done):
             return True
         self.goto(next((k for k in range(1, len(self.qs) + 1) if not self.done[(self.q + k) % len(self.qs)]), 1))
+        return False
+
+    def enter(self, typed: str = "") -> bool:
+        """The Enter key. Single-select: confirm the row. Multi-select: Enter on an option ticks or unticks
+        it, typed text is kept as an extra answer, and Enter on Submit confirms. True when all answered."""
+        if not self.multi:
+            return self.confirm(typed)
+        typed = typed.strip()
+        if typed and self.has_own:
+            self.typed[self.q] = typed
+            self.idx = self.submit
+            return False
+        if self.idx == self.submit:
+            return self.confirm()
+        if self.idx < len(self.options):
+            self.toggle()
         return False
 
     def answers(self) -> dict[str, str]:
@@ -991,22 +1022,31 @@ class QuestionForm:
             out.append(("class:pick.selected" if cur else "class:pick.current" if on else "", f"{o.get('label', ''):<{label_w}}"))
             out.append(("class:pick.desc", o.get("description", "")))
             out.append(("", "\n"))
-        own = typed.strip() or self.typed[self.q]
-        cur = self.idx == self.own
-        out.append(("class:pick.cursor" if cur else "", f" {'❯' if cur else ' '} "))
-        out.append(("class:pick.num", "✎ "))
-        if own:
-            out.append(("class:pick.selected" if cur else "class:pick.current", own + ("▏" if cur and typed.strip() else "")))
+        if self.has_own:
+            own = typed.strip() or self.typed[self.q]
+            cur = self.idx == self.own
+            out.append(("class:pick.cursor" if cur else "", f" {'❯' if cur else ' '} "))
+            out.append(("class:pick.num", "✎ "))
+            if own:
+                out.append(("class:pick.selected" if cur else "class:pick.current", own + ("▏" if cur and typed.strip() else "")))
+            else:
+                out.append(("class:pick.selected" if cur else "class:pick.desc", "Type your own answer…" if cur else "Other (type your own)"))
+            out.append(("", "\n"))
+        if self.multi:
+            cur = self.idx == self.submit
+            out.append(("class:pick.cursor" if cur else "", f" {'❯' if cur else ' '} "))
+            out.append(("class:pick.selected" if cur else "class:pick.title", "Submit" if len(self.qs) == 1 else "Next"))
+            out.append(("", "\n"))
+        if self.multi:
+            keys = "↑/↓ move · Enter tick · Enter on " + ("Submit" if len(self.qs) == 1 else "Next") + " to finish · "
         else:
-            out.append(("class:pick.selected" if cur else "class:pick.desc", "Type your own answer…" if cur else "Other (type your own)"))
-        out.append(("", "\n"))
-        keys = "↑/↓ move · " + ("Space tick · " if self.multi else "") + "1-9 pick · type for ✎ · Enter " + ("next · " if len(self.qs) > 1 else "confirm · ")
+            keys = "↑/↓ move · 1-9 pick · " + ("type for ✎ · " if self.has_own else "") + "Enter " + ("next · " if len(self.qs) > 1 else "confirm · ")
         keys += ("←/→ question · " if len(self.qs) > 1 else "") + "Esc cancel"
         out.append(("class:pick.hint", "  " + keys))
         return out
 
     def height(self, framed: bool = False) -> int:
-        return len(self.options) + 3 + (1 if len(self.qs) > 1 else 0)
+        return len(self.options) + 2 + self.has_own + self.multi + (1 if len(self.qs) > 1 else 0)
 
 
 def ask_questions(questions: list[dict]) -> dict[str, str] | None:
@@ -1044,7 +1084,7 @@ def ask_questions(questions: list[dict]) -> dict[str, str] | None:
 
     @kb.add("enter")
     def _ok(e):
-        if form.confirm(box.text):
+        if form.enter(box.text):
             e.app.exit(result=form.answers())
         box.text = ""
 
@@ -2187,7 +2227,7 @@ class ChatScreen:
 
         @kb.add("enter", filter=form_open)
         def _fm_ok(event):
-            if self._form.confirm(self.area.text):
+            if self._form.enter(self.area.text):
                 self._finish_form()
             self.area.text = ""
 

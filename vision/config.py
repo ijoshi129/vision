@@ -132,6 +132,12 @@ read_cli_logins = true
 # 0 disables it.
 stall_s = 900
 
+[providers]
+# Which providers /model offers, in this order: "claude" (Claude Code), "codex" (Codex CLI), "grok"
+# (Grok CLI), "local" (the llama-server in [local]). /providers picks them. One that is listed but not
+# set up yet (CLI not installed, server not answering) shows in /model with how to set it up.
+enabled = ["claude", "codex", "grok", "local"]
+
 [codex]
 # Sandbox used for GPT/Codex models in auto mode: "auto" (= danger-full-access, matching Claude's auto
 # mode), "workspace-write" (shell and file changes only inside the working directory) or "read-only".
@@ -413,6 +419,14 @@ class LocalConfig:
     brave_api_key: str = ""  # WebSearch uses Brave's API with a key, DuckDuckGo's HTML results without
 
 
+PROVIDER_NAMES = ("claude", "codex", "grok", "local")
+
+
+@dataclass
+class ProvidersConfig:
+    enabled: list[str] = field(default_factory=lambda: list(PROVIDER_NAMES))
+
+
 @dataclass
 class BrainConfig:
     model: str = "opus"
@@ -567,6 +581,7 @@ class WeatherConfig:
 @dataclass
 class Config:
     brain: BrainConfig = field(default_factory=BrainConfig)
+    providers: ProvidersConfig = field(default_factory=ProvidersConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
     grok: GrokConfig = field(default_factory=GrokConfig)
     local: LocalConfig = field(default_factory=LocalConfig)
@@ -606,7 +621,7 @@ def load_config() -> Config:
     except tomllib.TOMLDecodeError as e:
         raise SystemExit(f"Config error in {CONFIG_PATH}: {e}")
     cfg = Config()
-    for section, target in (("brain", cfg.brain), ("codex", cfg.codex), ("grok", cfg.grok), ("local", cfg.local), ("conversation", cfg.conversation), ("voice", cfg.voice), ("listen", cfg.listen), ("wake", cfg.wake), ("buddy", cfg.buddy), ("remote", cfg.remote), ("weather", cfg.weather)):
+    for section, target in (("brain", cfg.brain), ("providers", cfg.providers), ("codex", cfg.codex), ("grok", cfg.grok), ("local", cfg.local), ("conversation", cfg.conversation), ("voice", cfg.voice), ("listen", cfg.listen), ("wake", cfg.wake), ("buddy", cfg.buddy), ("remote", cfg.remote), ("weather", cfg.weather)):
         for k, v in raw.get(section, {}).items():
             if hasattr(target, k):
                 if section == "brain" and k == "model" and not v:
@@ -621,6 +636,8 @@ def load_config() -> Config:
         cfg.brain.plan_approval = "session"
     global _read_cli_logins
     _read_cli_logins = cfg.brain.read_cli_logins is not False
+    enabled = cfg.providers.enabled if isinstance(cfg.providers.enabled, list) else list(PROVIDER_NAMES)
+    cfg.providers.enabled = list(dict.fromkeys(str(x).strip().lower() for x in enabled if str(x).strip().lower() in PROVIDER_NAMES))
     vc = cfg.voice
     vc.filler_after_ms = max(0, int(vc.filler_after_ms or 0))
     vc.filler_phrases = [str(x).strip() for x in (vc.filler_phrases if isinstance(vc.filler_phrases, list) else []) if str(x).strip()]
@@ -782,6 +799,11 @@ def save_config_value(section: str, key: str, literal: str) -> None:
 def save_wake_enabled(enabled: bool) -> None:
     """Persist `[wake] enabled` in config.toml."""
     save_config_value("wake", "enabled", "true" if enabled else "false")
+
+
+def save_enabled_providers(names: list[str]) -> None:
+    """Persist `[providers] enabled` in config.toml."""
+    save_config_value("providers", "enabled", "[" + ", ".join(f'"{n}"' for n in names) + "]")
 
 
 def save_input_device(spec: str) -> None:

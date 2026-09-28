@@ -48,7 +48,7 @@ from vision.config import (
     voice_choices,
     voice_dir,
 )
-from vision.models import MODEL_TABS, THINKING_OFF, coerce_effort, effort_choices, model_label, provider_default, provider_for, provider_label, replace_retired_models, supports_effort
+from vision.models import THINKING_OFF, coerce_effort, effort_choices, model_label, provider_default, provider_for, provider_label, replace_retired_models, supports_effort
 from vision.reply import status_label
 from rich.markup import escape
 from vision.ui import PLACEHOLDER, ChatScreen, ReplyView, SlashCommand, answered_grid, header_renderable, notice_grid, pick, short_path, show_header, show_user, user_grid, reply_grid, hearing_grid
@@ -67,7 +67,7 @@ _EXIT_PHRASES = {"exit", "quit", "goodbye", "bye", "goodbye vision", "bye vision
 
 
 # ---------------------------------------------------------------- helpers
-RETIRED_NOTES: list[str] = []  # from the last _cfg: saved models their provider no longer lists
+RETIRED_NOTES: list[str] = []  # from the last _cfg: saved models their provider no longer lists, or can't run here
 
 
 def _cfg(model: Optional[str], voice: Optional[str], effort: Optional[str] = None, *, quiet: bool = False) -> Config:
@@ -76,6 +76,12 @@ def _cfg(model: Optional[str], voice: Optional[str], effort: Optional[str] = Non
     `quiet` (the chat screen shows them itself), are printed here."""
     cfg = load_config()
     RETIRED_NOTES[:] = replace_retired_models(cfg, brain=not model)
+    if not model:
+        from vision.providers import settle
+
+        moved = settle(cfg)  # a saved model whose provider isn't set up here, or is switched off
+        if moved:
+            RETIRED_NOTES.append(moved)
     if not quiet:
         for n in RETIRED_NOTES:
             console.print(f"[yellow]{n}[/yellow]")
@@ -681,6 +687,7 @@ HELP_TEXT = (
     "[bold]/new[/bold] fresh conversation · [bold]/session[/bold] pick an earlier conversation "
     "(Claude, Codex and Grok tabs; same provider resumes that thread, another provider continues it here) "
     "(/session <id> resumes one; /session id shows the current id) · "
+    "[bold]/providers[/bold] choose which providers /model offers (/providers claude local to set them directly) · "
     "[bold]/usage[/bold] subscription usage (/usage all for every provider; claude, codex or grok for one; add 'full' for detail) · "
     "[bold]/version[/bold] Vision and the Claude Code, Codex and Grok CLI versions (/version codex for one) · "
     "[bold]/update[/bold] update those CLIs with their own updaters (/update all, or claude, codex, grok) · "
@@ -712,13 +719,22 @@ def _mic_rows() -> list[tuple[str, str, str]]:
         return []
 
 
+def _usable_tabs(cfg: Config) -> list:
+    """/model's tabs with only the providers that can run here (the plain pickers have no setup rows)."""
+    from vision.providers import model_tabs
+
+    return model_tabs(cfg, setup_rows=False)
+
+
 def _menu_commands(cfg: Config, brain_ref: Callable[[], object]) -> list[SlashCommand]:
     """The /commands offered by the chat screen's pop-up menu, with argument choices where useful."""
     from vision.routing import agent_model
 
     def models():
+        from vision.providers import model_tabs
+
         rows = [("default", "saved model + effort")]
-        for tab, entries, _ in MODEL_TABS:
+        for tab, entries, _ in model_tabs(cfg, setup_rows=False):
             rows += [(v, f"{label} · {tab} · {desc}") for v, label, desc in entries]
         return rows
 
@@ -743,6 +759,7 @@ def _menu_commands(cfg: Config, brain_ref: Callable[[], object]) -> list[SlashCo
 
     return [
         SlashCommand("model", "switch model for this session", models),
+        SlashCommand("providers", "which providers /model offers", lambda: [(n, "") for n in ("claude", "codex", "grok", "local")]),
         SlashCommand("effort", "reasoning effort for this session", efforts),
         SlashCommand("fast", "toggle faster, higher-usage inference", lambda: [("on", "use the fast service tier"), ("off", "use standard inference")]),
         SlashCommand("default", "choose and save the default model + effort", lambda: [("reset", "back to Opus 5 · high")]),
@@ -1279,6 +1296,12 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
 
     def switch(model: str, effort: str | None = None, full: bool = False, save: bool = False, prefix: str = "model → "):
         """Change model on a worker thread while preserving the conversation."""
+        from vision import providers
+
+        why = providers.setup_note(model) or providers.unavailable_reason(provider_for(model), cfg)
+        if why:
+            note(f"[yellow]{why}[/yellow]")
+            return
         if screen.busy:
             note("still replying — switch models once it has finished (Esc cancels)")
             return
@@ -1838,7 +1861,9 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             elif choice:
                 switch(choice, full=full)
             else:
-                screen.open_picker("Choose a model for this session", MODEL_TABS, cfg.brain.model, switch)
+                from vision.providers import model_tabs
+
+                screen.open_picker("Choose a model for this session", model_tabs(cfg), cfg.brain.model, switch)
         elif cmd == "effort":
             def set_effort(choice):
                 if not supports_effort(cfg.brain.model, choice):
@@ -1885,13 +1910,20 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
             saved_model, saved_effort = _saved_defaults()
 
             def pick_effort(model_choice):
+                from vision.providers import setup_note
+
+                if setup_note(model_choice):
+                    note(f"[yellow]{setup_note(model_choice)}[/yellow]")
+                    return
                 selected_effort, _ = coerce_effort(model_choice, saved_effort)
                 screen.open_picker(
                     "Default effort level", effort_choices(model_choice), selected_effort,
                     lambda effort_choice: switch(model_choice, effort=effort_choice, save=True),
                 )
 
-            screen.open_picker("Default model", MODEL_TABS, saved_model, pick_effort)
+            from vision.providers import model_tabs
+
+            screen.open_picker("Default model", model_tabs(cfg), saved_model, pick_effort)
         elif cmd == "usage":
             try:
                 which, full = _split_usage_arg(arg)
@@ -2162,6 +2194,43 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
                         screen.app.invalidate()
 
                 background(opened)  # pw-dump can take a moment: not on the UI thread
+        elif cmd == "providers":
+            from vision import providers as prov
+            from vision.config import save_enabled_providers
+
+            def apply(chosen: list[str]) -> None:
+                if not chosen:
+                    note("[yellow]keep at least one provider[/yellow]")
+                    return
+                cfg.providers.enabled = chosen
+                save_enabled_providers(chosen)
+                labels = ", ".join(prov.REGISTRY[n].label for n in chosen)
+                off = provider_for(cfg.brain.model) not in chosen
+                note(f"providers → {labels}" + (f"; this chat stays on {model_label(cfg.brain.model)} until you /model" if off else ""))
+
+            words = [w.strip(",").lower() for w in arg.split() if w.strip(",")]
+            if words:
+                bad = [w for w in words if w not in prov.REGISTRY]
+                if bad:
+                    note(f"[yellow]unknown provider {', '.join(bad)}: pick from {', '.join(prov.REGISTRY)}[/yellow]")
+                else:
+                    apply([n for n in words if n in prov.REGISTRY])
+            else:
+                every = list(prov.REGISTRY.values())
+                on = {p.name for p in prov.enabled(cfg)}
+                question = {
+                    "question": "Which providers should /model offer?", "header": "Providers", "multiSelect": True,
+                    "options": [{"label": p.label, "description": p.note + ("" if prov.ready(p.name, cfg) else " · not set up yet")}
+                                for p in every],
+                    "preselected": [i for i, p in enumerate(every) if p.name in on], "other": False,
+                }
+
+                def picked(answers):
+                    if answers:
+                        labels = {x.strip() for x in next(iter(answers.values())).split(",")}
+                        apply([p.name for p in every if p.label in labels])
+
+                screen.open_questions([question], picked)
         elif cmd == "wake":
             word = arg.strip().lower()
             if word and word not in ("on", "off"):
@@ -2703,7 +2772,7 @@ def _talk_turns(cfg: Config, brain, speaker, mic, stt, kb: _Keyboard, ptt: bool,
                     console.print(f"[dim]→ {_brain_summary(cfg, brain)}{'; ' + detail if detail else ''}[/dim]")
                 elif cmd == "model":
                     choice, full = _split_model_arg(arg)
-                    choice = choice or pick("Choose a model for this session", MODEL_TABS, current=cfg.brain.model)
+                    choice = choice or pick("Choose a model for this session", _usable_tabs(cfg), current=cfg.brain.model)
                     if choice is not None:
                         brain, detail = _switch_spoken(cfg, brain, choice, full=full)
                         console.print(f"[dim]model → {_brain_summary(cfg, brain)}{'; ' + detail if detail else ''}[/dim]")
@@ -2733,7 +2802,7 @@ def _talk_turns(cfg: Config, brain, speaker, mic, stt, kb: _Keyboard, ptt: bool,
                     console.print(f"[dim]{msg}{'; ' + detail if detail else ''}[/dim]")
                 elif cmd == "default":
                     saved_model, saved_effort = _saved_defaults()
-                    m = pick("Default model", MODEL_TABS, current=saved_model)
+                    m = pick("Default model", _usable_tabs(cfg), current=saved_model)
                     selected_effort, _ = coerce_effort(m, saved_effort) if m else ("", "")
                     e = pick("Default effort level", effort_choices(m), current=selected_effort) if m else None
                     if m and e is not None:
@@ -3471,7 +3540,7 @@ def default(
         console.print(_save_defaults(cfg, FACTORY_MODEL, FACTORY_EFFORT))
         console.print(f"[dim]{CONFIG_PATH}[/dim]")
         return
-    m = model or pick("Default model", MODEL_TABS, current=cfg.brain.model)
+    m = model or pick("Default model", _usable_tabs(cfg), current=cfg.brain.model)
     if not m:
         raise typer.Exit(1)
     current_effort, _ = coerce_effort(m, cfg.brain.effort)

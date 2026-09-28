@@ -555,6 +555,13 @@ class Chat:
 
         if not model:
             return
+        from vision.models import provider_for
+        from vision.providers import unavailable_reason
+
+        why = unavailable_reason(provider_for(model), self.cfg)
+        if why:
+            self.post({"type": "error", "text": why})
+            return
         model_changed = model != self.cfg.brain.model
         self.busy = True
         loop = asyncio.get_running_loop()
@@ -1047,6 +1054,12 @@ class Hub:
             if retired:
                 cfg.brain.effort, _ = coerce_effort(cfg.brain.model, cfg.brain.effort)
                 self.log(retired)
+            from vision.providers import settle
+
+            moved = settle(cfg)  # its provider isn't set up here, or is switched off
+            if moved:
+                retired = f"{retired} {moved}".strip()
+                self.log(moved)
             brain = create_brain(cfg.brain, voice_mode=False, continue_session=False)
         chat = Chat(self, brain, cfg, title=title, chat_id=chat_id, restored=restored)
         self.chats[chat.id] = chat
@@ -1545,7 +1558,8 @@ def create_app(hub: Hub) -> FastAPI:
 
     @app.get("/models", dependencies=[Depends(bearer)])
     async def models(chat: str | None = None) -> dict:
-        from vision.models import MODEL_TABS, effort_choices
+        from vision.models import effort_choices
+        from vision.providers import model_tabs
 
         c = hub.chat(chat)
         if c is None:
@@ -1555,17 +1569,18 @@ def create_app(hub: Hub) -> FastAPI:
             return defaults_payload(model, effort)
         tabs = [
             {"tab": tab, "models": [{"id": v, "label": label, "description": desc} for v, label, desc in entries]}
-            for tab, entries, _ in MODEL_TABS
+            for tab, entries, _ in model_tabs(hub.cfg, setup_rows=False)  # enabled + set up: the phone can't install
         ]
         efforts = [{"id": v, "label": label, "description": desc} for v, label, desc in effort_choices(c.model_id)]
         return {"tabs": tabs, "efforts": efforts, "current": c.model_id, "effort": c.effort}
 
     def defaults_payload(model: str, effort: str) -> dict:
-        from vision.models import MODEL_TABS, effort_choices
+        from vision.models import effort_choices
+        from vision.providers import model_tabs
 
         tabs = [
             {"tab": tab, "models": [{"id": v, "label": label, "description": desc} for v, label, desc in entries]}
-            for tab, entries, _ in MODEL_TABS
+            for tab, entries, _ in model_tabs(hub.cfg, setup_rows=False)  # enabled + set up: the phone can't install
         ]
         efforts = [{"id": v, "label": label, "description": desc} for v, label, desc in effort_choices(model)]
         return {"tabs": tabs, "efforts": efforts, "current": model, "effort": effort}

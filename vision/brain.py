@@ -1337,21 +1337,10 @@ def create_brain(
     clis.refresh_models_soon()  # once per process (then every few hours): new models, labels, efforts
     cfg.effort, _ = coerce_effort(cfg.model, cfg.effort)
 
-    provider = provider_for(cfg.model)
-    if provider == "codex":
-        from vision.codex import CodexBrain
+    from vision.providers import get as get_provider
 
-        cls = CodexBrain
-    elif provider == "grok":
-        from vision.grok import GrokBrain
-
-        cls = GrokBrain
-    elif provider == "local":
-        from vision.local import LocalBrain
-
-        cls = LocalBrain
-    else:
-        cls = Brain
+    p = get_provider(provider_for(cfg.model))
+    cls = p.brain_class() if p is not None else Brain
     sid = session_id
     if sid is None and continue_session:
         sid = cls.last_session_id()
