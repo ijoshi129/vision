@@ -221,4 +221,38 @@ class DoctorWithoutVoiceTests(unittest.TestCase):
 
         text = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())  # a real console: colours and wrapping
         self.assertIn("voice not installed (optional", text)
-        self.assertIn("pip install -e '.[voice]'", text)
+        self.assertIn(cli.setup_hint(), text)
+
+
+class VoiceBackendTests(unittest.TestCase):
+    """The installed voice build is read from package metadata, so it never imports torch."""
+
+    def backend(self, installed):
+        from importlib.metadata import PackageNotFoundError
+
+        from vision import cli
+
+        def version(dist):
+            if dist not in installed:
+                raise PackageNotFoundError(dist)
+            return installed[dist]
+
+        with patch("importlib.metadata.version", version):
+            return cli.voice_backend()
+
+    def test_the_nvidia_libraries_mean_the_nvidia_build(self):
+        self.assertEqual(self.backend({"torch": "2.14.0", "nvidia-cublas-cu12": "12.9"}), "nvidia")
+
+    def test_torch_without_them_is_the_cpu_build(self):
+        # macOS and PyTorch's CPU index on Linux: the version alone does not say "+cpu" everywhere.
+        self.assertEqual(self.backend({"torch": "2.14.0+cpu"}), "cpu")
+        self.assertEqual(self.backend({"torch": "2.14.0"}), "cpu")
+
+    def test_no_torch_is_no_voice(self):
+        self.assertIsNone(self.backend({}))
+
+    def test_the_hint_names_the_setup_script_and_the_build(self):
+        from vision import cli
+
+        self.assertEqual(cli.setup_hint("cpu"), "scripts/setup.sh --voice --cpu")
+        self.assertEqual(cli.setup_hint("nvidia"), "scripts/setup.sh --voice --nvidia")

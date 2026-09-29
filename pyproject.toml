@@ -24,9 +24,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Speech in and out: Qwen3-TTS, faster-whisper, the mic and VAD. Built for Linux with an NVIDIA GPU;
-# everything falls back to the CPU, but speech is then several times slower than real time.
-voice = [
+# Speech in and out: Qwen3-TTS, faster-whisper, the mic and VAD. Pick the one that matches the machine
+# (scripts/setup.sh asks): voice-nvidia for an NVIDIA GPU, voice-cpu for everything else. They conflict.
+# voice-nvidia (~6 GB): CUDA torch and the NVIDIA runtime libraries; falls back to the CPU if the GPU is busy.
+voice-nvidia = [
   "onnxruntime-gpu==1.22.0",  # CUDA 12 build; shares the nvidia-*-cu12 libs with CTranslate2. Works on CPU too.
   "faster-whisper>=1.1",
   "nvidia-cublas-cu12",
@@ -41,6 +42,24 @@ voice = [
   "webrtcvad-wheels",
   "qwen-tts>=0.1.1",
 ]
+# voice-cpu (~2 GB): CPU-only torch and no NVIDIA libraries. Speech runs several times slower than real
+# time, and Whisper drops to small.en.
+voice-cpu = [
+  # Also the CPU runtime here: the override below keeps faster-whisper's `onnxruntime` out of every install.
+  "onnxruntime-gpu==1.22.0",
+  "faster-whisper>=1.1",
+  "sounddevice>=0.5",
+  "soundfile>=0.12",
+  "numpy",
+  "webrtcvad-wheels",
+  "qwen-tts>=0.1.1",
+  # From PyTorch's CPU index (tool.uv.sources): PyPI's Linux torch carries CUDA, and its torchaudio only
+  # loads against that torch.
+  "torch",
+  "torchaudio",
+]
+# The name voice-nvidia had before voice-cpu existed.
+voice = ["vision[voice-nvidia]"]
 # `vision serve`: HTTP + WebSocket API for remote clients and the pairing QR code
 serve = [
   "fastapi>=0.110",
@@ -50,7 +69,9 @@ serve = [
 ]
 # `vision weather`: ES256 signing of Apple WeatherKit tokens (needs an Apple Developer account)
 weather = ["cryptography>=42"]
-all = ["vision[voice,serve,weather]"]
+all = ["vision[voice-nvidia,serve,weather]"]
+# Repeats torch: uv only applies a torch source to an extra that names torch itself, not one an alias pulls in.
+all-cpu = ["vision[voice-cpu,serve,weather]", "torch", "torchaudio"]
 
 [project.urls]
 Homepage = "https://github.com/domdevz/vision"
@@ -68,6 +89,31 @@ build-backend = "setuptools.build_meta"
 # as onnxruntime-gpu and silently puts the SNAC decoder and Silero VAD back on the CPU after every `uv sync`.
 # The marker never matches, so the CPU wheel drops out of resolution; onnxruntime-gpu provides the import.
 override-dependencies = ["onnxruntime; sys_platform == 'never'"]
+# One torch per environment: the CPU build and the CUDA build can't share a lock resolution.
+conflicts = [
+  [{ extra = "voice-cpu" }, { extra = "voice-nvidia" }],
+  [{ extra = "voice-cpu" }, { extra = "voice" }],
+  [{ extra = "voice-cpu" }, { extra = "all" }],
+  [{ extra = "all-cpu" }, { extra = "voice-nvidia" }],
+  [{ extra = "all-cpu" }, { extra = "voice" }],
+  [{ extra = "all-cpu" }, { extra = "all" }],
+]
+
+[tool.uv.sources]
+# voice-cpu takes PyTorch's CPU wheels; voice-nvidia keeps PyPI's torch, which carries CUDA on Linux.
+torch = [
+  { index = "pytorch-cpu", extra = "voice-cpu" },
+  { index = "pytorch-cpu", extra = "all-cpu" },
+]
+torchaudio = [
+  { index = "pytorch-cpu", extra = "voice-cpu" },
+  { index = "pytorch-cpu", extra = "all-cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.setuptools]
 packages = ["vision"]

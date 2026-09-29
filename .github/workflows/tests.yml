@@ -16,7 +16,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0  # setup-uv publishes full versions only, no major-version tag
         with:
           python-version: "3.12"
-      # Text chat plus the serve and weather extras. The voice extra (torch, CUDA, ~6 GB) stays out: the
+      # Text chat plus the serve and weather extras. The voice extras (torch; ~6 GB with CUDA) stay out: the
       # tests fake the GPU, the microphone and the speech models, and the torch-only ones skip.
       - run: uv sync --frozen --extra serve --extra weather
       # Test-only packages: numpy and soundfile for the audio fakes, pillow for library thumbnails, httpx2

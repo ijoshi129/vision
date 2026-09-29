@@ -3469,6 +3469,24 @@ def setup(
     console.print(f"[green]✓[/green] config: {CONFIG_PATH}")
 
 
+def voice_backend() -> str | None:
+    """Which voice build is installed: "nvidia" (voice-nvidia), "cpu" (voice-cpu) or None (no voice)."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    for dist, backend in (("nvidia-cublas-cu12", "nvidia"), ("torch", "cpu")):
+        try:
+            version(dist)
+            return backend
+        except PackageNotFoundError:
+            pass
+    return None
+
+
+def setup_hint(backend: str = "") -> str:
+    """The setup-script command that installs the voice, optionally for a given backend."""
+    return "scripts/setup.sh --voice" + {"cpu": " --cpu", "nvidia": " --nvidia"}.get(backend, "")
+
+
 @app.command()
 def doctor(
     usage: bool = typer.Option(True, "--usage/--no-usage", help="Also show every provider's subscription usage."),
@@ -3541,7 +3559,7 @@ def doctor(
 
     missing = [m for m in ("numpy", "sounddevice", "soundfile", "faster_whisper") if importlib.util.find_spec(m) is None]
     if missing:
-        console.print(f"{warn} voice not installed (optional; {', '.join(missing)} missing). For speech in and out:  pip install -e '.\\[voice]'")  # \\[: not rich markup
+        console.print(f"{warn} voice not installed (optional; {', '.join(missing)} missing). For speech in and out:  {setup_hint()}")
         console.print(f"[dim]config: {CONFIG_PATH}[/dim]")
         return
 
@@ -3556,9 +3574,19 @@ def doctor(
         console.print(f"{ok if cfg.voice.voice in names else bad} voice {cfg.voice.voice!r} in {VOICES_DIR} (have: {', '.join(names) or 'none'})" + ("" if cfg.voice.voice in names else f"  → vision voice design {cfg.voice.voice}"))
     try:
         r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total", "--format=csv,noheader"], capture_output=True, text=True, encoding="utf-8")
-        console.print(f"{ok} GPU: {r.stdout.strip()}" if r.returncode == 0 else f"{warn} no NVIDIA GPU; Whisper will use CPU")
+        gpu = r.returncode == 0
+        console.print(f"{ok} GPU: {r.stdout.strip()}" if gpu else f"{warn} no NVIDIA GPU; Whisper will use CPU")
     except FileNotFoundError:
+        gpu = False
         console.print(f"{warn} nvidia-smi not found; Whisper will use CPU")
+    # The voice build should match the machine: voice-cpu can't use a GPU, voice-nvidia's ~6 GB is dead weight without one.
+    backend = voice_backend()
+    if backend == "cpu" and gpu:
+        console.print(f"{warn} CPU voice build on a machine with an NVIDIA GPU  → {setup_hint('nvidia')}")
+    elif backend == "nvidia" and not gpu:
+        console.print(f"{warn} NVIDIA voice build (~6 GB of CUDA) on a machine without a GPU  → {setup_hint('cpu')}")
+    elif backend:
+        console.print(f"{ok} voice build: {backend}")
     try:
         from vision.stt import Transcriber
 

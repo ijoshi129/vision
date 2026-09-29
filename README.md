@@ -25,7 +25,7 @@ normal login and puts a proper chat, a voice and a pair of ears around them.
 | For | You need |
 | --- | --- |
 | Text chat | Python 3.11+, Linux (macOS should work but is untested), and at least one brain: [Claude Code](https://code.claude.com), the [Codex CLI](https://github.com/openai/codex), the Grok CLI, any OpenAI-compatible server (Ollama, LM Studio, `llama-server`, a hosted API), or an agent that speaks ACP |
-| Voice | An NVIDIA GPU with 8 GB+ of VRAM (it falls back to the CPU, but several times slower than real time), PipeWire, a microphone. Up to about 10 GB of downloads for the speech models |
+| Voice | PipeWire and a microphone. Best on an NVIDIA GPU with 8 GB+ of VRAM; without one it runs on the CPU, several times slower than real time. Up to about 10 GB of downloads for the speech models |
 | The voice conversation model | A Claude Code login, or a local model (see [the guide](docs/guide.md#the-voice)) |
 | Weather | Optional: an Apple Developer account for WeatherKit. Without it Vision searches the web |
 
@@ -33,15 +33,27 @@ normal login and puts a proper chat, a voice and a pair of ears around them.
 
 ```bash
 git clone https://github.com/domdevz/vision.git && cd vision
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -e '.[all]'     # or just -e . for text chat only
-ln -s "$PWD/bin/vision" ~/.local/bin/vision               # any directory on your PATH
-vision setup      # fetches the speech models (skip for text only)
-vision doctor     # checks the CLIs, logins, GPU and audio devices
+scripts/setup.sh --all --link     # or --voice, --serve; nothing for text chat only
 ```
 
-The extras are `voice` (speech in and out), `serve` (the remote API), `weather` (Apple WeatherKit) and
-`all`. If a command needs one you don't have, Vision tells you which to install.
+For voice, the script looks for an NVIDIA GPU and asks which build to install: `--nvidia` (CUDA,
+about 6 GB) or `--cpu` (about 2 GB). Pass either to skip the question. It then fetches the speech
+models (`vision setup`) and runs `vision doctor`, which checks the CLIs, logins, GPU and audio devices.
+
+The same by hand:
+
+```bash
+uv venv --python 3.12 .venv
+uv sync --frozen --inexact --extra voice-nvidia --extra serve --extra weather   # or --extra voice-cpu
+ln -s "$PWD/bin/vision" ~/.local/bin/vision               # any directory on your PATH
+vision setup      # fetches the speech models (skip for text only)
+vision doctor
+```
+
+The extras are `voice-nvidia` or `voice-cpu` (speech in and out; pick one), `serve` (the remote API),
+`weather` (Apple WeatherKit), and `all` / `all-cpu` for everything. `voice` is the old name for
+`voice-nvidia`. Install the voice with uv, not plain pip: only uv takes torch from PyTorch's CPU or
+CUDA index. If a command needs an extra you don't have, Vision tells you which to install.
 
 Log in to whichever brains you want with their own tools first: `claude`, `codex login`, `grok login`.
 No subscription? `vision provider setup` walks you through it: a CLI (installed and logged in for you

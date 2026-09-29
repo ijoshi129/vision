@@ -8,10 +8,12 @@ before anything big.
 ```bash
 git clone https://github.com/domdevz/vision.git && cd vision
 uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -e '.[all]'
+uv pip install --python .venv/bin/python -e '.[all]'       # NVIDIA GPU; '.[all-cpu]' without one
 ```
 
-Text-only work doesn't need the `voice` extra or a GPU.
+Text-only work doesn't need a voice extra or a GPU. To reproduce CI without touching your working
+`.venv`, sync into a separate one: `UV_PROJECT_ENVIRONMENT=.venv-ci uv sync --frozen --extra serve --extra weather`
+(`uv sync` removes whatever the named extras don't include).
 
 ## Tests
 

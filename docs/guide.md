@@ -503,8 +503,10 @@ config in `~/.config/vision/config.toml`, chat history and last session in `~/.l
 
 - `vision setup` fetches Qwen3-TTS Base (4.3 GB) into the Hugging Face cache and, if the configured
   voice is one of the built-in designs and does not exist yet, fetches VoiceDesign (4.3 GB) and makes it.
-  PyTorch brings its own CUDA 13 runtime (`nvidia-*-cu13`); Whisper (CTranslate2, int8_float16) and the
-  Silero VAD stay on the pip `nvidia-*-cu12` libraries with `onnxruntime-gpu` 1.22, and the two coexist.
+  With the `voice-nvidia` build, PyTorch brings its own CUDA 13 runtime (`nvidia-*-cu13`); Whisper
+  (CTranslate2, int8_float16) and the Silero VAD stay on the pip `nvidia-*-cu12` libraries with
+  `onnxruntime-gpu` 1.22, and the two coexist. The `voice-cpu` build has none of those: CPU torch from
+  PyTorch's index, Whisper on int8 with `small.en` in place of the large models.
   `vision setup --orpheus` adds the Orpheus GGUF (2.4 GB), the SNAC decoder and a prebuilt CUDA 13
   llama.cpp. CPU fallback is automatic but several times slower than real time, so only fit for `vision say`.
 - Hands-free mode listens only after Vision has finished speaking, so laptop speakers work, but a headset
