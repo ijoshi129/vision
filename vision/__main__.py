@@ -34,10 +34,9 @@ def run() -> None:
         extra = _EXTRAS.get((e.name or "").split(".")[0])
         if extra is None:
             raise
-        if extra == "voice":  # two builds; the user's hardware picks. uv, not pip: only uv reads the torch sources.
-            install = "uv pip install -e '.[voice-nvidia]'   (NVIDIA GPU)   or   uv pip install -e '.[voice-cpu]'   (no NVIDIA GPU)"
-        else:
-            install = f"pip install -e '.[{extra}]'   (or '.[all]' for everything)"
+        from vision.install import extra_hint
+
+        install = extra_hint(extra)
         print(
             f"vision: this needs the optional '{extra}' dependencies ({e.name} is not installed).\n"
             f"Install them with:  {install}",

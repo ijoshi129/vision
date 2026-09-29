@@ -48,6 +48,7 @@ from vision.config import (
     voice_choices,
     voice_dir,
 )
+from vision.install import setup_hint, voice_backend
 from vision.models import THINKING_OFF, coerce_effort, effort_choices, model_label, provider_default, provider_for, provider_label, replace_retired_models, supports_effort
 from vision.providers import cap
 from vision.providers import names as provider_names
@@ -3467,24 +3468,6 @@ def setup(
             wake.load()
         console.print(f"[green]✓[/green] wake word (“{cfg.wake.names[0].capitalize()}”) ready on {wake.device}")
     console.print(f"[green]✓[/green] config: {CONFIG_PATH}")
-
-
-def voice_backend() -> str | None:
-    """Which voice build is installed: "nvidia" (voice-nvidia), "cpu" (voice-cpu) or None (no voice)."""
-    from importlib.metadata import PackageNotFoundError, version
-
-    for dist, backend in (("nvidia-cublas-cu12", "nvidia"), ("torch", "cpu")):
-        try:
-            version(dist)
-            return backend
-        except PackageNotFoundError:
-            pass
-    return None
-
-
-def setup_hint(backend: str = "") -> str:
-    """The setup-script command that installs the voice, optionally for a given backend."""
-    return "scripts/setup.sh --voice" + {"cpu": " --cpu", "nvidia": " --nvidia"}.get(backend, "")
 
 
 @app.command()

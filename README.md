@@ -37,8 +37,9 @@ scripts/setup.sh --all --link     # or --voice, --serve; nothing for text chat o
 ```
 
 For voice, the script looks for an NVIDIA GPU and asks which build to install: `--nvidia` (CUDA,
-about 6 GB) or `--cpu` (about 2 GB). Pass either to skip the question. It then fetches the speech
-models (`vision setup`) and runs `vision doctor`, which checks the CLIs, logins, GPU and audio devices.
+about 6 GB, Linux only) or `--cpu` (about 2 GB; macOS always gets this one). Pass either to skip the
+question. It then fetches the speech models (`vision setup`) and runs `vision doctor`, which checks the
+CLIs, logins, GPU and audio devices.
 
 The same by hand:
 

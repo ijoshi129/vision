@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -225,34 +226,65 @@ class DoctorWithoutVoiceTests(unittest.TestCase):
 
 
 class VoiceBackendTests(unittest.TestCase):
-    """The installed voice build is read from package metadata, so it never imports torch."""
+    """The installed voice build is read from torch's metadata, so it never imports torch."""
 
-    def backend(self, installed):
+    CUDA_TORCH = ['cuda-toolkit[cublas]==13.0.3; platform_system == "Linux"', "filelock"]
+
+    def backend(self, torch_version, torch_requires=(), platform="linux", leftovers=("nvidia-cublas-cu12",)):
         from importlib.metadata import PackageNotFoundError
 
-        from vision import cli
+        from vision import install
 
         def version(dist):
-            if dist not in installed:
-                raise PackageNotFoundError(dist)
-            return installed[dist]
+            if dist == "torch" and torch_version:
+                return torch_version
+            if dist in leftovers:
+                return "12.9"
+            raise PackageNotFoundError(dist)
 
-        with patch("importlib.metadata.version", version):
-            return cli.voice_backend()
+        with patch("importlib.metadata.version", version), \
+                patch("importlib.metadata.requires", lambda dist: list(torch_requires)), \
+                patch.object(install.sys, "platform", platform):
+            return install.voice_backend()
 
-    def test_the_nvidia_libraries_mean_the_nvidia_build(self):
-        self.assertEqual(self.backend({"torch": "2.14.0", "nvidia-cublas-cu12": "12.9"}), "nvidia")
+    def test_cuda_torch_is_the_nvidia_build(self):
+        self.assertEqual(self.backend("2.14.0", self.CUDA_TORCH), "nvidia")
 
-    def test_torch_without_them_is_the_cpu_build(self):
-        # macOS and PyTorch's CPU index on Linux: the version alone does not say "+cpu" everywhere.
-        self.assertEqual(self.backend({"torch": "2.14.0+cpu"}), "cpu")
-        self.assertEqual(self.backend({"torch": "2.14.0"}), "cpu")
+    def test_cpu_torch_is_the_cpu_build_even_with_cuda_libraries_left_behind(self):
+        # A switch to voice-cpu by hand keeps nvidia-cublas-cu12 around; torch is what counts.
+        self.assertEqual(self.backend("2.14.0+cpu"), "cpu")
+        self.assertEqual(self.backend("2.14.0", ["filelock"]), "cpu")
+
+    def test_macos_torch_is_the_cpu_build(self):
+        self.assertEqual(self.backend("2.14.0", self.CUDA_TORCH, platform="darwin"), "cpu")
 
     def test_no_torch_is_no_voice(self):
-        self.assertIsNone(self.backend({}))
+        self.assertIsNone(self.backend(None))
 
-    def test_the_hint_names_the_setup_script_and_the_build(self):
-        from vision import cli
 
-        self.assertEqual(cli.setup_hint("cpu"), "scripts/setup.sh --voice --cpu")
-        self.assertEqual(cli.setup_hint("nvidia"), "scripts/setup.sh --voice --nvidia")
+class InstallHintTests(unittest.TestCase):
+    """Hints are pasted from wherever `vision` runs, so they carry the checkout's path, not a relative one."""
+
+    def test_the_hint_names_the_setup_script_by_full_path_and_the_build(self):
+        from vision import install
+
+        with patch.object(install.Path, "home", return_value=install.ROOT.parent):
+            self.assertEqual(install.setup_hint("cpu"), f"~/{install.ROOT.name}/scripts/setup.sh --voice --cpu")
+        with patch.object(install.Path, "home", return_value=Path("/nowhere")):
+            self.assertEqual(install.setup_hint("nvidia"), f"{install.SETUP} --voice --nvidia")
+
+    def test_without_a_checkout_it_falls_back_to_uv(self):
+        from vision import install
+
+        with patch.object(install, "SETUP", Path("/nowhere/setup.sh")):
+            self.assertEqual(install.setup_hint("cpu"), "uv pip install 'vision[voice-cpu]'")
+            self.assertIn("voice-nvidia", install.setup_hint())
+            self.assertEqual(install.extra_hint("weather"), "pip install 'vision[weather]'")
+
+    def test_extras_never_suggest_the_cuda_build_by_accident(self):
+        from vision import install
+
+        for extra in ("serve", "weather"):
+            self.assertNotIn("all", install.extra_hint(extra))
+        self.assertTrue(install.extra_hint("serve").endswith("setup.sh --serve"))
+        self.assertIn("--extra weather", install.extra_hint("weather"))

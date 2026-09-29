@@ -6,9 +6,9 @@
 #   scripts/setup.sh [--voice] [--serve] [--all] [--nvidia | --cpu] [--link] [--yes]
 #
 #   --voice    speech in and out, then `vision setup` for the speech models (about 10 GB, into ~/.cache/huggingface)
-#   --nvidia   the voice build for an NVIDIA GPU: CUDA torch and the NVIDIA runtime libraries (about 6 GB)
+#   --nvidia   the voice build for an NVIDIA GPU: CUDA torch and the NVIDIA runtime libraries (about 6 GB; Linux only)
 #   --cpu      the voice build for everything else: CPU-only torch (about 2 GB), several times slower than real time
-#              Without either, the script looks for an NVIDIA GPU (nvidia-smi) and asks.
+#              Without either, the script looks for an NVIDIA GPU (nvidia-smi) and asks; macOS always gets --cpu.
 #   --serve    `vision serve`, for the Vision Remote iPhone app
 #   --all      voice, serve and weather
 #   --link     symlink bin/vision into ~/.local/bin
@@ -40,8 +40,8 @@ done
 
 confirm() {  # confirm "question" -> 0 for yes
     [ "$yes" = 1 ] && return 0
-    local answer
-    read -r -p "$1 [y/N] " answer
+    local answer=""
+    read -r -p "$1 [y/N] " answer || true  # no terminal: no
     [[ "$answer" =~ ^([yY]|[yY][eE][sS])$ ]]
 }
 
@@ -54,6 +54,10 @@ command -v claude >/dev/null || say "Claude Code is not installed (https://code.
 
 extras=()
 if [ "$voice" = 1 ]; then
+    if [ "$(uname -s)" != Linux ]; then
+        [ "$backend" = nvidia ] && { say "--nvidia is Linux only (there are no CUDA wheels for $(uname -s)); use --cpu"; exit 2; }
+        backend=cpu
+    fi
     gpu=""
     command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1 && gpu="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
     if [ -z "$backend" ]; then
@@ -61,7 +65,8 @@ if [ "$voice" = 1 ]; then
         if [ -n "$gpu" ]; then say "found an NVIDIA GPU: $gpu"; else say "no NVIDIA GPU found (nvidia-smi)"; fi
         backend="$detected"
         if [ "$yes" = 0 ]; then
-            read -r -p "Voice build: [n]vidia (CUDA, ~6 GB) or [c]pu (~2 GB)? [${detected:0:1}] " answer
+            answer=""
+            read -r -p "Voice build: [n]vidia (CUDA, ~6 GB) or [c]pu (~2 GB)? [${detected:0:1}] " answer || true  # no terminal: detected
             case "$answer" in
                 [nN]*) backend=nvidia ;;
                 [cC]*) backend=cpu ;;
@@ -87,13 +92,14 @@ if [ ! -x .venv/bin/python ]; then
     "$uv" venv --python 3.12 .venv
 fi
 sync=(sync --frozen --inexact)  # --inexact: a re-run never removes what an earlier one installed
-for extra in "${extras[@]}"; do sync+=(--extra "$extra"); done
-say "installing: text chat${extras[*]:+ + ${extras[*]}}"
+for extra in ${extras[@]+"${extras[@]}"}; do sync+=(--extra "$extra"); done  # bash 3.2 (macOS): empty array + set -u
+say "installing: text chat${extras[*]+ + ${extras[*]}}"
 "$uv" "${sync[@]}"
 
 # Switching an NVIDIA build to --cpu: --inexact left the CUDA libraries behind, and nothing uses them now.
 if [ "$voice" = 1 ] && [ "$backend" = cpu ]; then
-    stale=$("$uv" pip list --python .venv/bin/python --format freeze 2>/dev/null | sed -n 's/^\(nvidia-[^=]*\|triton\)==.*/\1/p')
+    stale=$("$uv" pip list --python .venv/bin/python --format freeze 2>/dev/null |
+        awk -F'==' '$1 ~ /^(nvidia-|cuda-)/ || $1 == "triton" { print $1 }')
     if [ -n "$stale" ]; then
         say "removing the CUDA libraries the NVIDIA build left behind"
         # shellcheck disable=SC2086
@@ -113,10 +119,8 @@ if [ "$link" = 1 ]; then
     case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) say "~/.local/bin is not on your PATH; add it in your shell profile" ;; esac
 fi
 
-if command -v claude >/dev/null; then
-    say "checking the install (vision doctor: one small Claude request)"
-    .venv/bin/python -m vision doctor --no-usage || true
-fi
+say "checking the install (vision doctor$(command -v claude >/dev/null && echo ': one small Claude request'))"
+.venv/bin/python -m vision doctor --no-usage || true
 
 start=$([ "$link" = 1 ] && echo vision || echo "$root/bin/vision")
 say "done. Start a chat with:  $start"
