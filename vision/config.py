@@ -396,6 +396,11 @@ VOICE_PRESETS = {"friday": "tara"}
 
 # What the voice says while a spoken reply is still coming ([voice] filler_phrases).
 FILLER_PHRASES = ("Hmm.",)
+# Filler lists earlier releases wrote into config.toml as the default. A config still holding one of these
+# unchanged gets today's default instead; a list the user edited is left alone.
+OLD_FILLER_DEFAULTS = (
+    ("One sec.", "Let me see.", "Hmm, let me think.", "Right, let me have a look.", "Hang on a moment.", "Let me check."),
+)
 
 
 def voice_dir(name: str) -> Path:
@@ -670,6 +675,8 @@ def load_config() -> Config:
     vc = cfg.voice
     vc.filler_after_ms = max(0, int(vc.filler_after_ms or 0))
     vc.filler_phrases = [str(x).strip() for x in (vc.filler_phrases if isinstance(vc.filler_phrases, list) else []) if str(x).strip()]
+    if tuple(vc.filler_phrases) in OLD_FILLER_DEFAULTS:
+        vc.filler_phrases = list(FILLER_PHRASES)  # an untouched old default: move it to the "Hmm." filler
     router = raw.get("router", {})
     for k, v in router.items():
         if k in ("agents", "limits", "permissions"):

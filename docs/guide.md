@@ -202,9 +202,10 @@ exclaims, conversational otherwise. `~/.local/state/vision/voice.log` records wh
 
 In a spoken conversation the reply's first words can take a while (transcription, then the model's own
 thinking: a second on a good turn, twenty on a hard one). Rather than dead air, the voice says a short
-"One sec." or "Let me see." when nothing has started `filler_after_ms` after you stop talking, and the
-reply follows it. The phrases (`filler_phrases` under `[voice]`) are made in your voice at warm-up and cached
-under `~/.local/state/vision/fillers`, so they cost nothing on the turn; `filler = false` turns it off.
+"Hmm." when nothing has started `filler_after_ms` after you stop talking, and the reply follows it. The
+phrases (`filler_phrases` under `[voice]`, just `["Hmm."]` by default) are made in your voice at warm-up and
+cached under `~/.local/state/vision/fillers`, so they cost nothing on the turn; `filler = false` turns it off.
+A config.toml still holding an older release's default list is read as `["Hmm."]`; a list you edited is kept.
 
 Vision streams the model rather than waiting for whole clips. `vision/talker.py` replaces the library's
 `transformers.generate()` loop: the prompt is prefilled once, then every 80 ms frame is one CUDA-graph

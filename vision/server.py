@@ -637,7 +637,7 @@ class Chat:
                 if voice:
                     from vision.cli import _arm_filler
 
-                    _arm_filler(wire, sp, self.hub.cfg.voice)  # "One sec." if the first words are late
+                    _arm_filler(wire, sp, self.hub.cfg.voice)  # "Hmm." if the first words are late
             except Exception as e:  # noqa: BLE001
                 self.post({"type": "note", "text": f"voice unavailable: {e}"})
         self._wire = wire
@@ -1269,7 +1269,7 @@ class Hub:
                 self._speaker = Speaker(self.cfg.voice)
         self._speaker._load()
         if fresh and self.cfg.voice.filler:
-            # Its "One sec." clips, made once and cached on disk; a turn before they are ready just stays quiet.
+            # Its "Hmm." clips, made once and cached on disk; a turn before they are ready just stays quiet.
             sp, phrases = self._speaker, self.cfg.voice.filler_phrases
             threading.Thread(target=lambda: sp.prepare_fillers(phrases), daemon=True).start()
         return self._speaker

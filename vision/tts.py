@@ -1047,7 +1047,7 @@ class Speaker:
         sf.write(str(path), audio, SAMPLE_RATE)
         return Path(path)
 
-    # -- fillers: "One sec." while a spoken reply is still on its way (StreamingSpeaker.arm_filler)
+    # -- fillers: "Hmm." while a spoken reply is still on its way (StreamingSpeaker.arm_filler)
     FILLER_DIR = STATE_DIR / "fillers"
 
     def _filler_voice(self) -> str:
@@ -1401,7 +1401,7 @@ class StreamingSpeaker:
     # A spoken reply's first words can be a while coming (transcription, then the model's own thinking
     # before its first sentence: a second on a good turn, twenty on a hard one). Left as dead air the
     # listener wonders whether they were heard. `arm_filler` starts a clock at the top of the turn; if
-    # no sentence has been queued when it runs out, a pre-made clip ("One sec.") plays through this
+    # no sentence has been queued when it runs out, a pre-made clip ("Hmm.") plays through this
     # reply's stream, and the reply follows it after an ordinary sentence gap. A sentence that arrives
     # first cancels the clock. The clip is not in the reply's text, so it is counted as a chunk of zero
     # source characters: the text reveal waits on it, nothing runs ahead.

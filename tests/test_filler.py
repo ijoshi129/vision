@@ -1,4 +1,4 @@
-"""The spoken filler ("One sec.") that covers a late first sentence."""
+"""The spoken filler ("Hmm.") that covers a late first sentence."""
 import tempfile
 import threading
 import time
@@ -10,6 +10,7 @@ from unittest import mock
 import numpy as np
 
 from test_streaming_speaker import FakeSpeaker
+from vision import config
 from vision.timing import VoiceTiming
 from vision.tts import SAMPLE_RATE, Speaker, StreamingSpeaker
 
@@ -164,6 +165,39 @@ class FillerCacheTests(unittest.TestCase):
             sp = self.make_speaker(mock.Mock(side_effect=[RuntimeError("no gpu"), clip()]))
             made = sp.prepare_fillers(["One sec.", "Let me see."])
             self.assertEqual([p for p, _ in made], ["Let me see."])
+
+
+class FillerConfigTests(unittest.TestCase):
+    def load(self, toml: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(toml, encoding="utf-8")
+            with mock.patch.object(config, "CONFIG_PATH", path), mock.patch.object(config, "ensure_dirs"):
+                return config.load_config(), path.read_text(encoding="utf-8")
+
+    def test_an_old_default_list_moves_to_hmm(self):
+        for old in config.OLD_FILLER_DEFAULTS:
+            phrases = ", ".join(f'"{p}"' for p in old)
+            toml = ('[voice]\n# mine\nfiller = true\nfiller_after_ms = 900\nfiller_again_ms = 10000\n'
+                    f'filler_phrases = [{phrases}]\n'
+                    'filler_later_phrases = ["Still on it.", "Bear with me.", "Nearly there."]\n')
+            cfg, after = self.load(toml)
+            self.assertEqual(cfg.voice.filler_phrases, list(config.FILLER_PHRASES))
+            self.assertEqual(cfg.voice.filler_phrases, ["Hmm."])
+            self.assertEqual(cfg.voice.filler_after_ms, 900)
+            self.assertFalse(hasattr(cfg.voice, "filler_again_ms"), "the old second stage is ignored")
+            self.assertFalse(hasattr(cfg.voice, "filler_later_phrases"))
+            self.assertEqual(after, toml, "the file itself is left as it was")
+
+    def test_a_custom_list_is_kept(self):
+        cfg, _ = self.load('[voice]\nfiller_phrases = ["One sec.", "Let me see."]\n')
+        self.assertEqual(cfg.voice.filler_phrases, ["One sec.", "Let me see."])
+        cfg, _ = self.load('[voice]\nfiller_phrases = ["Right then."]\n')
+        self.assertEqual(cfg.voice.filler_phrases, ["Right then."])
+
+    def test_no_list_is_the_default(self):
+        cfg, _ = self.load('[voice]\nfiller = true\n')
+        self.assertEqual(cfg.voice.filler_phrases, ["Hmm."])
 
 
 if __name__ == "__main__":

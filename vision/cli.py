@@ -312,7 +312,7 @@ def _failed_turn_delta(text: str | None, error: str, markdown: bool = True) -> s
 
 
 def _load_voice(speaker, vc) -> None:
-    """Load the voice, then make its filler clips ("One sec.") while it is idle: they are cached on disk,
+    """Load the voice, then make its filler clips ("Hmm.") while it is idle: they are cached on disk,
     so this costs a few seconds once per voice. A clip that fails is simply not available."""
     speaker._load()
     if vc.filler:
@@ -1065,7 +1065,7 @@ def chat(speak: bool, model: Optional[str], effort: Optional[str], voice: Option
 
             ss = StreamingSpeaker(speaker(), timing=timing)
             if from_voice:
-                _arm_filler(ss, speaker(), cfg.voice)  # "One sec." if the first words are late
+                _arm_filler(ss, speaker(), cfg.voice)  # "Hmm." if the first words are late
         state["ss"] = ss
         entry = screen.start_reply(markdown=not from_voice)
         entry.tokens_fn = lambda: getattr(brain, "output_tokens", 0)  # the `↓ 1.2k` on the live line (Claude Code only)
