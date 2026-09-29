@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fake_exe import python_command
+from vision import compat
 from vision.config import BrainConfig, GrokConfig
 from vision.grok import GrokBrain
 
@@ -22,9 +23,8 @@ class GrokAgentModeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         tmp = Path(self.tmp.name)
         self.log = tmp / "log.jsonl"
-        exe = tmp / "grok"
-        exe.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE} \"$@\"\n")
-        exe.chmod(0o755)
+        # A command that runs the fake with this interpreter (a .cmd on Windows, which runs no #! script).
+        exe = python_command(tmp / "grok", f"import runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
         self._patches = [patch("vision.grok.find_grok", return_value=str(exe)), patch("vision.grok.STATE_DIR", tmp),
                          patch("vision.grok.LAST_SESSION_FILE", tmp / "last"), patch("vision.grok.USAGE_FILE", tmp / "usage"),
                          patch.dict(os.environ, {"FAKE_GROK_LOG": str(self.log)})]
@@ -98,6 +98,7 @@ class GrokAgentModeTests(unittest.TestCase):
         self.assertTrue(turn.tools[0].is_error)
         self.assertTrue(brain.session_id)
 
+    @unittest.skipIf(compat.WINDOWS, "Windows has no Grok sandbox, so GrokBrain.ask refuses plan mode before starting Grok")
     def test_plan_mode_runs_in_the_read_only_sandbox(self):
         self.brain(mode="plan").ask("hi")
         self.assertEqual(self.sent()[0]["sandbox"], "read-only")
