@@ -8,7 +8,6 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import sys
 import threading
 import tomllib
 from dataclasses import dataclass, field
@@ -16,20 +15,6 @@ from pathlib import Path
 
 from vision.models import THINKING_OFF, provider_for
 from vision.providers import PROVIDER_NAMES, REGISTRY, load_plugins, register_endpoints
-
-# Windows starts in plan mode: none of the Linux sandboxes exist there, and denied_tools only knows
-# POSIX commands. "auto" still works; set it under [brain] or press Shift-Tab.
-DEFAULT_MODE = "plan" if sys.platform == "win32" else "auto"
-# Windows' counterparts of the default POSIX deny entries: wiping disks, the boot configuration and
-# restore points, shutting down, and elevating (the sudo of Windows). Bash rules also reach Claude
-# Code's PowerShell tool as PowerShell(...) ones (see Brain._command); the cmdlets only PowerShell
-# has are listed as PowerShell rules.
-WINDOWS_DENIED = [
-    "Bash(format:*)", "Bash(diskpart:*)", "Bash(bcdedit:*)", "Bash(vssadmin delete:*)", "Bash(runas:*)",
-    "PowerShell(Format-Volume:*)", "PowerShell(Clear-Disk:*)", "PowerShell(Initialize-Disk:*)",
-    "PowerShell(Remove-Partition:*)", "PowerShell(Stop-Computer:*)", "PowerShell(Restart-Computer:*)",
-    "PowerShell(Start-Process * -Verb RunAs*)",
-]
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "vision"
 DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "vision"
@@ -91,11 +76,6 @@ LLAMA_URLS = [
     f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-ubuntu-cuda-13.3-x64.tar.gz",
     f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/cudart-llama-{LLAMA_BUILD}-bin-ubuntu-cuda-13.3-x64.tar.gz",
 ]
-if sys.platform == "win32":  # the same build for Windows x64 (zips; the cudart one carries no build number)
-    LLAMA_URLS = [
-        f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-win-cuda-13.4-x64.zip",
-        f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/cudart-llama-bin-win-cuda-13.4-x64.zip",
-    ]
 
 DEFAULT_CONFIG = '''# Vision configuration. Edit freely; run `vision config` to see the resolved values.
 
@@ -320,14 +300,10 @@ live_ms = 600
 #   "wake"   say Vision's name ("Vision, stop" / "Vision, what about…" runs straight away). Works on
 #            speakers: a tiny Whisper on the CPU listens for the name over Vision's own voice.
 #   "speech" just start talking (~a quarter second of voice). Needs headphones or echo cancellation
-#            (`pactl load-module module-echo-cancel`, then input_device = "echo-cancel"; on Windows,
-#            echo_cancel below), or Vision hears itself through the speakers and cuts itself off.
+#            (`pactl load-module module-echo-cancel`, then input_device = "echo-cancel"), or Vision
+#            hears itself through the speakers and cuts itself off.
 #   "off"    keyboard only.
 barge_in = "wake"
-# Take Vision's own voice out of the microphone in Vision itself (WebRTC's echo canceller, via the
-# livekit package): "auto" = on for Windows, off elsewhere (PipeWire's echo-cancel module covers
-# Linux); "on"; "off".
-echo_cancel = "auto"
 
 [wake]
 # Say Vision's name to start talking without touching the keyboard (also /wake inside a chat).
@@ -381,11 +357,6 @@ country_code = ""  # e.g. GB; enables official weather alerts when using latitud
 units = "metric"   # "metric" (°C, km/h) or "imperial" (°F, mph)
 language = "en"
 '''
-if DEFAULT_MODE != "auto":
-    DEFAULT_CONFIG = DEFAULT_CONFIG.replace('\nmode = "auto"\n', f'\nmode = "{DEFAULT_MODE}"\n', 1)
-if sys.platform == "win32":
-    DEFAULT_CONFIG = DEFAULT_CONFIG.replace(
-        '"Bash(grok:*)"]\n', '"Bash(grok:*)", ' + ", ".join(f'"{r}"' for r in WINDOWS_DENIED) + "]\n", 1)
 
 VOICE_ENGINES = ("qwen3", "orpheus")
 # The voices baked into the Orpheus fine-tune, roughly in order of how polished they are.
@@ -467,13 +438,12 @@ class BrainConfig:
     )
     denied_tools: list[str] = field(
         default_factory=lambda: ["Bash(sudo:*)", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(mkfs:*)", "Bash(dd:*)", "Bash(shutdown:*)", "Bash(reboot:*)", "Bash(claude:*)", "Bash(codex:*)", "Bash(grok:*)"]
-        + (WINDOWS_DENIED if sys.platform == "win32" else [])
     )
     workdir: str = ""
     address_user_as: str = ""
     # "auto" (every tool pre-approved, Codex on danger-full-access; denied_tools still applies) or
     # "plan" (read-only until the plan is approved). Shift-Tab or /mode switches for the session.
-    mode: str = DEFAULT_MODE
+    mode: str = "auto"
     # What approving a plan unlocks: "session" (Vision switches to auto for the rest of the session)
     # or "turn" (only the approved plan runs; the next message starts in plan mode again).
     plan_approval: str = "session"
@@ -562,7 +532,6 @@ class ListenConfig:
     chime: bool = True
     live_ms: int = 600  # live transcription preview interval; 0 = off
     barge_in: str = "wake"  # "wake" | "speech" | "off"
-    echo_cancel: str = "auto"  # "auto" (on for Windows) | "on" | "off"; see vision/echo.py
 
 
 @dataclass
@@ -662,7 +631,7 @@ def load_config() -> Config:
                 setattr(target, k, v)
     cfg.brain.mode = str(cfg.brain.mode).strip().lower()
     if cfg.brain.mode not in MODES:
-        cfg.brain.mode = DEFAULT_MODE
+        cfg.brain.mode = "auto"
     if cfg.brain.plan_approval not in ("session", "turn"):
         cfg.brain.plan_approval = "session"
     global _read_cli_logins
@@ -980,28 +949,10 @@ def resolve_device(spec: str | int | None, kind: str) -> AudioDevice:
         if needle in description.lower() or needle in name.lower():
             alsa = next((i for i, d in enumerate(devices) if d["name"] == "pipewire" and d[key] > 0), None)
             return AudioDevice(alsa, name)
-    order = _windows_devices(sd, key) if sys.platform == "win32" else enumerate(devices)
-    for i, d in order:
+    for i, d in enumerate(devices):
         if d[key] > 0 and needle in d["name"].lower() and "JACK" not in sd.query_hostapis(d["hostapi"])["name"]:
             return AudioDevice(i)
     raise SystemExit(f"No {kind} device matching {spec!r}. Run `vision doctor` to list devices.")
-
-
-# Windows lists every device once per host API. DirectSound and MME convert to whatever rate Vision
-# asks for (16 kHz in, 24 kHz out); WASAPI shared mode only runs at the mixer's rate, and WDM-KS
-# opens the hardware exclusively. DirectSound first: MME truncates names to 31 characters.
-_WINDOWS_HOST_APIS = ("Windows DirectSound", "MME")
-
-
-def _windows_devices(sd, key: str) -> list[tuple[int, dict]]:
-    """(index, device) for the usable Windows host APIs, in _WINDOWS_HOST_APIS order."""
-    rank = {name: n for n, name in enumerate(_WINDOWS_HOST_APIS)}
-    found = []
-    for i, d in enumerate(sd.query_devices()):
-        api = sd.query_hostapis(d["hostapi"])["name"]
-        if d[key] > 0 and api in rank:
-            found.append((rank[api], i, d))
-    return [(i, d) for _, i, d in sorted(found, key=lambda r: (r[0], r[1]))]
 
 
 def input_device_choices() -> list[tuple[str, str, str]]:
@@ -1013,11 +964,6 @@ def input_device_choices() -> list[tuple[str, str, str]]:
         return rows + [(name, desc, name) for name, desc in nodes]
     import sounddevice as sd
 
-    if sys.platform == "win32":
-        rows[0] = ("", "system default", "follows your Windows default microphone")
-        first = _WINDOWS_HOST_APIS[0]
-        devices = [(i, d) for i, d in _windows_devices(sd, "max_input_channels") if sd.query_hostapis(d["hostapi"])["name"] == first]
-        return rows + [(str(i), d["name"], f"#{i} · {d['max_input_channels']} in") for i, d in devices]
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0 and "JACK" not in sd.query_hostapis(d["hostapi"])["name"]:
             rows.append((str(i), d["name"], f"#{i} · {d['max_input_channels']} in"))

@@ -43,7 +43,7 @@ class CodexVoiceTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.log = os.path.join(self.dir.name, "log.jsonl")
-        self.exe = python_command(os.path.join(self.dir.name, "codex"), FAKE)  # a .cmd beside it on Windows
+        self.exe = python_command(os.path.join(self.dir.name, "codex"), FAKE)
         self.cfg = Config()
         self.cfg.conversation.model = "gpt-5.6-luna"
         self.cfg.conversation.effort = "low"

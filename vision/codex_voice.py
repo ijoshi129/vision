@@ -20,8 +20,6 @@ import tempfile
 import threading
 import time
 
-from vision import compat
-
 # Everything but the model: no shell, no exec, no sub-agents, no patch format, no images, no plugins.
 VOICE_CONFIG = {
     "features.shell_tool": False,
@@ -93,7 +91,7 @@ class CodexConversation:
         from vision.codex import find_codex
         from vision.codex_app import AppServerTurn
 
-        self._cwd = tempfile.TemporaryDirectory(prefix="vision-conversation-", ignore_cleanup_errors=compat.WINDOWS)
+        self._cwd = tempfile.TemporaryDirectory(prefix="vision-conversation-")
         try:
             rpc = AppServerTurn(find_codex(), self._cwd.name, brain_env("codex"), stall_s=0)
             self._rpc = rpc

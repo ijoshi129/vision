@@ -122,7 +122,7 @@ class AppServerTurnTests(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def _ask(self, server, brain=None, **kw):
-        brain = brain or CodexBrain(BrainConfig(model="gpt-5.5", effort="high", mode="auto"))
+        brain = brain or CodexBrain(BrainConfig(model="gpt-5.5", effort="high"))
         with patch("subprocess.Popen", return_value=server):
             return brain, brain.ask("how many files?", **kw)
 

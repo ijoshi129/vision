@@ -64,13 +64,13 @@ Vision has two modes, and the bottom-left corner of the status line always shows
 Vision reads, searches and runs read-only commands, then presents a plan and a `Carry out this plan?`
 selector. Yes switches to auto mode and carries it out in the same turn; No (or typing what should change)
 keeps it planning. Shift-Tab toggles the modes, `/mode plan`, `/mode auto` (or `/plan`, `/auto`) set one,
-and `mode` under `[brain]` picks the one Vision starts in (auto by default; plan on Windows). With
+and `mode` under `[brain]` picks the one Vision starts in (auto by default). With
 `plan_approval = "turn"` a Yes carries out only that plan and the next message starts in plan mode again.
 Codex and Grok have no Vision-wired plan-approval
 UI, so plan mode gives them a read-only sandbox and asks them to present the plan for you to approve by switching to auto.
 Banked limit resets and Grok's allowance on the usage page come from undocumented endpoints that Vision
 calls with the logins Claude Code and Grok saved on disk; `read_cli_logins = false` under `[brain]` keeps
-Vision out of those files. Windows is covered in [WINDOWS.md](../WINDOWS.md).
+Vision out of those files.
 Inside chat: `/speak` toggles voice, `/talk` starts a hands-free spoken conversation right there in the
 chat screen (type to answer instead of speaking; Esc, `/talk` again or saying "goodbye" ends it), `/wake`
 turns the wake word on: whenever the chat is idle a tiny Whisper on the CPU listens for "Vision"; say it and
@@ -84,8 +84,7 @@ with the wake word on): `"wake"` (the default) means say "Vision" — a tiny CPU
 over Vision's own voice, so it works on speakers, and "Vision, what about Mars?" runs straight away, while
 "Vision" alone stops it and it listens; `"speech"` means just start talking (a quarter second of voice
 cuts in, so it needs headphones or PipeWire echo cancellation: `pactl load-module module-echo-cancel`,
-then `input_device = "echo-cancel"`; on Windows Vision cancels its own voice itself, `[listen] echo_cancel`);
-`"off"` leaves it to Esc / Ctrl-C.
+then `input_device = "echo-cancel"`); `"off"` leaves it to Esc / Ctrl-C.
 Typing `/` pops up the command menu above the input box and it narrows as you type (`/mo` → `/model`);
 ↑/↓ choose, Enter runs the highlighted command, Tab fills it in, Esc hides the menu. After a command
 that takes an argument (`/model `, `/effort `, `/voice `, `/session `) the menu switches to its choices.
@@ -459,8 +458,7 @@ publish it to the whole internet instead, so prefer Serve. Every request needs t
 the app scans to pair. The API lives in `vision/server.py` if you want to write your own client.
 
 A `vision` chat open in a terminal on the same machine shows up in the app's chat list too (terminal
-icon): the terminal announces itself on a Unix socket under `~/.local/state/vision/live/` (on Windows,
-which has no Unix sockets, a 127.0.0.1 port plus a secret the connection must present), `vision serve`
+icon): the terminal announces itself on a Unix socket under `~/.local/state/vision/live/`, `vision serve`
 picks it up, and what is typed on the phone runs in that terminal while its replies stream to both.
 It leaves the list when the terminal quits, and closing it on the phone quits that terminal (`vision/link.py`).
 

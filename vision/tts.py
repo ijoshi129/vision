@@ -49,7 +49,7 @@ def model_files() -> tuple[Path, Path]:
 
 
 def llama_server_bin() -> Path:
-    return LLAMA_DIR / ("llama-server.exe" if sys.platform == "win32" else "llama-server")
+    return LLAMA_DIR / "llama-server"
 
 
 def orpheus_present() -> bool:
@@ -268,21 +268,10 @@ class OrpheusEngine:
                 "-m", str(gguf), "-ngl", str(ngl), "-c", "4096", "-np", "1", "-fa", "on",
                 "--host", "127.0.0.1", "--port", str(self.cfg.port), "--no-webui", "-lv", "4",  # 4 logs the GPU offload
             ]
-            if sys.platform == "win32":
-                # No sh there: run the server directly, and a job object stands in for the watchdog.
-                from vision import compat
-
-                with open(log, "w", encoding="utf-8") as f:
-                    self._proc = subprocess.Popen(cmd[5:], stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
-                try:
-                    compat.end_with_this_process(self._proc)
-                except OSError:
-                    pass  # it still stops with close(); only a crash of Vision would leave it running
-            else:
-                with open(log, "w", encoding="utf-8") as f:
-                    self._proc = subprocess.Popen(
-                        cmd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True
-                    )
+            with open(log, "w", encoding="utf-8") as f:
+                self._proc = subprocess.Popen(
+                    cmd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True
+                )
             deadline = time.time() + _LOAD_TIMEOUT_S
             while time.time() < deadline and self._proc.poll() is None:
                 if self._server_alive():
@@ -303,12 +292,7 @@ class OrpheusEngine:
             return "?"
 
     def _kill_server(self):
-        if self._proc is not None and self._proc.poll() is None and sys.platform == "win32":
-            from vision import compat
-
-            compat.terminate(self._proc)
-            self._proc.wait(5)
-        elif self._proc is not None and self._proc.poll() is None:
+        if self._proc is not None and self._proc.poll() is None:
             os.killpg(self._proc.pid, signal.SIGTERM)  # the watchdog and the server share a group
             try:
                 self._proc.wait(5)
@@ -453,9 +437,6 @@ def _quiet():
     would land in the middle of the transcript."""
     sys.stdout.flush()
     sys.stderr.flush()
-    if sys.platform == "win32":
-        yield from _quiet_windows()
-        return
     saved = [os.dup(fd) for fd in (1, 2)]
     devnull = os.open(os.devnull, os.O_WRONLY)
     try:
@@ -469,32 +450,6 @@ def _quiet():
             os.dup2(keep, fd)
             os.close(keep)
         os.close(devnull)
-
-
-def _quiet_windows():
-    """_quiet for Windows. There dup2 over fd 1/2 closes the console handle that sys.stdout (a console
-    stream) keeps writing to, so every print after the block failed with WinError 1: a `vision serve`
-    whose voice had loaded dropped each WebSocket at its "phone connected" log line. Swap the Python
-    streams, and the standard handles child processes inherit, instead; the console is never touched."""
-    import ctypes
-    import msvcrt
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetStdHandle.restype = wintypes.HANDLE
-    kernel32.GetStdHandle.argtypes = (wintypes.DWORD,)
-    kernel32.SetStdHandle.argtypes = (wintypes.DWORD, wintypes.HANDLE)
-    handles = (wintypes.DWORD(-11).value, wintypes.DWORD(-12).value)  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
-    saved = [kernel32.GetStdHandle(h) for h in handles]
-    with open(os.devnull, "w", encoding="utf-8") as null:
-        for h in handles:
-            kernel32.SetStdHandle(h, msvcrt.get_osfhandle(null.fileno()))
-        try:
-            with contextlib.redirect_stdout(null), contextlib.redirect_stderr(null):
-                yield
-        finally:
-            for h, old in zip(handles, saved):
-                kernel32.SetStdHandle(h, old)
 
 
 def _import_qwen():
@@ -893,9 +848,6 @@ def design_voice(description: str, text: str, language: str = "English", device:
             claim.acquire()
         except GpuBusy as e:
             raise TTSError(f"voice is {e}") from None
-    from vision.compat import check_hf_symlinks
-
-    check_hf_symlinks(QWEN_TTS_DESIGN)
     with _quiet():
         model = Qwen3TTSModel.from_pretrained(
             QWEN_TTS_DESIGN,
@@ -1137,20 +1089,10 @@ class Speaker:
                 stream = self.open_stream()
                 stream.start()
             step = 2400  # 100 ms
-            from vision import echo
-
-            canceller = echo.current()  # set up by the microphone when echo cancellation is on
-            if canceller is not None:
-                try:
-                    canceller.output_latency_s = max(0.0, float(stream.latency))
-                except (TypeError, ValueError):
-                    pass
             for i in range(0, len(audio), step):
                 if self._stop.is_set():
                     stream.abort()
                     break
-                if canceller is not None:
-                    canceller.played(audio[i : i + step], SAMPLE_RATE)
                 stream.write(audio[i : i + step].reshape(-1, 1))
             if own:
                 self.close_stream(stream)

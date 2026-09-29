@@ -14,7 +14,6 @@ import threading
 import time
 from pathlib import Path
 
-from vision import compat
 from vision.config import DATA_DIR
 
 JOURNAL_DIR = DATA_DIR / "chat-journals"
@@ -35,12 +34,14 @@ class ChatJournal:
         """Hold this chat for as long as this process runs, so another window doesn't take a live
         chat for a crashed one. The kernel drops the lock when the process dies. False when another
         running process already holds it."""
+        import fcntl
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self._owner is not None:
             return True
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
         try:
-            compat.lock_nonblocking(fd)  # flock, or a Windows byte-range lock past the contents
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             os.close(fd)
             return False
@@ -115,12 +116,17 @@ def _parse_json(line: str) -> dict | None:
 
 def in_use(path: Path) -> bool:
     """True while a running Vision process holds this chat (ChatJournal.claim)."""
+    import fcntl
+
     try:
         fd = os.open(path, os.O_RDONLY)
     except OSError:
         return False
     try:
-        return compat.held_elsewhere(fd)
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
     finally:
         os.close(fd)
 

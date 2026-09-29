@@ -14,14 +14,6 @@ from vision.turnjournal import (
 )
 
 
-def _let_go(hub):
-    """The hub's chats hold their journals open (claimed) for as long as the process runs; release
-    them before the temporary directory goes, since Windows won't delete a file that is still open."""
-    for chat in hub.chats.values():
-        if getattr(chat, "journal", None):
-            chat.journal.release()
-
-
 class TurnJournalTests(unittest.TestCase):
     def test_compact_agent_updates_restore_every_step(self):
         with TemporaryDirectory() as tmp:
@@ -186,7 +178,6 @@ class TurnJournalTests(unittest.TestCase):
             self.assertEqual([row["text"] for row in chat.history()], ["Check this", "I found"])
             self.assertTrue(chat.brain.handoff)
             self.assertIn("stopped", chat.history()[-1]["error"])
-            _let_go(hub)
 
 
 class GracefulRestartTests(unittest.TestCase):
@@ -233,7 +224,6 @@ class GracefulRestartTests(unittest.TestCase):
             chat.queue("one more thing", False, False)  # arrives in the last instant: held, not run
             self.assertFalse(chat.busy)
             self.assertEqual([p[0] for p in chat._pending], ["one more thing"])
-            _let_go(hub)
 
     def test_after_a_graceful_restart_queued_messages_run_instead_of_showing_lost(self):
         with TemporaryDirectory() as tmp, patch("vision.turnjournal.JOURNAL_DIR", Path(tmp)), \
@@ -250,7 +240,6 @@ class GracefulRestartTests(unittest.TestCase):
             self.assertEqual(hub._resume, [(chat, ["one more thing"])])
             self.assertFalse(any(row.get("error") for row in chat.history()))
             self.assertFalse((Path(tmp) / "restart.json").exists())  # taken once
-            _let_go(hub)
 
     def test_restart_command_line_drops_one_off_flags(self):
         from vision.server import restart_argv

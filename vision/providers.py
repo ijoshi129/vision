@@ -383,7 +383,7 @@ def ready(name: str, cfg=None) -> bool:
         try:
             clis.find_cli(name)
             ok = True
-        except Exception:  # noqa: BLE001  not installed, or a launcher Vision refuses (Windows .cmd)
+        except Exception:  # noqa: BLE001  not installed
             ok = False
     else:
         ok = False

@@ -1,7 +1,3 @@
-import sys
-import unittest
-
-from vision import cuda
 from vision.cuda import holder_name
 
 
@@ -38,19 +34,3 @@ def test_gpu_claim_is_exclusive_across_processes(tmp_path):
     assert not a.held
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.strip() == "got it", r.stdout + r.stderr
-
-
-@unittest.skipUnless(sys.platform == "win32", "Windows has no /proc; compat reads the command line instead")
-class WindowsCmdlineTests(unittest.TestCase):
-    def test_names_a_python_dash_m_process(self):
-        import subprocess
-        import time
-
-        p = subprocess.Popen([sys.executable, "-m", "timeit", "-n", "1", "import time; time.sleep(3)"], stdout=subprocess.DEVNULL)
-        try:
-            time.sleep(0.5)
-            self.assertEqual(cuda.holder_name(cuda.cmdline(p.pid)), "timeit")
-        finally:
-            p.kill()
-            p.wait()
-        self.assertEqual(cuda.cmdline(p.pid), [])  # gone

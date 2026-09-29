@@ -7,11 +7,6 @@ terminal process stays the only owner of the agent session: a message from the p
 it, its reply streams back over the socket, and whatever is typed at the keyboard streams to the
 phone too. When the terminal quits, its socket goes and the chat leaves the phone's list.
 
-Without Unix sockets (Windows) the terminal listens on 127.0.0.1 instead, on a port it picks, and the
-descriptor carries that port and a random secret. A connection only joins once its first frame, the
-hello, carries the secret, so another local user who finds the port learns nothing: the descriptor lives
-under the user's profile, like the socket's 0700 directory on Linux.
-
 Wire format: one JSON object per line, both ways.
   server → terminal   hello · message {text, speak} · answer {answers} · cancel · model {model, effort} · quit
   terminal → server   chat {…summary…} on hello and whenever the state changes, then the same
@@ -26,20 +21,15 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 import socket
 import threading
 import time
 from pathlib import Path
 from typing import Callable
 
-from vision import compat
 from vision.config import STATE_DIR
 
 LIVE_DIR = STATE_DIR / "live"
-# CPython has no AF_UNIX on Windows: loopback TCP with a secret there (see the module docstring).
-_TCP = not hasattr(socket, "AF_UNIX")
-HELLO_TIMEOUT = 5.0  # seconds a TCP connection gets to present the secret
 
 
 def descriptor_path(pid: int) -> Path:
@@ -51,7 +41,13 @@ def socket_path(pid: int) -> Path:
 
 
 def pid_alive(pid: int) -> bool:
-    return compat.pid_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def list_links() -> list[dict]:
@@ -102,9 +98,6 @@ class LinkHost:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._last: dict | None = None
-        self._tcp = _TCP
-        self._port: int | None = None
-        self._secret: str | None = None
         self._turn: list[dict] = []  # the running reply's frames, for a server that connects mid-reply
         self._rows: dict[tuple[str, str], dict] = {}  # its agent and tool rows, newest frame of each
 
@@ -115,16 +108,6 @@ class LinkHost:
             os.chmod(LIVE_DIR, 0o700)
         except OSError:
             pass
-        if self._tcp:
-            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            srv.bind(("127.0.0.1", 0))
-            srv.listen(4)
-            self._port, self._secret = srv.getsockname()[1], secrets.token_urlsafe(24)
-            self._server = srv
-            self._write_descriptor()
-            threading.Thread(target=self._accept, daemon=True, name="link-accept").start()
-            threading.Thread(target=self._watch, daemon=True, name="link-watch").start()
-            return
         sock_path = socket_path(self.pid)
         try:
             sock_path.unlink()
@@ -162,8 +145,6 @@ class LinkHost:
 
     def _write_descriptor(self) -> None:
         info = {"pid": self.pid, "started": time.time(), "cwd": os.getcwd()}
-        if self._tcp:
-            info.update(port=self._port, secret=self._secret)
         tmp = descriptor_path(self.pid).with_suffix(".tmp")
         tmp.write_text(json.dumps(info), encoding="utf-8")
         os.replace(tmp, descriptor_path(self.pid))
@@ -224,16 +205,12 @@ class LinkHost:
                 conn, _ = self._server.accept()
             except OSError:
                 return
-            if self._tcp:
-                conn.settimeout(HELLO_TIMEOUT)  # joins the clients once its hello carries the secret
-            else:
-                with self._lock:
-                    self._clients.append(conn)
+            with self._lock:
+                self._clients.append(conn)
             threading.Thread(target=self._serve, args=(conn,), daemon=True, name="link-client").start()
 
     def _serve(self, conn: socket.socket) -> None:
         buf = b""
-        trusted = not self._tcp
         try:
             while not self._stop.is_set():
                 chunk = conn.recv(65536)
@@ -247,17 +224,6 @@ class LinkHost:
                     try:
                         frame = json.loads(line)
                     except ValueError:
-                        frame = None
-                    if not trusted:
-                        # The first frame must be the hello with the secret; anything else ends it.
-                        if not (isinstance(frame, dict) and frame.get("type") == "hello"
-                                and secrets.compare_digest(str(frame.get("secret", "")), self._secret or "")):
-                            return
-                        trusted = True
-                        conn.settimeout(None)
-                        with self._lock:
-                            self._clients.append(conn)
-                    if frame is None:
                         continue
                     if frame.get("type") == "hello":
                         with self._lock:
@@ -302,14 +268,13 @@ class LinkClient:
         self._closed = False
 
     def connect(self) -> None:
-        tcp = self.info.get("port") is not None
-        s = socket.socket(socket.AF_INET if tcp else socket.AF_UNIX, socket.SOCK_STREAM)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(2.0)
-        s.connect(("127.0.0.1", int(self.info["port"])) if tcp else self.info["sock"])
+        s.connect(self.info["sock"])
         s.settimeout(None)
         self._sock = s
         threading.Thread(target=self._read, daemon=True, name=f"link-{self.pid}").start()
-        self.send({"type": "hello", "secret": self.info["secret"]} if tcp else {"type": "hello"})
+        self.send({"type": "hello"})
 
     def send(self, frame: dict) -> None:
         with self._lock:

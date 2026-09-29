@@ -18,8 +18,8 @@ from __future__ import annotations
 import glob
 import json
 import os
+import queue
 import re
-import select
 import shutil
 import subprocess
 import threading
@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING
 
 from rich.text import Text
 
-from vision import compat
 from vision import usage as usage_ui
 from vision.config import STATE_DIR, BrainConfig, weather_ready
 from vision.persona import system_prompt
@@ -52,26 +51,12 @@ class CodexError(RuntimeError):
 
 def find_codex() -> str:
     exe = shutil.which("codex")
-    if exe and compat.is_batch_file(exe):
-        return _native_codex(exe)
     if exe:
         return exe
     for cand in (os.path.expanduser("~/.local/bin/codex"), "/usr/local/bin/codex", "/usr/bin/codex"):
         if os.path.exists(cand):
             return cand
     raise CodexError("Codex CLI ('codex') not found on PATH. Install it (npm i -g @openai/codex) and run `codex login` once.")
-
-
-def _native_codex(launcher: str) -> str:
-    """The codex.exe behind npm's codex.cmd. Vision passes its instructions as a multi-line argument,
-    which cmd.exe (and so any .cmd) cannot carry intact; npm's bin/codex.js does no more than find this
-    binary in the platform package and mark the install as npm-managed, so Vision does the same."""
-    root = os.path.join(os.path.dirname(launcher), "node_modules", "@openai")
-    found = sorted(glob.glob(os.path.join(root, "**", "vendor", "*-pc-windows-msvc", "bin", "codex.exe"), recursive=True))
-    if not found:
-        raise CodexError(f"Found Codex as {launcher}, but not the codex.exe it launches. Reinstall: npm i -g @openai/codex")
-    os.environ.setdefault("CODEX_MANAGED_BY_NPM", "1")  # what codex.js sets: `codex update` then goes through npm
-    return found[0]
 
 
 def toml_str(s: str) -> str:
@@ -123,34 +108,26 @@ def app_server_call(exe: str, method: str, params: dict, timeout: float = APP_SE
         proc.stdin.write(json.dumps(obj) + "\n")
         proc.stdin.flush()
 
-    lines = None
-    if compat.WINDOWS:  # select() takes only sockets there: read on a thread instead
-        import queue
+    # Lines come off a thread, not select(): a readline() can pull two replies into the text stream's
+    # buffer, after which select() sees an empty pipe and the second reply would be lost.
+    lines: queue.Queue[str] = queue.Queue()
 
-        lines = queue.Queue()
+    def pump() -> None:
+        for text in iter(proc.stdout.readline, ""):
+            lines.put(text)
+        lines.put("")
 
-        def pump() -> None:
-            for text in iter(proc.stdout.readline, ""):
-                lines.put(text)
-            lines.put("")
-
-        threading.Thread(target=pump, daemon=True).start()
-
-    def next_line(left: float) -> str:
-        if lines is not None:
-            try:
-                return lines.get(timeout=left)
-            except queue.Empty:
-                return ""
-        ready, _, _ = select.select([proc.stdout], [], [], left)
-        return proc.stdout.readline() if ready else ""
+    threading.Thread(target=pump, daemon=True, name="codex-app-server").start()
 
     def wait_for(msg_id: int) -> dict | None:
         while True:
             left = deadline - time.monotonic()
             if left <= 0:
                 return None
-            line = next_line(left)
+            try:
+                line = lines.get(timeout=left)
+            except queue.Empty:
+                return None
             if not line:
                 return None
             try:
@@ -173,7 +150,7 @@ def app_server_call(exe: str, method: str, params: dict, timeout: float = APP_SE
         return None
     finally:
         try:
-            compat.kill(proc)  # the tree on Windows: a child left holding stdout would block the close below
+            proc.kill()
             proc.wait(timeout=2)
         except Exception:
             pass
@@ -404,7 +381,6 @@ class CodexBrain:
 
         subs = AgentTracker(turn, on_agent, model=self.cfg.model or "", effort=self.cfg.effort or "")
 
-        self._killed = False
         with self._lock:
             self._proc = subprocess.Popen(
                 self._command(),
@@ -492,7 +468,7 @@ class CodexBrain:
                 try:
                     proc.wait(timeout=0.5)
                 except subprocess.TimeoutExpired:
-                    compat.terminate(proc)
+                    proc.terminate()
                     try:
                         proc.wait(timeout=2)
                     except subprocess.TimeoutExpired:
@@ -521,12 +497,12 @@ class CodexBrain:
         diagnostic_text = "\n".join(diagnostics)
         if not completed and proc.returncode not in (0, None):
             turn.is_error = True
-            if proc.returncode < 0 or (compat.WINDOWS and self._killed):  # TerminateProcess leaves exit code 1
+            if proc.returncode < 0:
                 turn.error = "cancelled"
             else:
                 err_lines = [ln for ln in diagnostics if ln and "stdin" not in ln.lower()]
                 turn.error = turn.error or last_error or (err_lines[-1] if err_lines else f"codex exited with code {proc.returncode}")
-            if proc.returncode < 0 or (compat.WINDOWS and self._killed):  # TerminateProcess leaves exit code 1
+            if proc.returncode < 0:
                 turn.usage = turn.usage or self._cancelled_usage(turn, turn_id, fresh_thread=not requested)
             if "no rollout found" in (turn.error + diagnostic_text).lower() or "thread/resume" in diagnostic_text.lower():
                 self.session_id = None  # stale thread id: next turn starts clean
@@ -744,9 +720,8 @@ class CodexBrain:
             rpc.interrupt()  # the turn ends as `interrupted`; the process is killed if it lingers
             return
         if proc and proc.poll() is None:
-            self._killed = True
             try:
-                compat.terminate(proc)
+                proc.terminate()
                 proc.wait(timeout=3)
             except Exception:
                 proc.kill()

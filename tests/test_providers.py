@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import io
 import json
-import shutil
-import sys
 import tempfile
 import time
 import unittest
@@ -72,7 +70,7 @@ class _LingeringProcess(_Process):
 
 
 def _cfg(model="gpt-6-astra", effort="high"):
-    cfg = BrainConfig(model=model, effort=effort, mode="auto")  # auto is not the default everywhere (Windows)
+    cfg = BrainConfig(model=model, effort=effort)
     cfg.codex = CodexConfig()
     cfg.grok = GrokConfig(transport="headless")  # the grok -p stream tests; agent mode is tests/test_grok_acp.py
     return cfg
@@ -874,16 +872,6 @@ class ModeTests(unittest.TestCase):
         self.assertEqual(grok_sandbox(BrainConfig(mode="plan", grok=GrokConfig())), "read-only")
         self.assertEqual(grok_sandbox(BrainConfig(mode="auto", grok=GrokConfig(sandbox="workspace"))), "workspace")
 
-    def test_windows_deny_rules_reach_the_powershell_tool(self):
-        from vision import compat
-
-        cfg = BrainConfig(model="opus", mode="auto", denied_tools=["Bash(sudo:*)", "PowerShell(Clear-Disk:*)"])
-        for windows, expected in ((False, "Bash(sudo:*),PowerShell(Clear-Disk:*)"),
-                                  (True, "Bash(sudo:*),PowerShell(Clear-Disk:*),PowerShell(sudo:*)")):
-            with patch.object(compat, "WINDOWS", windows), patch("vision.brain.find_claude", return_value="claude"):
-                cmd = Brain(cfg)._command()
-            self.assertEqual(cmd[cmd.index("--disallowedTools") + 1], expected)
-
     def test_claude_fast_mode_is_session_scoped(self):
         brain = self._brain("auto")
         brain.cfg.fast = True
@@ -891,13 +879,10 @@ class ModeTests(unittest.TestCase):
         settings = json.loads(cmd[cmd.index("--settings") + 1])
         self.assertEqual(settings, {"fastMode": True})
 
-    def test_unknown_mode_falls_back_to_the_default(self):
-        from vision.config import DEFAULT_MODE
-
-        self.assertEqual(DEFAULT_MODE, "plan" if sys.platform == "win32" else "auto")
+    def test_unknown_mode_falls_back_to_auto(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "config.toml"
-            for written, read in (('"yolo"', DEFAULT_MODE), ('"Plan"', "plan"), ('" AUTO "', "auto")):
+            for written, read in (('"yolo"', "auto"), ('"Plan"', "plan"), ('" AUTO "', "auto")):
                 path.write_text(f"[brain]\nmode = {written}\n")
                 with patch("vision.config.CONFIG_PATH", path), patch("vision.config.ensure_dirs"):
                     self.assertEqual(load_config().brain.mode, read)
@@ -1713,8 +1698,7 @@ class BrainEnvTests(unittest.TestCase):
                 self.assertNotEqual(env.get(kept), empty)
             self.assertEqual(env["GROK_MEMORY"], "0")  # last env is grok
             for name in ("claude", "codex", "grok"):
-                exe = shutil.which(name, path=env["PATH"]) or name  # Windows ignores env's PATH when looking up the command
-                r = subprocess.run([exe, "-p", "hi"], env=env, capture_output=True, text=True)
+                r = subprocess.run([name, "-p", "hi"], env=env, capture_output=True, text=True)
                 self.assertEqual(r.returncode, 1)
                 self.assertIn("blocked by Vision", r.stderr)
                 self.assertIn("/model", r.stderr)
@@ -1723,7 +1707,6 @@ class BrainEnvTests(unittest.TestCase):
         from vision.persona import system_prompt
 
         denied = BrainConfig().denied_tools
-        self.assertEqual("Bash(diskpart:*)" in denied, sys.platform == "win32")
         self.assertIn("Bash(claude:*)", denied)
         self.assertIn("Bash(codex:*)", denied)
         self.assertIn("Bash(grok:*)", denied)

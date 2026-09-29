@@ -19,7 +19,7 @@ import dataclasses
 import threading
 from datetime import datetime
 
-from vision import compat, routing
+from vision import routing
 from vision.brain import AgentRun, BrainError, Turn, brain_env, create_brain, find_claude, local_handoff
 from vision.config import Config
 from vision.delegation import TASK_SCHEMA, build_task, validate_task, worker_choice
@@ -394,8 +394,7 @@ class ClaudeConversation:
         return cmd
 
     def _start(self, command):
-        # On Windows a directory still open in a dying process cannot be removed yet; leave it to %TEMP%.
-        cwd = tempfile.TemporaryDirectory(prefix="vision-conversation-", ignore_cleanup_errors=compat.WINDOWS)
+        cwd = tempfile.TemporaryDirectory(prefix="vision-conversation-")
         try:
             proc = subprocess.Popen(
                 command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -442,7 +441,7 @@ class ClaudeConversation:
                 return
             try:
                 if proc.poll() is None:
-                    compat.terminate(proc)
+                    proc.terminate()
                     try:
                         proc.wait(timeout=1)
                     except subprocess.TimeoutExpired:

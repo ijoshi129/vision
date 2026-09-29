@@ -59,7 +59,6 @@ class ProcTitleTests(unittest.TestCase):
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.split()
         self.assertEqual(out, ["True", "b'\\x00'", "vision"])
 
-    @unittest.skipIf(sys.platform == "win32", "Windows reads command lines through compat, not /proc")
     def test_cuda_names_a_blank_cmdline_by_comm(self):
         from vision.cuda import cmdline, holder_name
 

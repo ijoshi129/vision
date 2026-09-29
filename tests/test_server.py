@@ -4,7 +4,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -37,14 +36,13 @@ class UploadTests(unittest.TestCase):
         hub = SimpleNamespace(authorized=lambda token: token == "image-test", log=lambda _: None)
         client = TestClient(server.create_app(hub))
         auth = {"Authorization": "Bearer image-test"}
-        tmp = tempfile.gettempdir() if sys.platform == "win32" else "/tmp"
-        with tempfile.NamedTemporaryFile(suffix=".png", dir=tmp, delete=False) as f:  # Windows can't reopen an open temp file
+        with tempfile.NamedTemporaryFile(suffix=".png", dir="/tmp") as f:
             f.write(b"png bytes")
-        self.addCleanup(os.unlink, f.name)
-        ok = client.get("/image", params={"path": f.name}, headers=auth)
-        self.assertEqual((ok.status_code, ok.content, ok.headers["content-type"]), (200, b"png bytes", "image/png"))
-        self.assertEqual(client.get("/image", params={"path": f.name}).status_code, 401)
-        with tempfile.NamedTemporaryFile(suffix=".txt", dir=tmp) as f:
+            f.flush()
+            ok = client.get("/image", params={"path": f.name}, headers=auth)
+            self.assertEqual((ok.status_code, ok.content, ok.headers["content-type"]), (200, b"png bytes", "image/png"))
+            self.assertEqual(client.get("/image", params={"path": f.name}).status_code, 401)
+        with tempfile.NamedTemporaryFile(suffix=".txt", dir="/tmp") as f:
             self.assertEqual(client.get("/image", params={"path": f.name}, headers=auth).status_code, 404)
         self.assertEqual(client.get("/image", params={"path": "/tmp/../etc/passwd"}, headers=auth).status_code, 404)
         self.assertFalse(server.image_path_allowed(__import__("pathlib").Path("/usr/share/pixmaps/x.png")))
@@ -141,8 +139,7 @@ class TokenTests(unittest.TestCase):
             with patch.object(server, "TOKEN_FILE", server.TOKEN_FILE.__class__(path)), patch.object(server, "CONFIG_DIR", server.CONFIG_DIR.__class__(d)):
                 first = server.load_token()
                 self.assertGreaterEqual(len(first), 30)
-                if os.name == "posix":  # Windows has no mode bits; the file inherits the folder's ACL
-                    self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+                self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
                 self.assertEqual(server.load_token(), first)
                 self.assertNotEqual(server.load_token(regenerate=True), first)
 
@@ -435,16 +432,3 @@ class DefaultsEndpointTests(unittest.TestCase):
                 self.assertEqual(tc.post("/defaults", json={"model": "nope"}, headers=auth).status_code, 400)
                 self.assertEqual(tc.get("/defaults").status_code, 401)
 
-
-@unittest.skipUnless(sys.platform == "win32", "the Windows launch path")
-class OpenTerminalWindowsTests(unittest.TestCase):
-    def test_windows_terminal_then_a_console_of_its_own(self):
-        found = {"vision": r"C:\v\vision.CMD", "wt": r"C:\w\wt.exe"}
-        with tempfile.TemporaryDirectory() as cwd, patch("shutil.which", lambda name: found.get(name)), \
-                patch("subprocess.Popen") as popen:
-            self.assertEqual(server.open_terminal("abc123", cwd), "wt")
-            self.assertEqual(popen.call_args.args[0], [r"C:\w\wt.exe", "-d", cwd, r"C:\v\vision.CMD", "--join", "abc123"])
-            del found["wt"]
-            self.assertEqual(server.open_terminal("abc123", cwd), "console")
-            self.assertEqual(popen.call_args.args[0], [r"C:\v\vision.CMD", "--join", "abc123"])
-            self.assertEqual(popen.call_args.kwargs["creationflags"], subprocess.CREATE_NEW_CONSOLE)

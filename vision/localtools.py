@@ -25,8 +25,6 @@ import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 
-from vision import compat
-
 MAX_OUTPUT = 8_000  # characters of one tool result the model gets back (head and tail of anything longer)
 HISTORY_OUTPUT = 1_500  # what a result shrinks to once the turn is over and it sits in the transcript
 READ_LINES = 400  # default lines per Read
@@ -206,19 +204,16 @@ def _bash(args: dict, workdir: str, rules: list[str] | None, holder: dict, lock:
         timeout = min(float(args.get("timeout_s") or BASH_TIMEOUT), BASH_TIMEOUT)
     except (TypeError, ValueError):
         timeout = BASH_TIMEOUT
-    shell = compat.bash()
-    if shell is None:
-        return "Error: no bash here. On Windows, Vision runs commands with Git for Windows' bash.exe; install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH.", True
     with lock:
         if holder.get("cancelled"):
             return "Error: cancelled.", True
-        proc = subprocess.Popen([shell, "-c", command], cwd=workdir, env=brain_env("local"), stdin=subprocess.DEVNULL,
+        proc = subprocess.Popen(["bash", "-c", command], cwd=workdir, env=brain_env("local"), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", encoding="utf-8")
         holder["proc"] = proc
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        compat.kill(proc)
+        proc.kill()
         out, _ = proc.communicate()
         return clip((out or "") + f"\nError: the command did not finish within {timeout:.0f} s and was killed."), True
     finally:

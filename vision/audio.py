@@ -100,8 +100,6 @@ def _to_float(frames: list[bytes]) -> np.ndarray:
 
 
 class Microphone:
-    _echo = None  # the echo canceller (vision/echo.py), set in __init__ when it is on
-
     def __init__(self, cfg: ListenConfig):
         self.cfg = cfg
         self.device = resolve_device(cfg.input_device, "input")
@@ -113,13 +111,6 @@ class Microphone:
         self.frame_len = self._vad.frame_len
         self.frame_ms = self.frame_len * 1000 / SAMPLE_RATE
         self.name = self._describe()
-        from vision import echo
-
-        self._echo = echo.get(getattr(cfg, "echo_cancel", "auto"))  # None: audio passes through as captured
-
-    def clean(self, pcm: bytes) -> bytes:
-        """A captured frame with Vision's own voice taken out, when echo cancellation is on."""
-        return self._echo.cleaned(pcm) if self._echo is not None else pcm
 
     def _describe(self) -> str:
         spec = self.cfg.input_device
@@ -141,16 +132,10 @@ class Microphone:
         import sounddevice as sd
 
         with self.device.opening():
-            stream = sd.InputStream(
+            return sd.InputStream(
                 samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=self.frame_len, device=self.device.index,
                 callback=callback,
             )
-        if self._echo is not None:
-            try:
-                self._echo.input_latency_s = max(0.0, float(stream.latency))
-            except (TypeError, ValueError):
-                pass
-        return stream
 
     def _frames(self, stop: threading.Event | None = None):
         """Yield int16 frames as they arrive, until `stop` is set.
@@ -177,7 +162,7 @@ class Microphone:
                         )
                     continue
                 last = time.monotonic()
-                yield self.clean(pcm)
+                yield pcm
 
     # The VAD, for callers that run their own capture loop (the wake-word listener).
     def vad_reset(self) -> None:

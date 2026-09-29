@@ -48,25 +48,3 @@ class VoiceStyleSelectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-@unittest.skipUnless(__import__("sys").platform == "win32", "the Windows path of _quiet")
-class QuietWindowsTests(unittest.TestCase):
-    def test_streams_and_std_handles_come_back(self):
-        import ctypes
-        import sys
-        from ctypes import wintypes
-
-        from vision.tts import _quiet
-
-        kernel32 = ctypes.WinDLL("kernel32")
-        kernel32.GetStdHandle.restype = wintypes.HANDLE
-        std_out = wintypes.DWORD(-11).value
-        stdout, stderr, handle = sys.stdout, sys.stderr, kernel32.GetStdHandle(std_out)
-        with _quiet():
-            print("hidden")
-            self.assertIsNot(sys.stdout, stdout)
-            self.assertNotEqual(kernel32.GetStdHandle(std_out), handle)  # children inherit NUL meanwhile
-        self.assertIs(sys.stdout, stdout)
-        self.assertIs(sys.stderr, stderr)
-        self.assertEqual(kernel32.GetStdHandle(std_out), handle)

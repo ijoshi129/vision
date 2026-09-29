@@ -2,15 +2,7 @@
 from __future__ import annotations
 
 import platform
-import sys
 from datetime import datetime
-
-_NO_ROOT = (
-    "You are not an administrator; if a step needs admin rights, give the user the exact command to run in an "
-    "elevated terminal."
-    if sys.platform == "win32" else
-    "You have no sudo; if a step needs root, give the user the exact command to run."
-)
 
 
 def _tool_notes(
@@ -35,15 +27,7 @@ def _tool_notes(
         )
     if workdir:
         lines.append(f"Your working directory is {workdir}. Relative paths the user gives are relative to it.")
-    if (tools or not p.vision_runs_tools) and sys.platform == "win32":
-        lines.append(
-            "To show the user a picture (a mock, a render, a chart, a font specimen, a screenshot), save it as PNG or "
-            "JPEG and put `![short caption](C:/absolute/path.png)` (forward slashes) on its own line in your reply: the "
-            "terminal links it. Render HTML or SVG first with `msedge --headless --screenshot=out.png "
-            "--window-size=1280,900 file:///C:/abs/page.html`. Only for pictures you mean them to look at; mention other "
-            "files by path as usual."
-        )
-    elif tools or not p.vision_runs_tools:
+    if tools or not p.vision_runs_tools:
         lines.append(
             "To show the user a picture (a mock, a render, a chart, a font specimen, a screenshot), save it as PNG or "
             "JPEG and put `![short caption](/absolute/path.png)` on its own line in your reply: the iPhone app shows it "
@@ -89,7 +73,7 @@ def claude_tool_notes(tools: list[str], sandbox: str, denied_tools: list[str] | 
             "You can run shell commands with Bash: use it for anything the user asks that a terminal can do, "
             "including deleting files (rm) and moving them. Say in one short line what you are about to do before "
             "commands that delete, overwrite or change system state; for bulk or irreversible deletions, ask first. "
-            + _NO_ROOT
+            "You have no sudo; if a step needs root, give the user the exact command to run."
         )
     if "Write" in tools or "Edit" in tools:
         lines.append("You can create and edit files directly with Write and Edit; do so rather than pasting content for the user to copy.")
@@ -177,11 +161,6 @@ def local_tool_notes(tools: list[str], sandbox: str, denied_tools: list[str] | N
         if "Bash" in tools else
         "You have no shell in plan mode: read files with Read as needed and present the plan in your reply."
     )
-    if "Bash" in tools and sys.platform == "win32":
-        lines.append(
-            "Bash is Git Bash on Windows: it prints paths POSIX-style (/c/Users/..., and the temp folder as /tmp), "
-            "while Read, Write and Edit take Windows paths (C:/Users/...). Convert with `cygpath -w <path>` or `pwd -W`."
-        )
     if "WebSearch" in tools or "WebFetch" in tools:
         lines.append(
             ("WebSearch finds pages (titles, links, snippets) and " if "WebSearch" in tools else "")
@@ -195,7 +174,8 @@ def local_tool_notes(tools: list[str], sandbox: str, denied_tools: list[str] | N
     if "Bash" in tools:
         lines.append(
             "Say in one short line what you are about to do before commands that delete, overwrite or change "
-            "system state; for bulk or irreversible deletions, ask first. " + _NO_ROOT
+            "system state; for bulk or irreversible deletions, ask first. You have no sudo; if a step needs "
+            "root, give the user the exact command to run."
         )
     if denied_tools and "Bash" in tools:
         lines.append(

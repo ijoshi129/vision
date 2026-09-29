@@ -48,7 +48,6 @@ import secrets
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections import deque
@@ -80,8 +79,6 @@ def open_terminal(chat_id: str, workdir: str) -> str:
     cmd = f"{vision} --join {chat_id}"
     cwd = workdir if workdir and os.path.isdir(workdir) else os.path.expanduser("~")
     env = os.environ
-    if sys.platform == "win32":
-        return _open_terminal_windows(vision, chat_id, cwd)
     if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
         raise RuntimeError("vision serve is not running in a desktop session, so it cannot open a window")
     candidates = [
@@ -144,17 +141,6 @@ def focus_terminal(pid: int) -> bool:
     return r.returncode == 0 and r.stdout.strip() == "ok"
 
 
-def _open_terminal_windows(vision: str, chat_id: str, cwd: str) -> str:
-    """Windows Terminal when it is installed, else a console window of its own. The chat id is the
-    server's own hex, so nothing from the phone reaches the command line."""
-    wt = shutil.which("wt")
-    if wt:
-        subprocess.Popen([wt, "-d", cwd, vision, "--join", chat_id], cwd=cwd, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return "wt"
-    subprocess.Popen([vision, "--join", chat_id], cwd=cwd, creationflags=subprocess.CREATE_NEW_CONSOLE)
-    return "console"
-
 IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".heic": "image/heic", ".webp": "image/webp", ".gif": "image/gif"}
 VIDEO_TYPES = {".mp4", ".mov", ".m4v"}
 MAX_FILE_BYTES = 100 * 1024 * 1024   # any other file from the phone's Files picker; brains open it with their tools
@@ -198,9 +184,8 @@ def with_attachments(text: str, images) -> str:
 
 
 def image_path_allowed(path: Path) -> bool:
-    """Reply pictures come from the home folder or /tmp (Windows: the temp folder), never the rest of the system."""
-    tmp = Path(tempfile.gettempdir()) if sys.platform == "win32" else Path("/tmp")
-    return any(path.is_relative_to(root) for root in (Path.home().resolve(), tmp.resolve()))
+    """Reply pictures come from the home folder or /tmp, never the rest of the system."""
+    return any(path.is_relative_to(root) for root in (Path.home().resolve(), Path("/tmp").resolve()))
 
 
 def clock(seconds: float) -> str:
@@ -2003,7 +1988,7 @@ def watch_keys(hub: "Hub", on_clear):
     """`r` asks for a graceful restart and `c` clears the window (on_clear redraws the one-line
     banner), read a key at a time off a terminal. Returns what puts the terminal back as it was
     (a no-op when stdin is not a terminal)."""
-    if not sys.stdin.isatty() or os.name == "nt":
+    if not sys.stdin.isatty():
         return lambda: None
     import termios
     import tty

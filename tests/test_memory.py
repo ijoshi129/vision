@@ -72,7 +72,7 @@ class MemoryTests(unittest.TestCase):
         from vision.codex import CodexBrain, toml_str
         from vision.config import BrainConfig
 
-        cfg = BrainConfig(mode="auto")  # plan mode (Windows' default) would make it read-only
+        cfg = BrainConfig()
         cfg.codex.sandbox = "workspace-write"
         with mock.patch("vision.codex.find_codex", return_value="/fake/codex"):
             brain = CodexBrain(cfg, voice_mode=False)

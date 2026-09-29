@@ -192,7 +192,7 @@ class CdTargetTests(unittest.TestCase):
 
     def test_home_and_previous(self):
         self.assertEqual(_cd_target("~", self.root, None), os.path.expanduser("~"))
-        self.assertEqual(_cd_target("-", self.root, "/"), os.path.normpath("/"))
+        self.assertEqual(_cd_target("-", self.root, "/"), "/")
         with self.assertRaisesRegex(ValueError, "no previous directory"):
             _cd_target("-", self.root, None)
 

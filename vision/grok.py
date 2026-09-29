@@ -33,7 +33,6 @@ from typing import TYPE_CHECKING
 
 from rich.text import Text
 
-from vision import compat
 from vision import usage as usage_ui
 from vision.brain import context_read
 from vision.config import STATE_DIR, BrainConfig, weather_ready
@@ -86,8 +85,6 @@ class GrokError(RuntimeError):
 
 def find_grok() -> str:
     exe = shutil.which("grok")
-    if exe and compat.is_batch_file(exe):
-        raise GrokError(f"Found Grok as {exe}, a .cmd launcher, which cannot pass Vision's multi-line instructions safely. Install the native grok.exe.")
     if exe:
         return exe
     home = os.path.expanduser(os.environ.get("GROK_HOME", "~/.grok"))
@@ -393,8 +390,7 @@ class GrokBrain:
         if self.cfg.effort:
             cmd += ["--effort", self.cfg.effort]
         for rule in self.cfg.denied_tools or []:
-            if not rule.startswith("PowerShell("):  # Claude Code's Windows shell; Grok has no such tool
-                cmd += ["--deny", rule]
+            cmd += ["--deny", rule]
         if self.task_mode:
             from vision.delegation import RESULT_SCHEMA
 
@@ -424,14 +420,6 @@ class GrokBrain:
             return turn
         env = brain_env("grok")
         sandbox = sandbox_for(self.cfg)
-        if compat.WINDOWS and sandbox != "off":
-            # Grok always runs with --always-approve and leaves every limit to its kernel sandbox, which
-            # is Linux/macOS machinery. Refuse rather than run "read-only" with nothing enforcing it.
-            turn.is_error = True
-            turn.error = (f"Grok's {sandbox} sandbox is not available on Windows, so Vision will not run Grok "
-                          + ("in plan mode. Switch to auto (Shift-Tab) or use Claude for planning."
-                             if self.cfg.mode == "plan" else "with it. Set [grok] sandbox = \"off\" to run Grok unrestricted."))
-            return turn
         if self._transport() != "headless" and not self.task_mode:
             from vision.grok_acp import run_turn
 
@@ -461,7 +449,6 @@ class GrokBrain:
                 pass
             raise
 
-        self._killed = False
         with self._lock:
             self._proc = subprocess.Popen(
                 self._command(prompt_path),
@@ -544,7 +531,7 @@ class GrokBrain:
                 try:
                     proc.wait(timeout=0.5)
                 except subprocess.TimeoutExpired:
-                    compat.terminate(proc)
+                    proc.terminate()
                     try:
                         proc.wait(timeout=2)
                     except subprocess.TimeoutExpired:
@@ -572,7 +559,7 @@ class GrokBrain:
         err_blob = f"{turn.error} {diagnostic_text}".lower()
         if not completed and proc.returncode not in (0, None):
             turn.is_error = True
-            if proc.returncode in (-15, -9, 130, 143) or proc.returncode < 0 or (compat.WINDOWS and self._killed):
+            if proc.returncode in (-15, -9, 130, 143) or proc.returncode < 0:
                 turn.error = "cancelled"
             else:
                 err_lines = [ln for ln in diagnostics if ln]
@@ -666,9 +653,8 @@ class GrokBrain:
             rpc.interrupt()
             return
         if proc and proc.poll() is None:
-            self._killed = True
             try:
-                compat.terminate(proc)
+                proc.terminate()
                 proc.wait(timeout=3)
             except Exception:
                 proc.kill()
